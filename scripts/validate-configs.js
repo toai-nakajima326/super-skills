@@ -68,7 +68,7 @@ ensureTomlLike(path.join(ROOT, ".codex", "config.toml"), [
 ensureTomlLike(path.join(ROOT, ".codex", "agents", "explorer.toml"), ["sandbox_mode", "developer_instructions"]);
 ensureTomlLike(path.join(ROOT, ".codex", "agents", "reviewer.toml"), ["sandbox_mode", "developer_instructions"]);
 ensureTomlLike(path.join(ROOT, ".codex", "agents", "docs-researcher.toml"), ["sandbox_mode", "developer_instructions"]);
-ensureFile(path.join(ROOT, ".claude", "AGENTS.md"));
+ensureFile(path.join(ROOT, "plugins", "claude", "templates", "AGENTS.md"));
 
 const skillDirs = fs
   .readdirSync(path.join(ROOT, "skills"), { withFileTypes: true })

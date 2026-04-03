@@ -1,3 +1,6 @@
 .worktrees/
 node_modules/
-
+.agents/
+.claude/
+.super-skills/
+ref/

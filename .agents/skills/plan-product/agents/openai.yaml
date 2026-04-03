@@ -1,6 +1,0 @@
-interface:
-  display_name: "Plan Product"
-  short_description: "Product framing workflow that merges founder, design, and wedge-definition review. Use for early product strategy,..."
-  default_prompt: "Use Plan Product for this task."
-policy:
-  allow_implicit_invocation: true

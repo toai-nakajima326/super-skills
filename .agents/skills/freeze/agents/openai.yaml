@@ -1,6 +1,0 @@
-interface:
-  display_name: "Freeze"
-  short_description: "Scoped-edit workflow that restricts edits to an approved directory boundary. Use during debugging or sensitive..."
-  default_prompt: "Use Freeze for this task."
-policy:
-  allow_implicit_invocation: true

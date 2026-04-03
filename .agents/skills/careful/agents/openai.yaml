@@ -1,6 +1,0 @@
-interface:
-  display_name: "Careful"
-  short_description: "Destructive-action warning workflow. Use when operations may delete files, rewrite git history, discard changes, or..."
-  default_prompt: "Use Careful for this task."
-policy:
-  allow_implicit_invocation: true

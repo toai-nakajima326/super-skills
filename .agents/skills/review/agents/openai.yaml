@@ -1,6 +1,0 @@
-interface:
-  display_name: "Review"
-  short_description: "Findings-first code review workflow focused on correctness, regressions, trust boundaries, and missing tests. Use..."
-  default_prompt: "Use Review for this task."
-policy:
-  allow_implicit_invocation: true

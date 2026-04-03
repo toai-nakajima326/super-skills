@@ -1,6 +1,0 @@
-interface:
-  display_name: "Exa Search"
-  short_description: "Exa-backed search workflow for web, company, and technical discovery tasks. Use when broad external search is needed..."
-  default_prompt: "Use Exa Search for this task."
-policy:
-  allow_implicit_invocation: true

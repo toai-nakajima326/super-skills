@@ -1,6 +1,0 @@
-interface:
-  display_name: "Checkpoint"
-  short_description: "Checkpoint workflow for capturing current state, decisions, and remaining work. Use before context switching,..."
-  default_prompt: "Use Checkpoint for this task."
-policy:
-  allow_implicit_invocation: true

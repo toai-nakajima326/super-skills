@@ -1,6 +1,0 @@
-interface:
-  display_name: "Health Check"
-  short_description: "Repository health workflow for build, lint, type, test, and security status. Use to assess codebase readiness, run..."
-  default_prompt: "Use Health Check for this task."
-policy:
-  allow_implicit_invocation: true
