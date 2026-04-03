@@ -164,7 +164,7 @@
       "kind": "authored",
       "description": "Claude baseline AGENTS guidance for the shared skill set.",
       "sourcePaths": [
-        ".claude/AGENTS.md"
+        "plugins/claude/templates/AGENTS.md"
       ],
       "generatedPaths": [],
       "riskLevel": "low",
@@ -178,7 +178,7 @@
           "operations": [
             {
               "type": "copy",
-              "from": ".claude/AGENTS.md",
+              "from": "plugins/claude/templates/AGENTS.md",
               "to": ".claude/AGENTS.md"
             }
           ]

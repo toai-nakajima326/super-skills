@@ -6,7 +6,7 @@ Claude support is now grounded around a real target layout:
 
 - shared authored skills in `skills/`
 - generated Claude-ready skills in `.claude/skills/`
-- Claude host guidance in `.claude/AGENTS.md`
+- Claude host guidance template in `plugins/claude/templates/AGENTS.md`
 
 This adapter directory remains intentionally thin and exists for host-specific notes and reminder-only hook templates.
 
@@ -30,7 +30,7 @@ This adapter directory remains intentionally thin and exists for host-specific n
 The installer should treat Claude support as:
 
 - `full` for `.claude/skills`
-- `full` for `.claude/AGENTS.md`
+- `full` for `.claude/AGENTS.md`, generated from `plugins/claude/templates/AGENTS.md`
 - `full` for `.claude/plugins/super-skills` when `plugin:claude` is selected
 - opt-in for hook activation
 
