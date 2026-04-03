@@ -1,0 +1,6 @@
+interface:
+  display_name: "Api Design"
+  short_description: "API design guidance for resources, validation, error envelopes, pagination, and compatibility. Use when defining or..."
+  default_prompt: "Use Api Design for this task."
+policy:
+  allow_implicit_invocation: true

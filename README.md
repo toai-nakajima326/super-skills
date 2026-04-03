@@ -41,8 +41,8 @@ These are references and inspirations, not bundled runtime dependencies.
 ## Repository Layout
 
 - `skills/`: authored source-of-truth skills
-- `.agents/skills/`: generated Codex-facing skills, not committed
-- `.claude/skills/`: generated Claude-facing skills, not committed
+- `.agents/skills/`: generated Codex-facing skills, committed as a fresh-checkout baseline
+- `.claude/skills/`: generated Claude-facing skills, committed as a fresh-checkout baseline
 - `.codex/`: repository-authored Codex runtime baseline
 - `mcp/`: MCP catalog and profiles
 - `plugins/`: host-specific adapters and templates
@@ -50,7 +50,7 @@ These are references and inspirations, not bundled runtime dependencies.
 - `scripts/`: generators, validators, and installer tooling
 - `docs/`: architecture, spec, plan, and security review
 
-Generated and install-output directories are intentionally not tracked. Shared authored inputs live in `skills/`, `.codex/`, `plugins/`, `manifests/`, and `scripts/`.
+Generated host payloads are committed so fresh checkouts retain local skill discovery in Codex and Claude. When `skills/` changes, regenerate `.agents/skills/` and `.claude/skills/` before committing. Install-output directories such as `.claude/plugins/` and `.super-skills/` remain untracked.
 
 ## Core Skills
 
@@ -92,6 +92,8 @@ Build generated artifacts:
 node scripts/build-skills.js
 node scripts/build-claude-skills.js
 ```
+
+Fresh checkouts already include the committed generated host payloads. Re-run the generators after editing `skills/` or when you want to refresh the checked-in baseline.
 
 Validate repository state:
 

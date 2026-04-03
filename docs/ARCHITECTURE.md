@@ -12,11 +12,11 @@ Super Skills separates authored workflow content from generated harness-specific
 
 ### 2. Generated Codex artifacts
 
-`.agents/skills/<name>/` is generated from `skills/`. It mirrors the skill content and adds `agents/openai.yaml` metadata for Codex discovery. This directory is generated and should not be committed.
+`.agents/skills/<name>/` is generated from `skills/`. It mirrors the skill content and adds `agents/openai.yaml` metadata for Codex discovery. These generated artifacts are committed as a repository-local baseline so fresh checkouts preserve Codex skill discovery.
 
 ### 3. Generated Claude artifacts
 
-`.claude/skills/<name>/` is generated from `skills/` for Claude Code installs. This directory is also generated and should not be committed.
+`.claude/skills/<name>/` is generated from `skills/` for Claude Code installs. These generated artifacts are also committed so a fresh checkout preserves Claude-side skill discovery before any manual install step runs.
 
 ### 4. Runtime configuration
 

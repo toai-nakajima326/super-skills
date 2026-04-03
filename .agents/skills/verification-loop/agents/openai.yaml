@@ -1,0 +1,6 @@
+interface:
+  display_name: "Verification Loop"
+  short_description: "Verification workflow for build, lint, types, tests, and security checks. Use after meaningful code changes and..."
+  default_prompt: "Use Verification Loop for this task."
+policy:
+  allow_implicit_invocation: true

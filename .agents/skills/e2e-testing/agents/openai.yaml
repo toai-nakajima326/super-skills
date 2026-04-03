@@ -1,0 +1,6 @@
+interface:
+  display_name: "E2e Testing"
+  short_description: "End-to-end testing workflow for critical user flows using browser automation. Use when validating full-stack..."
+  default_prompt: "Use E2e Testing for this task."
+policy:
+  allow_implicit_invocation: true
