@@ -1,0 +1,6 @@
+interface:
+  display_name: "Backend Patterns"
+  short_description: "Backend architecture and API design guidance for service boundaries, validation, persistence, and caching. Use when..."
+  default_prompt: "Use Backend Patterns for this task."
+policy:
+  allow_implicit_invocation: true

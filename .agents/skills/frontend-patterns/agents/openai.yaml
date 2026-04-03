@@ -1,0 +1,6 @@
+interface:
+  display_name: "Frontend Patterns"
+  short_description: "Frontend architecture guidance for component structure, state, accessibility, and UI behavior. Use when building or..."
+  default_prompt: "Use Frontend Patterns for this task."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,9 @@
+{
+  "id": "research",
+  "description": "External research and documentation retrieval. Intended for tasks that need current or primary-source web context.",
+  "default_enabled": false,
+  "server_ids": [
+    "context7",
+    "exa"
+  ]
+}

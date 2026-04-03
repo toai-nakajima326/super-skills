@@ -43,6 +43,8 @@ Adopt ECC's modular manifests, install profiles, Codex config structure, and age
 
 The repository should treat human-authored `skills/` as the source of truth and generate Codex-facing `.agents/skills/` metadata from that source.
 
+The same shared `skills/` source should also be installable for Claude Code without forking workflow content. Claude support should package shared skills into a Claude-native directory layout rather than maintaining a second authored skill tree.
+
 ### 4. Security-first defaults
 
 No auto-executing telemetry, auto-upgrade, auto-commit, auto-routing injection, or broad MCP enablement should be enabled by default.
@@ -155,6 +157,16 @@ Generate Codex-facing artifacts in:
   agents/openai.yaml
 ```
 
+Generate Claude-facing artifacts in:
+
+```text
+.claude/skills/<skill-name>/
+  SKILL.md
+  assets/...            optional
+  references/...        optional
+  scripts/...           optional
+```
+
 ### Runtime config
 
 Keep Codex runtime defaults in:
@@ -167,6 +179,14 @@ Keep Codex runtime defaults in:
     explorer.toml
     reviewer.toml
     docs-researcher.toml
+```
+
+Keep Claude runtime guidance in:
+
+```text
+.claude/
+  AGENTS.md
+  skills/
 ```
 
 ### MCP layout
@@ -274,7 +294,7 @@ The installer should support at least these targets:
 - `opencode`
 - `cursor`
 
-The first implementation may fully support `codex` and provide scaffold-level support for the others.
+The first implementation must fully support `codex` and `claude`. Other targets may remain scaffold-level initially.
 
 ### Installer profiles
 

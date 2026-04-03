@@ -1,0 +1,405 @@
+{
+  "version": 1,
+  "supportedTargets": [
+    "codex",
+    "claude",
+    "opencode",
+    "cursor"
+  ],
+  "componentFamilies": [
+    "baseline",
+    "workflow",
+    "capability",
+    "agent",
+    "mcp",
+    "plugin",
+    "target"
+  ],
+  "components": [
+    {
+      "id": "baseline:skills",
+      "family": "baseline",
+      "description": "Core workflow and knowledge skills as installable content.",
+      "targets": [
+        "codex",
+        "claude",
+        "opencode",
+        "cursor"
+      ],
+      "modules": [
+        "module:skills-core-generated",
+        "module:skills-knowledge-generated"
+      ],
+      "riskLevel": "low",
+      "requiresExplicitOptIn": false,
+      "generatedSemantics": "Generated target skill payloads are rebuilt from authored source skills."
+    },
+    {
+      "id": "baseline:codex",
+      "family": "baseline",
+      "description": "Codex baseline runtime files including AGENTS, role configs, and config generation.",
+      "targets": [
+        "codex"
+      ],
+      "modules": [
+        "module:codex-baseline",
+        "module:codex-agent-roles",
+        "module:codex-config-core"
+      ],
+      "riskLevel": "low",
+      "requiresExplicitOptIn": false,
+      "generatedSemantics": "Config fragments may be regenerated safely."
+    },
+    {
+      "id": "workflow:investigate",
+      "family": "workflow",
+      "description": "Root-cause-first debugging and investigation workflow.",
+      "targets": [
+        "codex",
+        "claude",
+        "opencode",
+        "cursor"
+      ],
+      "modules": [
+        "module:skills-core-generated"
+      ],
+      "riskLevel": "low",
+      "requiresExplicitOptIn": false,
+      "generatedSemantics": "Selected skill artifacts are generated into target-specific skill directories."
+    },
+    {
+      "id": "workflow:review",
+      "family": "workflow",
+      "description": "Findings-first review workflow for correctness and regression risk.",
+      "targets": [
+        "codex",
+        "claude",
+        "opencode",
+        "cursor"
+      ],
+      "modules": [
+        "module:skills-core-generated"
+      ],
+      "riskLevel": "low",
+      "requiresExplicitOptIn": false,
+      "generatedSemantics": "Selected skill artifacts are generated into target-specific skill directories."
+    },
+    {
+      "id": "workflow:qa",
+      "family": "workflow",
+      "description": "Browser QA and report-only versus fix-capable testing workflows.",
+      "targets": [
+        "codex",
+        "claude",
+        "opencode",
+        "cursor"
+      ],
+      "modules": [
+        "module:skills-core-generated"
+      ],
+      "riskLevel": "medium",
+      "requiresExplicitOptIn": false,
+      "generatedSemantics": "Selected skill artifacts are generated into target-specific skill directories."
+    },
+    {
+      "id": "workflow:ship-release",
+      "family": "workflow",
+      "description": "Release preparation workflow that keeps review and verification explicit.",
+      "targets": [
+        "codex",
+        "claude",
+        "opencode",
+        "cursor"
+      ],
+      "modules": [
+        "module:skills-core-generated"
+      ],
+      "riskLevel": "medium",
+      "requiresExplicitOptIn": false,
+      "generatedSemantics": "Selected skill artifacts are generated into target-specific skill directories."
+    },
+    {
+      "id": "workflow:safety",
+      "family": "workflow",
+      "description": "Guarded workflows for destructive actions, freeze, careful, and checkpoint flows.",
+      "targets": [
+        "codex",
+        "claude",
+        "opencode",
+        "cursor"
+      ],
+      "modules": [
+        "module:skills-core-generated"
+      ],
+      "riskLevel": "low",
+      "requiresExplicitOptIn": false,
+      "generatedSemantics": "Selected skill artifacts are generated into target-specific skill directories."
+    },
+    {
+      "id": "capability:engineering",
+      "family": "capability",
+      "description": "Engineering knowledge packs such as coding standards, backend patterns, API design, and verification.",
+      "targets": [
+        "codex",
+        "claude",
+        "opencode",
+        "cursor"
+      ],
+      "modules": [
+        "module:skills-knowledge-generated"
+      ],
+      "riskLevel": "low",
+      "requiresExplicitOptIn": false,
+      "generatedSemantics": "Generated skill payloads may be rebuilt from source skills."
+    },
+    {
+      "id": "capability:security",
+      "family": "capability",
+      "description": "Security review, guarded defaults, and secure validation capabilities.",
+      "targets": [
+        "codex",
+        "claude",
+        "opencode",
+        "cursor"
+      ],
+      "modules": [
+        "module:skills-core-generated"
+      ],
+      "riskLevel": "medium",
+      "requiresExplicitOptIn": false,
+      "generatedSemantics": "Security skill payloads are generated; MCP additions remain opt-in."
+    },
+    {
+      "id": "capability:research",
+      "family": "capability",
+      "description": "Research-oriented skills and MCP profile content for documentation and Exa-driven workflows.",
+      "targets": [
+        "codex",
+        "claude",
+        "opencode",
+        "cursor"
+      ],
+      "modules": [
+        "module:skills-knowledge-generated"
+      ],
+      "riskLevel": "medium",
+      "requiresExplicitOptIn": true,
+      "generatedSemantics": "Research skills are generated; networked MCP capabilities remain explicitly opt-in."
+    },
+    {
+      "id": "agent:reviewer",
+      "family": "agent",
+      "description": "Review-only multi-agent role for correctness and security review.",
+      "targets": [
+        "codex"
+      ],
+      "modules": [
+        "module:codex-agent-roles"
+      ],
+      "riskLevel": "low",
+      "requiresExplicitOptIn": false,
+      "generatedSemantics": "Role configuration is copied as authored config."
+    },
+    {
+      "id": "agent:explorer",
+      "family": "agent",
+      "description": "Read-focused exploration role for evidence gathering.",
+      "targets": [
+        "codex"
+      ],
+      "modules": [
+        "module:codex-agent-roles"
+      ],
+      "riskLevel": "medium",
+      "requiresExplicitOptIn": false,
+      "generatedSemantics": "Role configuration is copied as authored config."
+    },
+    {
+      "id": "agent:docs-researcher",
+      "family": "agent",
+      "description": "Documentation and release-note verification role.",
+      "targets": [
+        "codex"
+      ],
+      "modules": [
+        "module:codex-agent-roles"
+      ],
+      "riskLevel": "medium",
+      "requiresExplicitOptIn": false,
+      "generatedSemantics": "Role configuration is copied as authored config."
+    },
+    {
+      "id": "mcp:core",
+      "family": "mcp",
+      "description": "Lean baseline MCP profile for GitHub, Context7, Memory, and Sequential Thinking.",
+      "targets": [
+        "codex"
+      ],
+      "modules": [
+        "module:mcp-core"
+      ],
+      "riskLevel": "low",
+      "requiresExplicitOptIn": false,
+      "generatedSemantics": "Profile snippets can be regenerated from the MCP catalog."
+    },
+    {
+      "id": "mcp:research",
+      "family": "mcp",
+      "description": "Additional research MCP profile beyond the lean baseline.",
+      "targets": [
+        "codex"
+      ],
+      "modules": [
+        "module:mcp-research"
+      ],
+      "riskLevel": "medium",
+      "requiresExplicitOptIn": true,
+      "generatedSemantics": "Profile snippets can be regenerated from the MCP catalog."
+    },
+    {
+      "id": "mcp:browser",
+      "family": "mcp",
+      "description": "Expanded browser automation MCP profile beyond the core baseline.",
+      "targets": [
+        "codex"
+      ],
+      "modules": [
+        "module:mcp-browser"
+      ],
+      "riskLevel": "medium",
+      "requiresExplicitOptIn": true,
+      "generatedSemantics": "Profile snippets can be regenerated from the MCP catalog."
+    },
+    {
+      "id": "mcp:security",
+      "family": "mcp",
+      "description": "Security-oriented MCP additions for audit or scanning workflows.",
+      "targets": [
+        "codex"
+      ],
+      "modules": [
+        "module:mcp-security"
+      ],
+      "riskLevel": "medium",
+      "requiresExplicitOptIn": true,
+      "generatedSemantics": "Profile snippets can be regenerated from the MCP catalog."
+    },
+    {
+      "id": "mcp:unsafe-local",
+      "family": "mcp",
+      "description": "Unsafe-local or high-side-effect MCP profile. Never enabled by default.",
+      "targets": [
+        "codex"
+      ],
+      "modules": [
+        "module:mcp-unsafe-local"
+      ],
+      "riskLevel": "high",
+      "requiresExplicitOptIn": true,
+      "generatedSemantics": "Profile snippets can be regenerated from the MCP catalog."
+    },
+    {
+      "id": "plugin:claude",
+      "family": "plugin",
+      "description": "Claude-target plugin adapter, intentionally thin and opt-in.",
+      "targets": [
+        "claude"
+      ],
+      "modules": [
+        "module:plugin-claude-adapter"
+      ],
+      "riskLevel": "medium",
+      "requiresExplicitOptIn": true,
+      "generatedSemantics": "Adapter files are copied into a Claude plugin bundle but hooks remain disabled until the user merges the template."
+    },
+    {
+      "id": "plugin:opencode",
+      "family": "plugin",
+      "description": "OpenCode-target plugin adapter without auto-approval defaults.",
+      "targets": [
+        "opencode"
+      ],
+      "modules": [
+        "module:plugin-opencode-adapter"
+      ],
+      "riskLevel": "high",
+      "requiresExplicitOptIn": true,
+      "generatedSemantics": "Adapter files are treated as authored assets."
+    },
+    {
+      "id": "plugin:cursor",
+      "family": "plugin",
+      "description": "Cursor-target plugin adapter with scaffold-only support in v1.",
+      "targets": [
+        "cursor"
+      ],
+      "modules": [
+        "module:plugin-cursor-adapter"
+      ],
+      "riskLevel": "medium",
+      "requiresExplicitOptIn": true,
+      "generatedSemantics": "Adapter files are treated as authored assets."
+    },
+    {
+      "id": "target:codex",
+      "family": "target",
+      "description": "Codex target adapter and state management.",
+      "targets": [
+        "codex"
+      ],
+      "modules": [
+        "module:codex-config-core",
+        "module:install-state"
+      ],
+      "riskLevel": "low",
+      "requiresExplicitOptIn": false,
+      "generatedSemantics": "Codex config fragments and install state are rebuildable."
+    },
+    {
+      "id": "target:claude",
+      "family": "target",
+      "description": "Claude target adapter, AGENTS guidance, generated skills, and state management.",
+      "targets": [
+        "claude"
+      ],
+      "modules": [
+        "module:claude-baseline",
+        "module:target-claude-adapter",
+        "module:install-state"
+      ],
+      "riskLevel": "medium",
+      "requiresExplicitOptIn": false,
+      "generatedSemantics": "Claude guidance and generated skill payloads are rebuilt from shared source skills."
+    },
+    {
+      "id": "target:opencode",
+      "family": "target",
+      "description": "OpenCode target adapter and state management scaffold.",
+      "targets": [
+        "opencode"
+      ],
+      "modules": [
+        "module:target-opencode-adapter",
+        "module:install-state"
+      ],
+      "riskLevel": "high",
+      "requiresExplicitOptIn": false,
+      "generatedSemantics": "Adapter config remains scaffold-level in v1."
+    },
+    {
+      "id": "target:cursor",
+      "family": "target",
+      "description": "Cursor target adapter and state management scaffold.",
+      "targets": [
+        "cursor"
+      ],
+      "modules": [
+        "module:target-cursor-adapter",
+        "module:install-state"
+      ],
+      "riskLevel": "medium",
+      "requiresExplicitOptIn": false,
+      "generatedSemantics": "Adapter config remains scaffold-level in v1."
+    }
+  ]
+}

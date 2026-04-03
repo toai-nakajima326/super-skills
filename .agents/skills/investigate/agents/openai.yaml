@@ -1,0 +1,6 @@
+interface:
+  display_name: "Investigate"
+  short_description: "Root-cause-first debugging workflow. Use for bugs, regressions, stack traces, production issues, or any case where..."
+  default_prompt: "Use Investigate for this task."
+policy:
+  allow_implicit_invocation: true

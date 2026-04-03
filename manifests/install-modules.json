@@ -1,0 +1,652 @@
+{
+  "version": 1,
+  "modules": [
+    {
+      "id": "module:skills-core-generated",
+      "kind": "generated",
+      "description": "Generated skill payloads for the v1 unified workflow skills.",
+      "sourcePaths": [
+        "skills/plan-product/**",
+        "skills/plan-architecture/**",
+        "skills/investigate/**",
+        "skills/review/**",
+        "skills/security-review/**",
+        "skills/qa-browser/**",
+        "skills/ship-release/**",
+        "skills/health-check/**",
+        "skills/checkpoint/**",
+        "skills/careful/**",
+        "skills/freeze/**",
+        "skills/guard/**"
+      ],
+      "generatedBy": "scripts/build-skills.js",
+      "generatedPaths": [
+        ".agents/skills/**"
+      ],
+      "riskLevel": "low",
+      "requiresSecrets": false,
+      "targets": {
+        "codex": {
+          "status": "full",
+          "targetPaths": [
+            ".agents/skills"
+          ],
+          "operations": [
+            {
+              "type": "generate",
+              "generator": "scripts/build-skills.js",
+              "outputRoot": ".agents/skills"
+            }
+          ]
+        },
+        "claude": {
+          "status": "full",
+          "targetPaths": [
+            ".claude/skills"
+          ],
+          "operations": [
+            {
+              "type": "generate",
+              "generator": "scripts/build-claude-skills.js",
+              "outputRoot": ".claude/skills"
+            }
+          ]
+        },
+        "opencode": {
+          "status": "scaffold",
+          "targetPaths": [
+            "skills"
+          ],
+          "operations": [
+            {
+              "type": "copy",
+              "from": "skills",
+              "to": "skills"
+            }
+          ]
+        },
+        "cursor": {
+          "status": "scaffold",
+          "targetPaths": [
+            "skills"
+          ],
+          "operations": [
+            {
+              "type": "copy",
+              "from": "skills",
+              "to": "skills"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "module:skills-knowledge-generated",
+      "kind": "generated",
+      "description": "Generated skill payloads for engineering and research knowledge packs.",
+      "sourcePaths": [
+        "skills/tdd-workflow/**",
+        "skills/verification-loop/**",
+        "skills/coding-standards/**",
+        "skills/backend-patterns/**",
+        "skills/frontend-patterns/**",
+        "skills/api-design/**",
+        "skills/e2e-testing/**",
+        "skills/documentation-lookup/**",
+        "skills/deep-research/**",
+        "skills/exa-search/**",
+        "skills/dmux-workflows/**",
+        "skills/mcp-server-patterns/**"
+      ],
+      "generatedBy": "scripts/build-skills.js",
+      "generatedPaths": [
+        ".agents/skills/**"
+      ],
+      "riskLevel": "low",
+      "requiresSecrets": false,
+      "targets": {
+        "codex": {
+          "status": "full",
+          "targetPaths": [
+            ".agents/skills"
+          ],
+          "operations": [
+            {
+              "type": "generate",
+              "generator": "scripts/build-skills.js",
+              "outputRoot": ".agents/skills"
+            }
+          ]
+        },
+        "claude": {
+          "status": "full",
+          "targetPaths": [
+            ".claude/skills"
+          ],
+          "operations": [
+            {
+              "type": "generate",
+              "generator": "scripts/build-claude-skills.js",
+              "outputRoot": ".claude/skills"
+            }
+          ]
+        },
+        "opencode": {
+          "status": "scaffold",
+          "targetPaths": [
+            "skills"
+          ],
+          "operations": [
+            {
+              "type": "copy",
+              "from": "skills",
+              "to": "skills"
+            }
+          ]
+        },
+        "cursor": {
+          "status": "scaffold",
+          "targetPaths": [
+            "skills"
+          ],
+          "operations": [
+            {
+              "type": "copy",
+              "from": "skills",
+              "to": "skills"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "module:claude-baseline",
+      "kind": "authored",
+      "description": "Claude baseline AGENTS guidance for the shared skill set.",
+      "sourcePaths": [
+        ".claude/AGENTS.md"
+      ],
+      "generatedPaths": [],
+      "riskLevel": "low",
+      "requiresSecrets": false,
+      "targets": {
+        "claude": {
+          "status": "full",
+          "targetPaths": [
+            ".claude/AGENTS.md"
+          ],
+          "operations": [
+            {
+              "type": "copy",
+              "from": ".claude/AGENTS.md",
+              "to": ".claude/AGENTS.md"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "module:codex-baseline",
+      "kind": "authored",
+      "description": "Codex baseline runtime files such as AGENTS guidance.",
+      "sourcePaths": [
+        ".codex/AGENTS.md"
+      ],
+      "generatedPaths": [],
+      "riskLevel": "low",
+      "requiresSecrets": false,
+      "targets": {
+        "codex": {
+          "status": "full",
+          "targetPaths": [
+            ".codex/AGENTS.md"
+          ],
+          "operations": [
+            {
+              "type": "copy",
+              "from": ".codex/AGENTS.md",
+              "to": ".codex/AGENTS.md"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "module:codex-agent-roles",
+      "kind": "authored",
+      "description": "Codex multi-agent role definitions.",
+      "sourcePaths": [
+        ".codex/agents/*.toml"
+      ],
+      "generatedPaths": [],
+      "riskLevel": "low",
+      "requiresSecrets": false,
+      "targets": {
+        "codex": {
+          "status": "full",
+          "targetPaths": [
+            ".codex/agents"
+          ],
+          "operations": [
+            {
+              "type": "copy",
+              "from": ".codex/agents",
+              "to": ".codex/agents"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "module:codex-config-core",
+      "kind": "generated",
+      "description": "Codex config generated from selected MCP and agent components.",
+      "sourcePaths": [
+        "mcp/catalog.json",
+        "mcp/profiles/*.json",
+        "manifests/install-components.json",
+        "manifests/install-profiles.json",
+        "manifests/install-modules.json"
+      ],
+      "generatedBy": "scripts/install-apply.mjs",
+      "generatedPaths": [
+        ".codex/config.toml"
+      ],
+      "riskLevel": "low",
+      "requiresSecrets": false,
+      "targets": {
+        "codex": {
+          "status": "full",
+          "targetPaths": [
+            ".codex/config.toml"
+          ],
+          "operations": [
+            {
+              "type": "generate",
+              "generator": "scripts/install-apply.mjs",
+              "outputRoot": ".codex"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "module:mcp-core",
+      "kind": "authored",
+      "description": "Lean baseline MCP catalog slice and profile mapping.",
+      "sourcePaths": [
+        "mcp/catalog.json",
+        "mcp/profiles/core.json"
+      ],
+      "generatedPaths": [],
+      "riskLevel": "low",
+      "requiresSecrets": false,
+      "targets": {
+        "codex": {
+          "status": "full",
+          "targetPaths": [
+            "mcp/catalog.json",
+            "mcp/profiles/core.json"
+          ],
+          "operations": [
+            {
+              "type": "copy",
+              "from": "mcp/catalog.json",
+              "to": "mcp/catalog.json"
+            },
+            {
+              "type": "copy",
+              "from": "mcp/profiles/core.json",
+              "to": "mcp/profiles/core.json"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "module:mcp-research",
+      "kind": "authored",
+      "description": "Opt-in research MCP profile and catalog references.",
+      "sourcePaths": [
+        "mcp/catalog.json",
+        "mcp/profiles/research.json"
+      ],
+      "generatedPaths": [],
+      "riskLevel": "medium",
+      "requiresSecrets": true,
+      "targets": {
+        "codex": {
+          "status": "full",
+          "targetPaths": [
+            "mcp/profiles/research.json"
+          ],
+          "operations": [
+            {
+              "type": "copy",
+              "from": "mcp/profiles/research.json",
+              "to": "mcp/profiles/research.json"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "module:mcp-browser",
+      "kind": "authored",
+      "description": "Opt-in browser automation MCP profile beyond the baseline.",
+      "sourcePaths": [
+        "mcp/catalog.json",
+        "mcp/profiles/browser.json"
+      ],
+      "generatedPaths": [],
+      "riskLevel": "medium",
+      "requiresSecrets": false,
+      "targets": {
+        "codex": {
+          "status": "full",
+          "targetPaths": [
+            "mcp/profiles/browser.json"
+          ],
+          "operations": [
+            {
+              "type": "copy",
+              "from": "mcp/profiles/browser.json",
+              "to": "mcp/profiles/browser.json"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "module:mcp-security",
+      "kind": "authored",
+      "description": "Opt-in security MCP profile for audit or scanning workflows.",
+      "sourcePaths": [
+        "mcp/catalog.json",
+        "mcp/profiles/security.json"
+      ],
+      "generatedPaths": [],
+      "riskLevel": "medium",
+      "requiresSecrets": true,
+      "targets": {
+        "codex": {
+          "status": "full",
+          "targetPaths": [
+            "mcp/profiles/security.json"
+          ],
+          "operations": [
+            {
+              "type": "copy",
+              "from": "mcp/profiles/security.json",
+              "to": "mcp/profiles/security.json"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "module:mcp-unsafe-local",
+      "kind": "authored",
+      "description": "Explicitly unsafe-local MCP profile. Never selected by default.",
+      "sourcePaths": [
+        "mcp/catalog.json",
+        "mcp/profiles/unsafe-local.json"
+      ],
+      "generatedPaths": [],
+      "riskLevel": "high",
+      "requiresSecrets": true,
+      "targets": {
+        "codex": {
+          "status": "full",
+          "targetPaths": [
+            "mcp/profiles/unsafe-local.json"
+          ],
+          "operations": [
+            {
+              "type": "copy",
+              "from": "mcp/profiles/unsafe-local.json",
+              "to": "mcp/profiles/unsafe-local.json"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "module:plugin-claude-adapter",
+      "kind": "authored",
+      "description": "Thin Claude adapter files.",
+      "sourcePaths": [
+        "plugins/claude/**"
+      ],
+      "generatedPaths": [],
+      "riskLevel": "medium",
+      "requiresSecrets": false,
+      "targets": {
+        "claude": {
+          "status": "full",
+          "targetPaths": [
+            ".claude/plugins/super-skills"
+          ],
+          "operations": [
+            {
+              "type": "copy",
+              "from": "plugins/claude",
+              "to": ".claude/plugins/super-skills"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "module:plugin-opencode-adapter",
+      "kind": "authored",
+      "description": "Thin OpenCode adapter files with no default auto-approval.",
+      "sourcePaths": [
+        "plugins/opencode/**"
+      ],
+      "generatedPaths": [],
+      "riskLevel": "high",
+      "requiresSecrets": false,
+      "targets": {
+        "opencode": {
+          "status": "scaffold",
+          "targetPaths": [
+            "plugins/opencode"
+          ],
+          "operations": [
+            {
+              "type": "copy",
+              "from": "plugins/opencode",
+              "to": "plugins/opencode"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "module:plugin-cursor-adapter",
+      "kind": "authored",
+      "description": "Thin Cursor adapter files.",
+      "sourcePaths": [
+        "plugins/cursor/**"
+      ],
+      "generatedPaths": [],
+      "riskLevel": "medium",
+      "requiresSecrets": false,
+      "targets": {
+        "cursor": {
+          "status": "scaffold",
+          "targetPaths": [
+            "plugins/cursor"
+          ],
+          "operations": [
+            {
+              "type": "copy",
+              "from": "plugins/cursor",
+              "to": "plugins/cursor"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "module:target-claude-adapter",
+      "kind": "generated",
+      "description": "Claude target-specific install metadata and state layout.",
+      "sourcePaths": [
+        "manifests/install-components.json",
+        "manifests/install-profiles.json",
+        "manifests/install-modules.json"
+      ],
+      "generatedBy": "scripts/install-apply.mjs",
+      "generatedPaths": [
+        ".super-skills/targets/claude.json"
+      ],
+      "riskLevel": "medium",
+      "requiresSecrets": false,
+      "targets": {
+        "claude": {
+          "status": "full",
+          "targetPaths": [
+            ".super-skills/targets/claude.json"
+          ],
+          "operations": [
+            {
+              "type": "generate",
+              "generator": "scripts/install-apply.mjs",
+              "outputRoot": ".super-skills/targets"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "module:target-opencode-adapter",
+      "kind": "generated",
+      "description": "OpenCode target-specific install metadata and state layout.",
+      "sourcePaths": [
+        "manifests/install-components.json",
+        "manifests/install-profiles.json",
+        "manifests/install-modules.json"
+      ],
+      "generatedBy": "scripts/install-apply.mjs",
+      "generatedPaths": [
+        ".super-skills/targets/opencode.json"
+      ],
+      "riskLevel": "high",
+      "requiresSecrets": false,
+      "targets": {
+        "opencode": {
+          "status": "scaffold",
+          "targetPaths": [
+            ".super-skills/targets/opencode.json"
+          ],
+          "operations": [
+            {
+              "type": "generate",
+              "generator": "scripts/install-apply.mjs",
+              "outputRoot": ".super-skills/targets"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "module:target-cursor-adapter",
+      "kind": "generated",
+      "description": "Cursor target-specific install metadata and state layout.",
+      "sourcePaths": [
+        "manifests/install-components.json",
+        "manifests/install-profiles.json",
+        "manifests/install-modules.json"
+      ],
+      "generatedBy": "scripts/install-apply.mjs",
+      "generatedPaths": [
+        ".super-skills/targets/cursor.json"
+      ],
+      "riskLevel": "medium",
+      "requiresSecrets": false,
+      "targets": {
+        "cursor": {
+          "status": "scaffold",
+          "targetPaths": [
+            ".super-skills/targets/cursor.json"
+          ],
+          "operations": [
+            {
+              "type": "generate",
+              "generator": "scripts/install-apply.mjs",
+              "outputRoot": ".super-skills/targets"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "module:install-state",
+      "kind": "generated",
+      "description": "Installer state tracking written after apply.",
+      "sourcePaths": [
+        "manifests/install-components.json",
+        "manifests/install-profiles.json",
+        "manifests/install-modules.json"
+      ],
+      "generatedBy": "scripts/install-apply.mjs",
+      "generatedPaths": [
+        ".super-skills/install-state/*.json"
+      ],
+      "riskLevel": "low",
+      "requiresSecrets": false,
+      "targets": {
+        "codex": {
+          "status": "full",
+          "targetPaths": [
+            ".super-skills/install-state/codex.json"
+          ],
+          "operations": [
+            {
+              "type": "write-state",
+              "to": ".super-skills/install-state/codex.json"
+            }
+          ]
+        },
+        "claude": {
+          "status": "full",
+          "targetPaths": [
+            ".super-skills/install-state/claude.json"
+          ],
+          "operations": [
+            {
+              "type": "write-state",
+              "to": ".super-skills/install-state/claude.json"
+            }
+          ]
+        },
+        "opencode": {
+          "status": "scaffold",
+          "targetPaths": [
+            ".super-skills/install-state/opencode.json"
+          ],
+          "operations": [
+            {
+              "type": "write-state",
+              "to": ".super-skills/install-state/opencode.json"
+            }
+          ]
+        },
+        "cursor": {
+          "status": "scaffold",
+          "targetPaths": [
+            ".super-skills/install-state/cursor.json"
+          ],
+          "operations": [
+            {
+              "type": "write-state",
+              "to": ".super-skills/install-state/cursor.json"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

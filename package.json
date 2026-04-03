@@ -1,0 +1,23 @@
+{
+  "name": "super-skills",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Unified workflow-first, Codex-first skill system derived from gstack and ECC.",
+  "scripts": {
+    "build:claude-skills": "node scripts/build-claude-skills.js",
+    "build:skills": "node scripts/build-skills.js",
+    "build:mcp-config": "node scripts/build-mcp-config.js",
+    "scan:secrets": "node scripts/scan-secrets.js",
+    "validate:configs": "node scripts/validate-configs.js",
+    "validate:skills": "node scripts/validate-skills.js",
+    "validate:mcp": "node scripts/build-mcp-config.js --validate",
+    "install:plan": "node scripts/install-plan.mjs",
+    "install:apply": "node scripts/install-apply.mjs",
+    "install:validate": "node scripts/install-validate.mjs",
+    "install:list": "node scripts/list-installables.mjs",
+    "check": "npm run validate:skills && npm run build:skills && npm run build:claude-skills && npm run validate:mcp && npm run validate:configs && npm run scan:secrets"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

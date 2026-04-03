@@ -1,0 +1,6 @@
+interface:
+  display_name: "Qa Browser"
+  short_description: "Browser-centric QA workflow for user flows, regressions, and bug reproduction. Use for end-to-end checking,..."
+  default_prompt: "Use Qa Browser for this task."
+policy:
+  allow_implicit_invocation: true

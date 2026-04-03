@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "core",
+      "description": "Minimal safe workflow baseline with lean Codex runtime and core MCP profile when applicable.",
+      "components": [
+        "baseline:skills",
+        "workflow:investigate",
+        "workflow:review",
+        "workflow:safety",
+        "agent:reviewer",
+        "mcp:core"
+      ],
+      "notes": [
+        "This is the smallest supported baseline.",
+        "Risky MCP and plugin components remain excluded."
+      ]
+    },
+    {
+      "id": "developer",
+      "description": "Core plus engineering knowledge packs, browser QA, release workflow, and exploration roles.",
+      "components": [
+        "baseline:skills",
+        "baseline:codex",
+        "workflow:investigate",
+        "workflow:review",
+        "workflow:qa",
+        "workflow:ship-release",
+        "workflow:safety",
+        "capability:engineering",
+        "capability:security",
+        "agent:reviewer",
+        "agent:explorer",
+        "mcp:core",
+        "mcp:browser"
+      ],
+      "notes": [
+        "Best default for engineering-heavy Codex installs.",
+        "Browser MCP expansion is considered explicit because the developer profile is opt-in."
+      ]
+    },
+    {
+      "id": "security",
+      "description": "Core plus security review workflows and security-oriented MCP additions.",
+      "components": [
+        "baseline:skills",
+        "baseline:codex",
+        "workflow:investigate",
+        "workflow:review",
+        "workflow:safety",
+        "capability:security",
+        "agent:reviewer",
+        "mcp:core",
+        "mcp:security"
+      ],
+      "notes": [
+        "Use when the install is primarily for review, audit, and hardening work."
+      ]
+    },
+    {
+      "id": "research",
+      "description": "Core plus research knowledge packs, docs researcher role, and research MCP profile.",
+      "components": [
+        "baseline:skills",
+        "baseline:codex",
+        "workflow:investigate",
+        "workflow:review",
+        "workflow:safety",
+        "capability:research",
+        "agent:reviewer",
+        "agent:docs-researcher",
+        "mcp:core",
+        "mcp:research"
+      ],
+      "notes": [
+        "Selecting this profile is treated as explicit opt-in for networked research capabilities."
+      ]
+    }
+  ]
+}
