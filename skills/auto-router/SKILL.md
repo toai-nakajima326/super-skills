@@ -24,6 +24,7 @@ Evaluate the user's request against these triggers in order. Apply the **first m
 | Any completion report or status update | **report-format** | Enforce typed schema with quantitative metrics |
 | Phase transition (moving to next phase of work) | **phase-gate** | Integrated review, evidence file before proceeding |
 | Session start or context recovery | **session-handoff** | State recovery from dev log, todo restoration |
+| Scheduled update or "check for updates" | **self-evolve** | Upstream sync, web discovery, self-improvement |
 
 ### Priority 1 — Safety (always checked first)
 
