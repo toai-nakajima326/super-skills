@@ -1,0 +1,6 @@
+interface:
+  display_name: "Security Review"
+  short_description: "Security review workflow for app code, secrets handling, MCP risks, and agentic attack surface. Use when code..."
+  default_prompt: "Use Security Review for this task."
+policy:
+  allow_implicit_invocation: true

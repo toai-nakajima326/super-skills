@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "skills": [
+    {
+      "name": "api-design",
+      "displayName": "Api Design",
+      "description": "Use when designing or reviewing HTTP APIs, choosing between REST and GraphQL, or establishing API contracts and...",
+      "path": "skills/api-design/SKILL.md"
+    },
+    {
+      "name": "backend-patterns",
+      "displayName": "Backend Patterns",
+      "description": "Use when building or reviewing backend services, choosing architectural patterns, or structuring server-side application...",
+      "path": "skills/backend-patterns/SKILL.md"
+    },
+    {
+      "name": "careful",
+      "displayName": "Careful",
+      "description": "Use for critical operations where mistakes are costly -- adds backup creation, impact explanation, and confirmation...",
+      "path": "skills/careful/SKILL.md"
+    },
+    {
+      "name": "checkpoint",
+      "displayName": "Checkpoint",
+      "description": "Use when making risky changes to save and restore named state checkpoints, enabling safe rollback if something goes...",
+      "path": "skills/checkpoint/SKILL.md"
+    },
+    {
+      "name": "coding-standards",
+      "displayName": "Coding Standards",
+      "description": "Use when writing or reviewing code to enforce consistency with the project's existing patterns, naming conventions, and...",
+      "path": "skills/coding-standards/SKILL.md"
+    },
+    {
+      "name": "deep-research",
+      "displayName": "Deep Research",
+      "description": "Use when conducting thorough research on a topic, synthesizing information from multiple sources, or producing...",
+      "path": "skills/deep-research/SKILL.md"
+    },
+    {
+      "name": "dmux-workflows",
+      "displayName": "Dmux Workflows",
+      "description": "Use when decomposing tasks for parallel execution, orchestrating concurrent agent workflows, or designing fan-out/fan-in...",
+      "path": "skills/dmux-workflows/SKILL.md"
+    },
+    {
+      "name": "documentation-lookup",
+      "displayName": "Documentation Lookup",
+      "description": "Use when answering technical questions to search and reference official documentation, ensuring answers are accurate,...",
+      "path": "skills/documentation-lookup/SKILL.md"
+    },
+    {
+      "name": "e2e-testing",
+      "displayName": "E2e Testing",
+      "description": "Use when writing, reviewing, or debugging end-to-end tests, setting up test infrastructure, or designing test strategies...",
+      "path": "skills/e2e-testing/SKILL.md"
+    },
+    {
+      "name": "exa-search",
+      "displayName": "Exa Search",
+      "description": "Use when performing web searches to gather information, integrating search results into analysis, or building...",
+      "path": "skills/exa-search/SKILL.md"
+    },
+    {
+      "name": "freeze",
+      "displayName": "Freeze",
+      "description": "Use when exploring a codebase or debugging without risk of accidental modifications -- enables strict read-only mode...",
+      "path": "skills/freeze/SKILL.md"
+    },
+    {
+      "name": "frontend-patterns",
+      "displayName": "Frontend Patterns",
+      "description": "Use when building or reviewing frontend applications, choosing component patterns, or structuring client-side state and...",
+      "path": "skills/frontend-patterns/SKILL.md"
+    },
+    {
+      "name": "guard",
+      "displayName": "Guard",
+      "description": "Use when executing shell commands or database operations to prevent dangerous destructive actions like rm -rf, DROP...",
+      "path": "skills/guard/SKILL.md"
+    },
+    {
+      "name": "health-check",
+      "displayName": "Health Check",
+      "description": "Use for assessing overall project health by running build, tests, linter, dependency audit, and security checks, then...",
+      "path": "skills/health-check/SKILL.md"
+    },
+    {
+      "name": "investigate",
+      "displayName": "Investigate",
+      "description": "Use when debugging a bug or unexpected behavior by tracing to root cause before changing any code.",
+      "path": "skills/investigate/SKILL.md"
+    },
+    {
+      "name": "mcp-server-patterns",
+      "displayName": "Mcp Server Patterns",
+      "description": "Use when building, reviewing, or debugging MCP (Model Context Protocol) servers, designing tool interfaces, or...",
+      "path": "skills/mcp-server-patterns/SKILL.md"
+    },
+    {
+      "name": "plan-architecture",
+      "displayName": "Plan Architecture",
+      "description": "Use when designing system architecture or making structural decisions before writing code.",
+      "path": "skills/plan-architecture/SKILL.md"
+    },
+    {
+      "name": "plan-product",
+      "displayName": "Plan Product",
+      "description": "Use when planning a product feature or initiative before jumping into implementation.",
+      "path": "skills/plan-product/SKILL.md"
+    },
+    {
+      "name": "qa-browser",
+      "displayName": "Qa Browser",
+      "description": "Use for browser-based regression testing of user-facing features and workflows.",
+      "path": "skills/qa-browser/SKILL.md"
+    },
+    {
+      "name": "review",
+      "displayName": "Review",
+      "description": "Use for code review focused on high-signal findings rather than stylistic nits.",
+      "path": "skills/review/SKILL.md"
+    },
+    {
+      "name": "security-review",
+      "displayName": "Security Review",
+      "description": "Use for security-focused code review to find vulnerabilities, auth gaps, and unsafe data handling.",
+      "path": "skills/security-review/SKILL.md"
+    },
+    {
+      "name": "ship-release",
+      "displayName": "Ship Release",
+      "description": "Use when preparing a release -- versioning, changelog, and PR creation without auto-pushing.",
+      "path": "skills/ship-release/SKILL.md"
+    },
+    {
+      "name": "tdd-workflow",
+      "displayName": "Tdd Workflow",
+      "description": "Use when developing features or fixes using strict test-driven development: red, green, refactor.",
+      "path": "skills/tdd-workflow/SKILL.md"
+    },
+    {
+      "name": "verification-loop",
+      "displayName": "Verification Loop",
+      "description": "Use for automated verification of work results against specifications, iterating until the output fully matches expected...",
+      "path": "skills/verification-loop/SKILL.md"
+    }
+  ]
+}

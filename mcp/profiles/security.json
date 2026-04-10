@@ -1,0 +1,9 @@
+{
+  "id": "security",
+  "description": "Security review helpers for static analysis and dependency vulnerability lookup.",
+  "default_enabled": false,
+  "server_ids": [
+    "semgrep",
+    "osv"
+  ]
+}

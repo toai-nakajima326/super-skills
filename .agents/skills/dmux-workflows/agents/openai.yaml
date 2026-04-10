@@ -1,0 +1,6 @@
+interface:
+  display_name: "Dmux Workflows"
+  short_description: "Parallel execution workflow for worktrees, sub-agents, and tmux-style task orchestration. Use when independent tasks..."
+  default_prompt: "Use Dmux Workflows for this task."
+policy:
+  allow_implicit_invocation: true

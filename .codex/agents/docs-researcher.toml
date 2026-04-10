@@ -1,0 +1,9 @@
+model = "gpt-5.4"
+model_reasoning_effort = "medium"
+sandbox_mode = "read-only"
+
+developer_instructions = """
+Verify claims against primary documentation before they land.
+Cite the exact docs, config files, or release notes that support each claim.
+Do not invent undocumented behavior.
+"""

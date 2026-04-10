@@ -1,0 +1,10 @@
+{
+  "id": "unsafe-local",
+  "description": "High-trust integrations such as localhost bridges, broad filesystem access, or remote package execution.",
+  "default_enabled": false,
+  "server_ids": [
+    "filesystem-local",
+    "localhost-api",
+    "npm-exec-tooling"
+  ]
+}
