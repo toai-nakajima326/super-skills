@@ -1,6 +1,6 @@
 interface:
   display_name: "Ship Release"
-  short_description: "Release workflow that ties verification, review, documentation updates, and PR preparation together. Use when work..."
+  short_description: "|"
   default_prompt: "Use Ship Release for this task."
 policy:
   allow_implicit_invocation: true

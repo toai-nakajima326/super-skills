@@ -1,6 +1,6 @@
 interface:
   display_name: "Coding Standards"
-  short_description: "Shared implementation standards for maintainable, safe, and readable code. Use when writing or reviewing code to..."
+  short_description: "|"
   default_prompt: "Use Coding Standards for this task."
 policy:
   allow_implicit_invocation: true

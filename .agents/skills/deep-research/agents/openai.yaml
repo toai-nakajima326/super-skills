@@ -1,6 +1,6 @@
 interface:
   display_name: "Deep Research"
-  short_description: "Multi-source research workflow for current topics that require citations, synthesis, and explicit confidence. Use..."
+  short_description: "|"
   default_prompt: "Use Deep Research for this task."
 policy:
   allow_implicit_invocation: true

@@ -55,6 +55,16 @@
       "name": "skills-research",
       "description": "Deep research and search capabilities",
       "components": ["deep-research", "exa-search", "dmux-workflows"]
+    },
+    {
+      "name": "skills-orchestration",
+      "description": "Agent orchestration, quality gates, and process enforcement",
+      "components": ["auto-router", "supervisor-worker", "quality-gate", "report-format", "phase-gate", "session-handoff"]
+    },
+    {
+      "name": "skills-ui",
+      "description": "UI implementation standards",
+      "components": ["ui-implementation"]
     }
   ]
 }

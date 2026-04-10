@@ -24,6 +24,13 @@
     { "name": "deep-research", "type": "skill", "source": "skills/deep-research" },
     { "name": "exa-search", "type": "skill", "source": "skills/exa-search" },
     { "name": "mcp-server-patterns", "type": "skill", "source": "skills/mcp-server-patterns" },
-    { "name": "dmux-workflows", "type": "skill", "source": "skills/dmux-workflows" }
+    { "name": "dmux-workflows", "type": "skill", "source": "skills/dmux-workflows" },
+    { "name": "auto-router", "type": "skill", "source": "skills/auto-router" },
+    { "name": "supervisor-worker", "type": "skill", "source": "skills/supervisor-worker" },
+    { "name": "quality-gate", "type": "skill", "source": "skills/quality-gate" },
+    { "name": "report-format", "type": "skill", "source": "skills/report-format" },
+    { "name": "phase-gate", "type": "skill", "source": "skills/phase-gate" },
+    { "name": "session-handoff", "type": "skill", "source": "skills/session-handoff" },
+    { "name": "ui-implementation", "type": "skill", "source": "skills/ui-implementation" }
   ]
 }

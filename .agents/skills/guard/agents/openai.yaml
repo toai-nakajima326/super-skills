@@ -1,6 +1,6 @@
 interface:
   display_name: "Guard"
-  short_description: "Combined safety workflow that applies destructive-command warnings and scoped edit boundaries together. Use for..."
+  short_description: "|"
   default_prompt: "Use Guard for this task."
 policy:
   allow_implicit_invocation: true

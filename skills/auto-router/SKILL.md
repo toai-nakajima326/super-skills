@@ -15,6 +15,16 @@ origin: unified
 
 Evaluate the user's request against these triggers in order. Apply the **first match**.
 
+### Priority 0 — Always Active (applied automatically, no trigger needed)
+
+| Condition | Skill | Action |
+|-----------|-------|--------|
+| Multi-agent work (workers, checkers, agents) | **supervisor-worker** | Enforce pair-agent pattern, role separation |
+| Any work output or completion report | **quality-gate** | Full-count inspection, pyramid quality management |
+| Any completion report or status update | **report-format** | Enforce typed schema with quantitative metrics |
+| Phase transition (moving to next phase of work) | **phase-gate** | Integrated review, evidence file before proceeding |
+| Session start or context recovery | **session-handoff** | State recovery from dev log, todo restoration |
+
 ### Priority 1 — Safety (always checked first)
 
 | Signal | Skill | Action |
@@ -51,6 +61,7 @@ Evaluate the user's request against these triggers in order. Apply the **first m
 
 | Signal | Skill |
 |--------|-------|
+| UI work, .tsx file, component styling, Design.md | **ui-implementation** |
 | "Write test first", TDD, "red-green-refactor" | **tdd-workflow** |
 | "Ship it", "prepare release", changelog, version bump | **ship-release** |
 | "Run the browser test", regression test, QA, visual check | **qa-browser** |
@@ -78,6 +89,7 @@ Evaluate the user's request against these triggers in order. Apply the **first m
 ## Gotchas
 
 - Do not stack multiple skills simultaneously. Pick the primary one.
+- **Exception**: Priority 0 skills (supervisor-worker, quality-gate, report-format, phase-gate, session-handoff) are always active and layer on top of any other skill.
 - If the user explicitly names a skill ("use investigate"), that overrides auto-routing.
 - Safety skills (guard, freeze, careful) can layer on top of any other skill.
 - When uncertain between two skills, prefer the more specific one.
