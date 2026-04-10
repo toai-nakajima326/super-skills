@@ -11,7 +11,10 @@
     "build:kiro": "node scripts/build-kiro-skills.js",
     "build:antigravity": "node scripts/build-antigravity-skills.js",
     "install-apply": "node scripts/install-apply.mjs",
-    "validate": "node scripts/validate-skills.js"
+    "validate": "node scripts/validate-skills.js",
+    "sync": "./scripts/sync-upstream.sh",
+    "sync:check": "./scripts/sync-upstream.sh --check",
+    "deploy": "./scripts/sync-upstream.sh --deploy"
   },
   "keywords": [
     "ai-agent",
