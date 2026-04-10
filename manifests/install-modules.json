@@ -59,7 +59,7 @@
     {
       "name": "skills-orchestration",
       "description": "Agent orchestration, quality gates, and process enforcement",
-      "components": ["auto-router", "supervisor-worker", "quality-gate", "report-format", "phase-gate", "session-handoff", "self-evolve", "debate-consensus"]
+      "components": ["auto-router", "supervisor-worker", "quality-gate", "report-format", "phase-gate", "session-handoff", "self-evolve", "debate-consensus", "drift-detect", "model-selector", "confidence-filter"]
     },
     {
       "name": "skills-ui",

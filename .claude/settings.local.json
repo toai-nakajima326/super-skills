@@ -11,7 +11,15 @@
       "Bash(git add:*)",
       "Bash(git commit -m ':*)",
       "Bash(rm -f .git/index.lock)",
-      "Bash(git -C ~/skills log --oneline)"
+      "Bash(git -C ~/skills log --oneline)",
+      "Bash(./scripts/sync-upstream.sh --check)",
+      "WebSearch",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:www.querypie.com)",
+      "WebFetch(domain:machinelearningmastery.com)",
+      "WebFetch(domain:www.stackai.com)",
+      "WebFetch(domain:thenewstack.io)",
+      "Read(//Users/mitsuru_nakajima/.claude/skills/**)"
     ]
   }
 }

@@ -33,6 +33,9 @@
     { "name": "session-handoff", "type": "skill", "source": "skills/session-handoff" },
     { "name": "ui-implementation", "type": "skill", "source": "skills/ui-implementation" },
     { "name": "self-evolve", "type": "skill", "source": "skills/self-evolve" },
-    { "name": "debate-consensus", "type": "skill", "source": "skills/debate-consensus" }
+    { "name": "debate-consensus", "type": "skill", "source": "skills/debate-consensus" },
+    { "name": "drift-detect", "type": "skill", "source": "skills/drift-detect" },
+    { "name": "model-selector", "type": "skill", "source": "skills/model-selector" },
+    { "name": "confidence-filter", "type": "skill", "source": "skills/confidence-filter" }
   ]
 }

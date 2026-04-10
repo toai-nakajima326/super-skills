@@ -42,6 +42,7 @@ Evaluate the user's request against these triggers in order. Apply the **first m
 | Error message, stack trace, "this is broken", "why does this fail" | **investigate** |
 | "Tests are failing", regression, "it worked before" | **investigate** |
 | "Check if everything works", "run health check", CI status | **health-check** |
+| "Check for drift", stale patterns, spec deviation, deprecated usage | **drift-detect** |
 
 ### Priority 3 — Planning & Design
 
@@ -87,6 +88,8 @@ Evaluate the user's request against these triggers in order. Apply the **first m
 | "Check the docs", API reference, library documentation | **documentation-lookup** |
 | "Verify the result", "does this match the spec", validation | **verification-loop** |
 | Parallel tasks, fan-out work, independent subtasks | **dmux-workflows** |
+| "Which Claude model should I use", cost vs capability tradeoff, launching agents | **model-selector** |
+| Parallel review agents, "reduce false positives", multi-agent vote | **confidence-filter** |
 
 ## Gotchas
 

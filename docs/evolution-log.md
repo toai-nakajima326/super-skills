@@ -67,4 +67,52 @@ Auto-maintained by the `self-evolve` skill. Records all upstream syncs, web disc
 - `kill-switch-escalation`: Three-level graduated stops. Covered by `guard` + `careful` combined.
 - `domain-specific-agent-team-generator`: Meta-agents that design other agent architectures. Speculative and unproven; no implementation details found.
 
-**Note**: The 1-day freshness window (2026-04-10 → 2026-04-11) yielded limited truly new content. Major 2026 patterns (swarm, hierarchical, pipeline) had already been catalogued in prior runs. The `autonomy-spectrum-selection` pattern is the most promising candidate to watch for in future runs — it appears in multiple 2026 sources but lacks the concrete workflow specificity needed for a SKILL.md.
+**Note**: The 1-day freshness window (2026-04-10 → 2026-04-11) yielded limited truly new content from broad pattern searches. However, deep-fetching of specific GitHub repositories (awesome-claude-code, AgentSys, claude-code plugins) surfaced genuinely novel implementation-level patterns not covered by prior searches.
+
+---
+
+## 2026-04-11 — adoptions (web-discovery follow-up)
+
+**Search window**: 2026-04-10 → 2026-04-11 (continued from web-discovery above)
+**New sources deep-fetched**: 8 (GitHub repos via WebFetch)
+**Candidates adopted**: 3 new skills + 1 skill update
+
+### Action: created — `drift-detect`
+- **Source**: AgentSys (avifenesh/agentsys), validated on 1,000+ repositories with 77% token reduction reported
+- **Reasoning**: Tiered-certainty analysis (deterministic→LLM escalation) is genuinely novel vs `health-check` (binary pass/fail) and `verification-loop` (iterate until passing). The key insight — run grep/regex/AST first, escalate to LLM only for MEDIUM/LOW certainty findings — reduces cost significantly and is missing from all existing skills.
+- **Changes**: Created `skills/drift-detect/SKILL.md` with 5-phase workflow, certainty tier definitions, deterministic rule templates, and token efficiency reporting.
+- **Risk assessment**: low — deterministic-first, LLM only for advisory; no auto-actions
+
+### Action: created — `model-selector`
+- **Source**: AgentSys + multiple 2026 community sources on Plan-and-Execute with Model Tiering
+- **Reasoning**: No current skill addresses explicit Claude model-tier assignment before launching agents. The Haiku/Sonnet/Opus decision matrix (mechanical→Haiku, coverage/review→Sonnet, architecture/planning→Opus) is proven and actionable via the Agent tool's `model` parameter. Can reduce costs by up to 90% vs Opus-for-everything.
+- **Changes**: Created `skills/model-selector/SKILL.md` with decision matrix, task→model mappings table, and integration guidance.
+- **Risk assessment**: low — guidance only, no auto-actions
+
+### Action: created — `confidence-filter`
+- **Source**: claude-code plugins/code-review pattern, AgentSys 6-agent parallel domain-specialist review
+- **Reasoning**: Distinct from `debate-consensus` (which reaches a decision through adversarial deliberation) and `review` (single agent). `confidence-filter` is specifically for suppressing false positives from parallel reviewer agents via vote-threshold aggregation. Multiple sources confirm this pattern for high-noise review environments.
+- **Changes**: Created `skills/confidence-filter/SKILL.md` with voting aggregation formula, threshold calibration guidance, dimension templates for code review, and escalation rules for critical findings.
+- **Risk assessment**: low — aggregation and filtering only; never suppresses critical findings below threshold unconditionally
+
+### Action: updated — `mcp-server-patterns`
+- **Source**: modelcontextprotocol.io specification 2025-11-25
+- **Reasoning**: Three new primitives (Elicitation, Roots, Sampling) added to official MCP spec are not documented in the existing skill. The tool-annotation trust boundary clarification ("untrusted unless from trusted server") is also new and security-relevant.
+- **Changes**: Added Elicitation, Roots, Sampling primitive descriptions with safety notes; added trust boundary update for tool annotations.
+- **Risk assessment**: low — documentation only
+
+### Updated
+- `auto-router`: Added routing entries for `drift-detect`, `model-selector`, `confidence-filter`
+- `manifests/install-components.json`: Added 3 new skill entries
+- `manifests/install-modules.json`: Added 3 new skills to `skills-orchestration` module
+
+### Validation & Deploy
+- `node scripts/validate-skills.js`: 36 skills, 0 errors, 0 warnings
+- Deployed to `~/.claude/skills/` (36 skills) and `~/.codex/skills/` (36 skills)
+
+### Skipped patterns from second-agent batch
+- `autonomous-loop` (Ralph Wiggum): Novel bash-restart-from-known-state pattern. Promising but single source (ClaytonFarr/ralph-playbook) with limited independent validation. Monitor for future runs.
+- `team-architect` (revfactory/harness): Meta-skill for auto-generating agent team structures. Genuinely novel but complex and speculative — risk of encouraging over-engineering. Revisit when more real-world adoption evidence exists.
+- `adaptive-guard` (hookify): Dynamically generates behavioral rules from AI misbehavior. Interesting but single source; rule-generation without human review could undermine predictable safety behavior. Skip.
+- `codebase-context` (Claudekit): Auto-inject architecture map at session start. Covered adequately by `session-handoff`. Not a standalone skill pattern.
+- `autonomy-spectrum-selection`: Appears in multiple sources but lacks concrete, repeatable workflow steps. Watch for future runs.
