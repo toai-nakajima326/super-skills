@@ -2,7 +2,16 @@
   "permissions": {
     "allow": [
       "WebFetch(domain:qiita.com)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(node scripts/validate-skills.js)",
+      "Bash(./scripts/sync-upstream.sh --deploy)",
+      "Bash(node scripts/build-codex-skills.js)",
+      "Bash(rm -rf ~/.codex/skills/*)",
+      "Bash(cp -r .agents/skills/* ~/.codex/skills/)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(rm -f .git/index.lock)",
+      "Bash(git -C ~/skills log --oneline)"
     ]
   }
 }
