@@ -1,0 +1,30 @@
+{
+  "name": "super-skills",
+  "version": "1.0.0",
+  "description": "Unified skill framework for AI coding agents — author once, deploy to Claude Code, Codex, Cursor, Kiro, and Antigravity",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-all.js",
+    "build:claude": "node scripts/build-claude-skills.js",
+    "build:codex": "node scripts/build-codex-skills.js",
+    "build:cursor": "node scripts/build-cursor-skills.js",
+    "build:kiro": "node scripts/build-kiro-skills.js",
+    "build:antigravity": "node scripts/build-antigravity-skills.js",
+    "install-apply": "node scripts/install-apply.mjs",
+    "validate": "node scripts/validate-skills.js"
+  },
+  "keywords": [
+    "ai-agent",
+    "claude-code",
+    "codex",
+    "cursor",
+    "kiro",
+    "antigravity",
+    "skills",
+    "workflow"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

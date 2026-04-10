@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "modules": [
+    {
+      "name": "skills-base",
+      "description": "Core coding standards and documentation",
+      "components": ["coding-standards", "documentation-lookup", "health-check"]
+    },
+    {
+      "name": "skills-investigate",
+      "description": "Root-cause debugging workflow",
+      "components": ["investigate", "verification-loop"]
+    },
+    {
+      "name": "skills-review",
+      "description": "Code review workflows",
+      "components": ["review"]
+    },
+    {
+      "name": "skills-safety",
+      "description": "Safety guards and caution modes",
+      "components": ["guard", "freeze", "careful", "checkpoint"]
+    },
+    {
+      "name": "skills-planning",
+      "description": "Product and architecture planning",
+      "components": ["plan-product", "plan-architecture"]
+    },
+    {
+      "name": "skills-qa",
+      "description": "QA and browser testing",
+      "components": ["qa-browser", "e2e-testing"]
+    },
+    {
+      "name": "skills-release",
+      "description": "Release and shipping workflow",
+      "components": ["ship-release"]
+    },
+    {
+      "name": "skills-tdd",
+      "description": "Test-driven development",
+      "components": ["tdd-workflow"]
+    },
+    {
+      "name": "skills-patterns",
+      "description": "Architecture and design patterns",
+      "components": ["api-design", "backend-patterns", "frontend-patterns", "mcp-server-patterns"]
+    },
+    {
+      "name": "skills-security-review",
+      "description": "Security-focused review",
+      "components": ["security-review"]
+    },
+    {
+      "name": "skills-research",
+      "description": "Deep research and search capabilities",
+      "components": ["deep-research", "exa-search", "dmux-workflows"]
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+node_modules/
+.DS_Store
+*.log
+.env
+.install-state.json
+
+# Generated outputs (rebuild with `npm run build`)
+.claude/skills/
+.agents/skills/
+.codex/
+.cursor/rules/skills/
+.kiro/skills/
+.antigravity/skills/

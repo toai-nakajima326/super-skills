@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "name": "core",
+      "description": "Minimal safe workflow baseline — no dangerous MCP or plugin components",
+      "modules": [
+        "skills-base",
+        "skills-investigate",
+        "skills-review",
+        "skills-safety"
+      ]
+    },
+    {
+      "name": "developer",
+      "description": "Recommended default for engineering-intensive installations",
+      "modules": [
+        "skills-base",
+        "skills-investigate",
+        "skills-review",
+        "skills-safety",
+        "skills-planning",
+        "skills-qa",
+        "skills-release",
+        "skills-patterns",
+        "skills-tdd"
+      ]
+    },
+    {
+      "name": "security",
+      "description": "For review, audit, and hardening workflows",
+      "modules": [
+        "skills-base",
+        "skills-investigate",
+        "skills-review",
+        "skills-safety",
+        "skills-security-review"
+      ]
+    },
+    {
+      "name": "research",
+      "description": "Opt-in to network research capabilities",
+      "modules": [
+        "skills-base",
+        "skills-investigate",
+        "skills-review",
+        "skills-safety",
+        "skills-research"
+      ]
+    }
+  ]
+}
