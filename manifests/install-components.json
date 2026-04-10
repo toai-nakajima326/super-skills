@@ -32,6 +32,7 @@
     { "name": "phase-gate", "type": "skill", "source": "skills/phase-gate" },
     { "name": "session-handoff", "type": "skill", "source": "skills/session-handoff" },
     { "name": "ui-implementation", "type": "skill", "source": "skills/ui-implementation" },
-    { "name": "self-evolve", "type": "skill", "source": "skills/self-evolve" }
+    { "name": "self-evolve", "type": "skill", "source": "skills/self-evolve" },
+    { "name": "debate-consensus", "type": "skill", "source": "skills/debate-consensus" }
   ]
 }

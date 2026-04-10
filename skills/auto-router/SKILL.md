@@ -50,6 +50,7 @@ Evaluate the user's request against these triggers in order. Apply the **first m
 | "Let's plan", "design this feature", user story, product requirement | **plan-product** |
 | "How should we architect", system design, API boundary, data flow | **plan-architecture** |
 | "Design the API", endpoint design, REST/GraphQL discussion | **api-design** |
+| Architecture fork, "which approach", high-stakes tradeoff debate | **debate-consensus** |
 
 ### Priority 4 — Code Review & Security
 
