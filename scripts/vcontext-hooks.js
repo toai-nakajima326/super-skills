@@ -181,18 +181,27 @@ async function recordEvent(eventName) {
 }
 
 // ── Auto-consult: check for pending consultations ────────────────
+// Checks for consultations addressed to this AI model.
+// VCONTEXT_MODEL env: claude, codex, cursor, kiro, antigravity
 async function checkPendingConsultations() {
   const model = process.env.VCONTEXT_MODEL || 'claude';
+
+  // Check for consultations addressed to this model
   const pending = await get(`/consult/pending?model=${encodeURIComponent(model)}`);
   if (!pending.pending || pending.pending.length === 0) return;
 
   for (const p of pending.pending.slice(0, 2)) {
     const lines = [
-      `[vcontext] Consultation requested (${p.consultation_id}):`,
+      `[vcontext:consult] Consultation for ${model} (${p.consultation_id}):`,
       `  Question: ${p.query}`,
+      p.context ? `  Context: ${String(p.context).slice(0, 200)}` : '',
       `  ${(p.prompt || '').slice(0, 300)}`,
-      `  To respond: curl -s -X POST http://127.0.0.1:${VCONTEXT_PORT}/consult/${p.consultation_id}/response -H 'Content-Type: application/json' -d '{"model":"${model}","chosen":N,"reasoning":"...","confidence":"high|medium|low"}'`,
-    ];
+      ``,
+      `  To respond, run:`,
+      `  curl -s -X POST http://127.0.0.1:${VCONTEXT_PORT}/consult/${p.consultation_id}/response \\`,
+      `    -H 'Content-Type: application/json' \\`,
+      `    -d '{"model":"${model}","chosen":1,"reasoning":"your reasoning here","confidence":"high"}'`,
+    ].filter(Boolean);
     process.stdout.write(lines.join('\n') + '\n');
   }
 }
