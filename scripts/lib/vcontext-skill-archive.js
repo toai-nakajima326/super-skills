@@ -70,8 +70,17 @@ function simpleDiff(oldText, newText) {
  */
 export async function archiveChangedSkills(srcRoot, outRoot, target, skillFile = 'SKILL.md') {
   // Quick health check — skip if server is down
-  const health = await post('/health', {}).catch(() => null);
-  if (!health || health._skipped) {
+  const health = await new Promise((resolve) => {
+    const req = request(`${VCONTEXT_URL}/health`, { method: 'GET', timeout: 3000 }, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString())); } catch { resolve(null); } });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.end();
+  });
+  if (!health || health.status !== 'healthy') {
     return { archived: 0, skipped: true, reason: 'vcontext server not running' };
   }
 
