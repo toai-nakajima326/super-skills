@@ -67,7 +67,7 @@ function post(path, data) {
 function store(type, content, tags = []) {
   return post('/store', {
     type,
-    content: String(content).slice(0, 50000), // Cap at ~12.5k tokens
+    content: String(content).slice(0, 200000), // Cap at ~50k tokens — full memory mode
     tags,
     session: SESSION_ID,
   });
@@ -103,11 +103,10 @@ async function handleToolUse() {
     const toolInput = data.tool_input || data.input || '';
     const toolOutput = data.tool_output || data.output || '';
 
-    // Skip noisy tools
-    const skipTools = ['TodoRead', 'TodoWrite', 'Read'];
-    if (skipTools.includes(toolName)) return;
-
-    const content = `Tool: ${toolName}\nInput: ${typeof toolInput === 'string' ? toolInput.slice(0, 500) : JSON.stringify(toolInput).slice(0, 500)}\nOutput: ${typeof toolOutput === 'string' ? toolOutput.slice(0, 1000) : JSON.stringify(toolOutput).slice(0, 1000)}`;
+    // Record everything — full memory mode
+    const inputStr = typeof toolInput === 'string' ? toolInput : JSON.stringify(toolInput);
+    const outputStr = typeof toolOutput === 'string' ? toolOutput : JSON.stringify(toolOutput);
+    const content = `Tool: ${toolName}\nInput: ${inputStr.slice(0, 5000)}\nOutput: ${outputStr.slice(0, 10000)}`;
 
     // Detect error patterns
     const isError = /error|exception|failed|ENOENT|EACCES|timeout/i.test(toolOutput);
