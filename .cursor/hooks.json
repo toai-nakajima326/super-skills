@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [
+      { "command": "VCONTEXT_MODEL=cursor /Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh user-prompt" }
+    ],
+    "beforeShellExecution": [
+      { "command": "VCONTEXT_MODEL=cursor /Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh pre-tool" }
+    ],
+    "beforeMCPExecution": [
+      { "command": "VCONTEXT_MODEL=cursor /Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh pre-tool" }
+    ],
+    "afterFileEdit": [
+      { "command": "VCONTEXT_MODEL=cursor /Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh tool-use" }
+    ],
+    "stop": [
+      { "command": "VCONTEXT_MODEL=cursor /Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh session-end" }
+    ]
+  }
+}
