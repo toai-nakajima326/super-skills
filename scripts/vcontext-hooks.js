@@ -19,6 +19,7 @@
  */
 
 import { request } from 'node:http';
+import { readFileSync, writeFileSync } from 'node:fs';
 
 const VCONTEXT_PORT = process.env.VCONTEXT_PORT || '3150';
 const VCONTEXT_URL = `http://127.0.0.1:${VCONTEXT_PORT}`;
@@ -72,6 +73,20 @@ function store(type, content, tags = []) {
   });
 }
 
+// ── Keyword extraction ────────────────────────────────────────
+function extractKeywords(text) {
+  if (!text || text.length < 10) return '';
+  // Extract meaningful words (>3 chars, no common words)
+  const stopWords = new Set(['this','that','with','from','have','will','been','were','they','their','which','would','could','should','about','after','before','these','those','other','there','where','while','being','doing','having']);
+  const words = text.toLowerCase()
+    .replace(/[^a-zA-Z0-9\u3000-\u9fff\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 3 && !stopWords.has(w));
+  // Deduplicate and take top 5
+  const unique = [...new Set(words)].slice(0, 5);
+  return unique.join(' ');
+}
+
 // ── Hook handlers ──────────────────────────────────────────────
 
 /**
@@ -101,6 +116,25 @@ async function handleToolUse() {
     if (isError) tags.push('error');
 
     await store(type, content, tags);
+
+    // Auto-recall related context from other sessions
+    try {
+      const keywords = extractKeywords(content);
+      if (keywords) {
+        const recalled = await get(`/recall?q=${encodeURIComponent(keywords)}&limit=3`);
+        if (recalled.results && recalled.results.length > 0) {
+          // Only show entries from OTHER sessions
+          const otherSession = recalled.results.filter(r => r.session !== SESSION_ID);
+          if (otherSession.length > 0) {
+            const lines = ['[vcontext] Related past context:'];
+            for (const r of otherSession.slice(0, 2)) {
+              lines.push(`  [${r.type}${r._tier ? '/' + r._tier : ''}] ${r.content.slice(0, 150)}`);
+            }
+            process.stdout.write(lines.join('\n') + '\n');
+          }
+        }
+      }
+    } catch {} // Never block on recall failure
   } catch {
     // Non-JSON input — store as-is
     await store('observation', input.slice(0, 2000), ['raw-hook']);
@@ -263,6 +297,35 @@ async function handleSessionRecall() {
   if (stats.ram) {
     lines.push(`### Memory: RAM ${stats.ram.entries} entries (${stats.ram.size}) | SSD ${stats.ssd?.entries || 0} entries (${stats.ssd?.size || '0'}) | Cloud ${stats.cloud?.configured ? 'connected' : 'not configured'}`);
   }
+
+  // Activity feed: what changed since last session check
+  try {
+    const localUser = process.env.USER || process.env.USERNAME || 'unknown';
+    const lastCheckFile = `/tmp/vcontext-last-check-${localUser}.txt`;
+    let lastCheck = '';
+    try {
+      lastCheck = readFileSync(lastCheckFile, 'utf-8').trim();
+    } catch {
+      // No previous check — use 24h ago as default
+      lastCheck = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19);
+    }
+    const feedUrl = `/feed?since=${encodeURIComponent(lastCheck)}&exclude_user=${encodeURIComponent(localUser)}`;
+    const feed = await get(feedUrl);
+    if (feed.entries && feed.entries.length > 0) {
+      lines.push('');
+      lines.push('### Activity from other sessions');
+      for (const entry of feed.entries.slice(0, 10)) {
+        const preview = entry.content && entry.content.length > 120 ? entry.content.slice(0, 120) + '...' : (entry.content || '');
+        lines.push(`- [${entry.type}] ${preview}`);
+      }
+      lines.push('');
+    }
+    // Update last-check timestamp
+    const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    try {
+      writeFileSync(lastCheckFile, now, 'utf-8');
+    } catch {} // Non-fatal if /tmp write fails
+  } catch {} // Never block on feed failure
 
   const output = lines.join('\n');
   if (output.trim().length > 50) {

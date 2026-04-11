@@ -647,6 +647,30 @@ async function handleStore(req, res) {
     entry._warning = sizeCheck.msg;
   }
 
+  // Auto-conflict detection for decision entries
+  if (type === 'decision') {
+    try {
+      // Search for potentially conflicting decisions
+      const keywords = content.split(/\s+/).filter(w => w.length > 3).slice(0, 5).join(' ');
+      if (keywords.length > 5) {
+        const existing = dbQuery(
+          `SELECT e.id, e.content, e.conditions, e.status, e.confidence
+           FROM entries_fts fts JOIN entries e ON e.id = fts.rowid
+           WHERE entries_fts MATCH ${esc(keywords)}
+           AND e.type = 'decision' AND e.status = 'active' AND e.id != ${entry.id}
+           LIMIT 5;`
+        );
+        if (existing.length > 0) {
+          entry._conflicts = {
+            count: existing.length,
+            entries: existing.map(e => ({ id: e.id, content: e.content.slice(0, 100), conditions: e.conditions })),
+            resolve_hint: `POST /resolve with candidates [${entry.id}, ${existing.map(e => e.id).join(', ')}] to evaluate which applies`,
+          };
+        }
+      }
+    } catch {} // Non-fatal
+  }
+
   sendJson(res, 201, { stored: entry });
 }
 
@@ -1117,6 +1141,71 @@ function handleTierStats(req, res) {
       bucket: cloudCfg?.bucket || null,
       entries: 0, // stub — no cloud entry count available yet
     },
+  });
+}
+
+/**
+ * GET /feed?since=<ISO-timestamp>&exclude_user=<userId>
+ * Returns entries created after the given timestamp, excluding the specified user's entries.
+ * Lets a session ask "what happened since I last checked, by other users/sessions?"
+ */
+function handleFeed(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  const params = parseQuery(req.url);
+  const since = params.since;
+  if (!since) {
+    return sendJson(res, 400, { error: 'Missing required query parameter: since (ISO timestamp)' });
+  }
+
+  const excludeUser = params.exclude_user || null;
+  const accessibleGroups = getAccessibleGroups(auth);
+
+  let groupFilter = '';
+  if (accessibleGroups) {
+    if (accessibleGroups.length === 0) {
+      groupFilter = ` AND tags NOT LIKE '%group:%'`;
+    } else {
+      const groupConditions = accessibleGroups.map(g => `tags LIKE ${esc('%group:' + g + '%')}`).join(' OR ');
+      groupFilter = ` AND (tags NOT LIKE '%group:%' OR ${groupConditions})`;
+    }
+  }
+
+  const excludeFilter = excludeUser ? ` AND tags NOT LIKE ${esc('%user:' + excludeUser + '%')}` : '';
+
+  // Query RAM tier
+  const ramSql = `SELECT * FROM entries WHERE created_at > ${esc(since)}${excludeFilter}${groupFilter} ORDER BY created_at DESC LIMIT 20;`;
+  let allEntries = [];
+  try {
+    const ramRows = dbQuery(ramSql, DB_PATH);
+    for (const r of ramRows) r._tier = 'ram';
+    allEntries.push(...ramRows);
+  } catch { /* ignore */ }
+
+  // Query SSD tier if we need more
+  if (allEntries.length < 20 && existsSync(SSD_DB_PATH)) {
+    try {
+      const ssdSql = `SELECT * FROM entries WHERE created_at > ${esc(since)}${excludeFilter}${groupFilter} ORDER BY created_at DESC LIMIT ${20 - allEntries.length};`;
+      const ssdRows = dbQuery(ssdSql, SSD_DB_PATH);
+      for (const r of ssdRows) r._tier = 'ssd';
+      allEntries.push(...ssdRows);
+    } catch { /* ignore */ }
+  }
+
+  // Sort merged results by created_at descending
+  allEntries.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+  allEntries = allEntries.slice(0, 20);
+  parseTags(allEntries);
+
+  // Determine latest timestamp
+  const latest = allEntries.length > 0 ? allEntries[0].created_at : since;
+
+  sendJson(res, 200, {
+    entries: allEntries,
+    count: allEntries.length,
+    since,
+    latest,
   });
 }
 
@@ -1807,6 +1896,7 @@ const ENDPOINTS_LIST = [
   'GET    /stats             — database statistics',
   'DELETE /prune             — remove old entries',
   'GET    /health            — health check',
+  'GET    /feed?since=       — activity feed since timestamp (&exclude_user=userId)',
   'POST   /tier/migrate      — trigger tier migration',
   'GET    /tier/stats        — per-tier statistics',
   'POST   /tier/config       — configure cloud provider',
@@ -1854,6 +1944,8 @@ const server = createServer(async (req, res) => {
       handlePrune(req, res);
     } else if (method === 'GET' && path === '/health') {
       handleHealth(req, res);
+    } else if (method === 'GET' && path === '/feed') {
+      handleFeed(req, res);
     } else if (method === 'POST' && path === '/tier/migrate') {
       handleTierMigrate(req, res);
     } else if (method === 'GET' && path === '/tier/stats') {
