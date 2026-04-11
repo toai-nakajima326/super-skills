@@ -4,6 +4,53 @@ Auto-maintained by the `self-evolve` skill. Records all upstream syncs, web disc
 
 ---
 
+## 2026-04-11 — upstream-sync (run 3)
+
+### Action: skipped
+- **Target**: 14 skills (auto-router, confidence-filter, debate-consensus, drift-detect, mcp-server-patterns, model-selector, phase-gate, quality-gate, report-format, self-evolve, session-handoff, supervisor-worker, ui-implementation, virtual-context)
+- **Source**: takurot/super-skills upstream/main
+- **Reasoning**: Same regression as prior runs — upstream shows 1,067 deletions, 0 additions. Syncing would destroy all custom orchestration skills.
+- **Changes**: None applied
+- **Risk assessment**: low (skip was protective)
+
+## 2026-04-11 — web-discovery (run 3)
+
+**Search window**: 2026-04-11 → 2026-04-11
+**Queries executed**: 10
+**New sources checked**: 10 (full page fetches via WebFetch)
+**Candidates found**: 8
+**Adopted**: 2 | **Skipped**: 6
+
+### Action: created — `agent-memory`
+- **Source**: tessl.io "From Prompts to AGENTS.md" (2026); arxiv 2601.20404 "On the Impact of AGENTS.md Files on the Efficiency of AI Coding Agents"; Addy Osmani "Code Agent Orchestra"; DEV Community "AI Agent Memory Management — When Markdown Files Are All You Need"; O'Reilly "Why Multi-Agent Systems Need Memory Engineering"
+- **Reasoning**: Hierarchical AGENTS.md pattern (root → component → tool, with parent-rule inheritance) is genuinely novel vs existing skills: `session-handoff` handles within-session state recovery; `virtual-context` uses SQLite/RAM store; our personal MEMORY.md is cross-project personal memory. AGENTS.md is project-level, git-native, shared institutional knowledge with a meta-learning feedback cycle. Proven by arxiv research: 28.64% runtime reduction, 16.58% output token reduction. Key distinction: LLM-generated rules show no benefit — human approval required for all additions.
+- **Changes**: Created `skills/agent-memory/SKILL.md` with session-start workflow (hierarchical read), failure/success workflows (propose → human approves → write), AGENTS.md format template, and research notes. Added to `manifests/install-components.json`, added to `skills-orchestration` module in `manifests/install-modules.json`, added routing entry (P6 patterns, trigger: AGENTS.md/new project/institutional memory) to `skills/auto-router/SKILL.md`.
+- **Risk assessment**: low — read-heavy workflow; never auto-writes AGENTS.md; all writes require human approval
+
+### Action: updated — `mcp-server-patterns`
+- **Source**: MCP Roadmap 2026-03-05 (modelcontextprotocol.io); MCP Tasks primitive SEP-1686; Server Cards specification
+- **Reasoning**: Two new MCP primitives not yet documented in the skill: (1) Tasks primitive (SEP-1686) — call-now/fetch-later pattern for async long-running operations, now in production use and surfacing retry/expiry gaps; (2) Server Cards — `.well-known/mcp-server-card.json` format for client/registry capability discovery without connecting. Both are newer than the 2025-11-25 spec already covered in the skill.
+- **Changes**: Added Tasks Primitive section (design pattern, retry semantics, expiry policy) and MCP Server Cards section (format, `.well-known/` URL, lightweight metadata guidance).
+- **Risk assessment**: low — documentation only
+
+### Updated
+- `auto-router`: Added routing entry for `agent-memory` at P6 patterns
+- `manifests/install-components.json`: Added `agent-memory` entry
+- `manifests/install-modules.json`: Added `agent-memory` to `skills-orchestration` module
+
+**Validated**: 38 skills, 0 errors. Deployed to `~/.claude/skills/` and `~/.codex/skills/`.
+
+### Skipped patterns
+
+- `shared-task-manifest` (Addy Osmani "Code Agent Orchestra"): Parallel agent coordination via explicit task list with pending/in_progress/completed/blocked statuses. Novel aspect (explicit dependency chains and peer-to-peer unblocking) is partially covered by `supervisor-worker` + `dmux-workflows`. Not found in 2+ independent sources as a distinct, proven workflow.
+- `context-reset-loop` / Ralph Loop (Osmani): Atomic commit cycle — pick task, implement, validate, commit, reset context. Context management aspect partially covered by `virtual-context`. The "reset after each commit" is basic git hygiene rather than a novel skill workflow. Not proven enough as standalone pattern.
+- `squad-drop-box` (GitHub Squad): Repository-native multi-agent coordination via `decisions.md` drop-box file + `.squad/` charter files. Interesting architecture but (a) Squad-platform-specific, (b) covered in spirit by `session-handoff` + `supervisor-worker`, (c) no implementation-agnostic SKILL.md workflow extractable.
+- `subagent-lifecycle-hooks`: Claude Code SubagentStart/SubagentStop hooks for event-driven coordination (Slack notifications, log aggregation). Too narrow and implementation-specific. `update-config` already covers hook setup; specific event names can be added there if needed.
+- `mcp-server-cards-standalone`: Server Cards are documented in `mcp-server-patterns` update above. Not worth a separate skill.
+- `memory-engineering-5-pillars` (O'Reilly): Taxonomy (working/episodic/semantic/procedural/shared), persistence, retrieval, coordination, consistency. Conceptually rich but too abstract/architectural for a concrete SKILL.md workflow. Better as documentation than a repeatable agent skill.
+
+---
+
 ## 2026-04-10 — upstream-sync
 
 ### Action: skipped
