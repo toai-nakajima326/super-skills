@@ -2671,13 +2671,17 @@ function cosineSimilarity(a, b) {
 
 // GET /search/semantic — Semantic similarity search using embeddings
 async function handleSemanticSearch(req, res) {
-  if (!ollamaAvailable) {
-    return sendJson(res, 503, { error: 'Semantic search requires Ollama. Install: brew install ollama' });
-  }
-
   const params = parseQuery(req.url);
   const q = params.q;
   if (!q) return sendJson(res, 400, { error: 'Missing query parameter: q' });
+
+  // No Ollama → immediate FTS fallback
+  if (!ollamaAvailable) {
+    const limit = Math.min(parseInt(params.limit) || 10, 50);
+    const ftsResults = dbQuery(`SELECT id, type, content, tags, created_at, reasoning FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(q)} LIMIT ${limit});`);
+    parseTags(ftsResults);
+    return sendJson(res, 200, { results: ftsResults, count: ftsResults.length, engine: 'fts-fallback', model_used: null, threshold: 0 });
+  }
 
   const limit = Math.min(parseInt(params.limit) || 10, 50);
   const threshold = parseFloat(params.threshold) || 0.5;
@@ -2730,9 +2734,9 @@ async function handleSemanticSearch(req, res) {
       for (const vr of vecResults) {
         const entry = entryMap[vr.rowid];
         if (!entry) continue;
-        // vec0 returns L2 distance; convert to similarity (0-1 range, approximate)
-        const similarity = Math.round(Math.max(0, 1 - vr.distance / 4) * 1000) / 1000;
-        if (similarity >= threshold) {
+        // vec0 returns L2 distance; convert to similarity via 1/(1+d)
+        const similarity = Math.round(1 / (1 + vr.distance) * 1000) / 1000;
+        if (similarity >= threshold || threshold <= 0.1) {  // always include at low threshold
           results.push({
             id: entry.id, type: entry.type, content: entry.content,
             tags: entry.tags, created_at: entry.created_at, reasoning: entry.reasoning,
