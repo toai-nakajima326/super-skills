@@ -76,7 +76,7 @@
 </head>
 <body>
 <header>
-  <h1>AI OS Dashboard <span style="font-size:12px;color:var(--text-muted);font-weight:normal;">v1.8.1</span></h1>
+  <h1>AI OS Dashboard <span style="font-size:12px;color:var(--text-muted);font-weight:normal;">v1.8.2</span></h1>
   <div class="meta">
     <span id="status-indicator"><span class="status-dot status-yellow"></span>Loading...</span>
     &nbsp;|&nbsp; <span id="live-indicator" style="color:var(--green);">Connecting...</span>
@@ -111,9 +111,15 @@
   <div class="card">
     <h2>Quick Actions</h2>
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
-      <button class="btn" onclick="doAction('/ai/summarize','POST')">Summarize Old</button>
-      <button class="btn" onclick="doAction('/tier/migrate','POST')">Tier Migrate</button>
+      <button class="btn" onclick="confirmAction('Summarize Old', '24時間以上前のエントリをOllamaで1文に要約します。元データは消えません。', '/ai/summarize', 'POST')">Summarize Old</button>
+      <button class="btn" onclick="confirmAction('Tier Migrate', '古いエントリをRAM→SSD→Cloudに移動します。RAM上の古いデータが整理されます。', '/tier/migrate', 'POST')">Tier Migrate</button>
       <button class="btn" onclick="refresh()">Refresh</button>
+    </div>
+    <div id="action-confirm" style="display:none;margin-top:8px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-bar);font-size:12px;">
+      <div id="action-confirm-title" style="font-weight:bold;margin-bottom:4px;"></div>
+      <div id="action-confirm-desc" style="color:var(--text-muted);margin-bottom:8px;"></div>
+      <button class="btn" id="action-confirm-ok" style="margin-right:4px;">Execute</button>
+      <button class="btn" onclick="document.getElementById('action-confirm').style.display='none'">Cancel</button>
     </div>
     <div id="action-result" style="margin-top:8px;font-size:12px;color:var(--text-muted);"></div>
   </div>
@@ -155,6 +161,18 @@ async function fetchJson(path) {
   } catch { return null; }
 }
 
+function confirmAction(title, desc, path, method) {
+  var box = document.getElementById('action-confirm');
+  document.getElementById('action-confirm-title').textContent = title;
+  document.getElementById('action-confirm-desc').textContent = desc;
+  var okBtn = document.getElementById('action-confirm-ok');
+  okBtn.onclick = function() {
+    box.style.display = 'none';
+    doAction(path, method);
+  };
+  box.style.display = 'block';
+}
+
 async function doAction(path, method) {
   const el = document.getElementById('action-result');
   el.textContent = 'Executing...';
@@ -162,6 +180,7 @@ async function doAction(path, method) {
     const r = await fetch(API + path, { method });
     const d = await r.json();
     el.textContent = JSON.stringify(d).slice(0, 200);
+    refresh();
   } catch (e) { el.textContent = 'Error: ' + e.message; }
 }
 
