@@ -488,6 +488,48 @@ async function refresh() {
     mhtml += '</div>';
     mhtml += '</div>';
 
+    // Per-session / per-user / per-project breakdowns
+    if (metrics.per_session && metrics.per_session.length > 0) {
+      mhtml += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--bg-bar);font-size:11px;">';
+      mhtml += '<div style="display:flex;gap:16px;flex-wrap:wrap;">';
+
+      // Sessions
+      mhtml += '<div style="flex:1;min-width:150px;">';
+      mhtml += '<div style="color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">By Session</div>';
+      for (var si = 0; si < Math.min(metrics.per_session.length, 5); si++) {
+        var ps = metrics.per_session[si];
+        var sSav = Math.round((ps.savings_rate || 0) * 100);
+        var sCol = sSav >= 50 ? 'var(--green)' : sSav >= 20 ? 'var(--yellow)' : 'var(--text-dim)';
+        mhtml += '<div><span style="font-family:monospace;">' + escapeHtml((ps.session||'?').slice(0,8)) + '</span> ';
+        mhtml += ps.events + 'ev <span style="color:' + sCol + ';">' + sSav + '%</span></div>';
+      }
+      mhtml += '</div>';
+
+      // Projects
+      if (metrics.per_project && metrics.per_project.length > 0) {
+        mhtml += '<div style="flex:1;min-width:150px;">';
+        mhtml += '<div style="color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">By Project</div>';
+        for (var pi = 0; pi < Math.min(metrics.per_project.length, 5); pi++) {
+          var pp = metrics.per_project[pi];
+          mhtml += '<div><span style="color:var(--accent);">' + escapeHtml(pp.project) + '</span> ' + pp.sessions + ' sessions</div>';
+        }
+        mhtml += '</div>';
+      }
+
+      // Users
+      if (metrics.per_user && metrics.per_user.length > 0) {
+        mhtml += '<div style="flex:1;min-width:150px;">';
+        mhtml += '<div style="color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">By User</div>';
+        for (var ui = 0; ui < Math.min(metrics.per_user.length, 5); ui++) {
+          var pu = metrics.per_user[ui];
+          mhtml += '<div>' + escapeHtml(pu.user) + ' <span style="color:var(--text-dim);">' + pu.events + ' events</span></div>';
+        }
+        mhtml += '</div>';
+      }
+
+      mhtml += '</div></div>';
+    }
+
     document.getElementById('metrics-content').innerHTML = mhtml;
   } else {
     document.getElementById('metrics-content').innerHTML = '<div style="color:var(--text-muted);">No metrics data</div>';

@@ -3098,6 +3098,50 @@ function handleMetricsReport(req, res) {
   const totalEffort = servedFromContext + additionalReadTokens;
   const savingsRate = totalEffort > 0 ? Math.round(servedFromContext / totalEffort * 1000) / 1000 : 0;
 
+  // Per-session breakdown
+  const sessionRows = dbQuery(`SELECT session, COUNT(*) as events, SUM(token_estimate) as tokens FROM entry_index WHERE session IS NOT NULL AND created_at >= ${since} GROUP BY session ORDER BY events DESC LIMIT 20;`);
+  const perSession = sessionRows.map(r => {
+    const readsRow = dbQuery(`SELECT SUM(token_estimate) as t FROM entry_index WHERE session = ${esc(r.session)} AND tool_name IN ('Read','Grep','Glob') AND created_at >= ${since};`);
+    const readTok = readsRow[0]?.t || 0;
+    const totalTok = r.tokens || 0;
+    return {
+      session: r.session,
+      events: r.events,
+      tokens: totalTok,
+      read_tokens: readTok,
+      savings_rate: totalTok > 0 ? Math.round((1 - readTok / totalTok) * 1000) / 1000 : 0,
+    };
+  });
+
+  // Per-user breakdown (from entry tags)
+  const userRows = dbQuery(`SELECT tags FROM entries WHERE created_at >= ${since} AND tags LIKE '%user:%';`);
+  const userMap = {};
+  for (const row of userRows) {
+    try {
+      const tags = JSON.parse(row.tags);
+      for (const t of tags) {
+        if (t.startsWith('user:')) {
+          const u = t.slice(5);
+          userMap[u] = (userMap[u] || 0) + 1;
+        }
+      }
+    } catch {}
+  }
+  const perUser = Object.entries(userMap).sort((a, b) => b[1] - a[1]).map(([user, events]) => ({ user, events }));
+
+  // Determine project (cwd) breakdown from entry_index content
+  const projectRows = dbQuery(`SELECT ei.session, e.content FROM entry_index ei JOIN entries e ON ei.entry_id = e.id WHERE ei.created_at >= ${since} AND ei.session IS NOT NULL GROUP BY ei.session LIMIT 20;`);
+  const projectMap = {};
+  for (const row of projectRows) {
+    try {
+      const d = JSON.parse(row.content);
+      const cwd = d.cwd || '';
+      const project = cwd.split('/').filter(Boolean).pop() || 'unknown';
+      projectMap[project] = (projectMap[project] || 0) + 1;
+    } catch {}
+  }
+  const perProject = Object.entries(projectMap).sort((a, b) => b[1] - a[1]).map(([project, sessions]) => ({ project, sessions }));
+
   sendJson(res, 200, {
     period_hours: hours,
     operations,
@@ -3109,6 +3153,9 @@ function handleMetricsReport(req, res) {
       additional_read_tokens: additionalReadTokens,
       total_context_tokens: totalContextTokens,
     },
+    per_session: perSession,
+    per_user: perUser,
+    per_project: perProject,
     index: {
       indexed: indexCount[0]?.c || 0,
       total: entryCount[0]?.c || 0,
