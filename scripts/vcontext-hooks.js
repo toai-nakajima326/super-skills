@@ -166,6 +166,26 @@ async function handleSessionRecall() {
     }
   }
 
+  // Skill evolution history — extended skills
+  const diffs = await get('/recall?q=skill-diff&type=skill-diff&limit=10');
+  if (diffs.results && diffs.results.length > 0) {
+    lines.push('### Skill Evolution (recent changes)');
+    for (const r of diffs.results.slice(0, 5)) {
+      try {
+        const d = JSON.parse(r.content);
+        lines.push(`- **${d.skill}** (${d.target}): ${d.old_lines}→${d.new_lines} lines [${d.timestamp?.slice(0, 10) || '?'}]`);
+        // Show first 3 diff lines as context
+        const diffLines = (d.diff || '').split('\n').slice(0, 3);
+        for (const dl of diffLines) {
+          lines.push(`  ${dl.slice(0, 120)}`);
+        }
+      } catch {
+        lines.push(`- ${r.content.slice(0, 100)}`);
+      }
+    }
+    lines.push('');
+  }
+
   if (stats.ram) {
     lines.push(`Memory: RAM ${stats.ram.entries} (${stats.ram.size}) | SSD ${stats.ssd?.entries || 0} (${stats.ssd?.size || '0'})`);
   }
@@ -174,6 +194,41 @@ async function handleSessionRecall() {
   if (output.trim().length > 50) {
     process.stdout.write(output);
   }
+}
+
+// ── Skill context enrichment ─────────────────────────────────────
+// When a skill is about to be used, inject its evolution history.
+// Called as a separate command: `skill-context <skill-name>`
+
+async function handleSkillContext(skillName) {
+  if (!skillName) return;
+
+  // Get past versions of this skill (FTS searches content, not tags)
+  const versions = await get(`/recall?q=${encodeURIComponent(skillName)}&type=skill-version&limit=3`);
+  const diffs = await get(`/recall?q=${encodeURIComponent(skillName)}&type=skill-diff&limit=3`);
+
+  if ((!versions.results || versions.results.length === 0) && (!diffs.results || diffs.results.length === 0)) return;
+
+  const lines = [`[extended-skill] ${skillName} — evolution context:`];
+
+  if (diffs.results && diffs.results.length > 0) {
+    for (const r of diffs.results) {
+      try {
+        const d = JSON.parse(r.content);
+        lines.push(`  [${d.timestamp?.slice(0, 10) || '?'}] ${d.old_lines}→${d.new_lines} lines (${d.target})`);
+        const diffLines = (d.diff || '').split('\n').filter(l => l.startsWith('+') || l.startsWith('-')).slice(0, 5);
+        for (const dl of diffLines) {
+          lines.push(`    ${dl.slice(0, 100)}`);
+        }
+      } catch {}
+    }
+  }
+
+  if (versions.results && versions.results.length > 0) {
+    lines.push(`  ${versions.results.length} past version(s) stored. Use /recall?q=skill:${skillName}&type=skill-version to retrieve.`);
+  }
+
+  process.stdout.write(lines.join('\n') + '\n');
 }
 
 // ── Manual CLI commands ──────────────────────────────────────────
@@ -218,6 +273,10 @@ switch (command) {
   // Read-side: session recall
   case 'session-recall':
     handleSessionRecall().catch(() => process.exit(0));
+    break;
+  // Read-side: skill evolution context
+  case 'skill-context':
+    handleSkillContext(args[0]).catch(() => process.exit(0));
     break;
 
   // Manual CLI commands
