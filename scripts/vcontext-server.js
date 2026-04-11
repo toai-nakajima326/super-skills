@@ -28,7 +28,7 @@
  *   WS     /ws              — WebSocket real-time push notifications
  */
 
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { execSync, execFileSync } from 'node:child_process';
 import { existsSync, statSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -228,6 +228,10 @@ function migrateRamSchema() {
       dbExec("ALTER TABLE entries ADD COLUMN status TEXT DEFAULT 'active';");
       console.log('[vcontext] Added status column to RAM DB');
     }
+    if (!colNames.includes('embedding')) {
+      dbExec("ALTER TABLE entries ADD COLUMN embedding TEXT;");
+      console.log('[vcontext] Added embedding column to RAM DB');
+    }
 
     // Back-fill last_accessed for existing rows that have NULL
     dbExec("UPDATE entries SET last_accessed = created_at WHERE last_accessed IS NULL;");
@@ -258,7 +262,8 @@ CREATE TABLE IF NOT EXISTS entries (
   conditions TEXT,
   supersedes INTEGER,
   confidence TEXT DEFAULT 'medium',
-  status TEXT DEFAULT 'active'
+  status TEXT DEFAULT 'active',
+  embedding TEXT
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
   content,
@@ -308,6 +313,9 @@ END;
       }
       if (!colNames.includes('status')) {
         dbExec("ALTER TABLE entries ADD COLUMN status TEXT DEFAULT 'active';", SSD_DB_PATH);
+      }
+      if (!colNames.includes('embedding')) {
+        dbExec("ALTER TABLE entries ADD COLUMN embedding TEXT;", SSD_DB_PATH);
       }
     } catch (e) {
       console.error('[vcontext] SSD schema migration failed:', e.message);
@@ -644,6 +652,38 @@ async function handleStore(req, res) {
     console.error('[write-through] SSD sync failed:', e.message);
   }
 
+  // Auto-summarize with local AI if available (async, non-blocking)
+  if (ollamaAvailable && content.length > 200) {
+    setImmediate(async () => {
+      try {
+        const model = pickModel('summarize');
+        if (!model) return;
+        const summary = await ollamaGenerate(model,
+          `Summarize this in one sentence (max 50 words). Output ONLY the summary, nothing else:\n\n${content.slice(0, 2000)}`,
+          { maxTokens: 100 }
+        );
+        if (summary && summary.length > 5) {
+          dbExec(`UPDATE entries SET reasoning = ${esc(summary.trim())} WHERE id = ${entry.id} AND reasoning IS NULL;`);
+        }
+      } catch {} // Non-fatal
+    });
+  }
+
+  // Generate embedding with local AI (async, non-blocking)
+  if (ollamaAvailable) {
+    setImmediate(async () => {
+      try {
+        const model = pickModel('embed');
+        if (!model) return;
+        const embedding = await ollamaEmbed(model, content.slice(0, 1000));
+        if (embedding && embedding.length > 0) {
+          // Store as JSON blob (SQLite has no native vector type)
+          dbExec(`UPDATE entries SET embedding = ${esc(JSON.stringify(embedding))} WHERE id = ${entry.id};`);
+        }
+      } catch {} // Non-fatal
+    });
+  }
+
   if (sizeCheck.msg) {
     entry._warning = sizeCheck.msg;
   }
@@ -708,6 +748,43 @@ async function handleStore(req, res) {
 
             consultations.set(consultId, consultation);
             entry._auto_consultation = consultId;
+
+            // If local AI available, auto-resolve immediately
+            if (ollamaAvailable) {
+              setImmediate(async () => {
+                try {
+                  const aiModel = pickModel('judge');
+                  if (!aiModel) return;
+                  const aiResponse = await ollamaGenerate(aiModel, basePrompt, { maxTokens: 200, temperature: 0.1 });
+                  if (aiResponse) {
+                    try {
+                      const aiParsed = JSON.parse(aiResponse);
+                      // Store as 'local' model response
+                      consultation.responses['local'] = {
+                        chosen: aiParsed.chosen,
+                        reasoning: aiParsed.reasoning || aiResponse.slice(0, 200),
+                        confidence: aiParsed.confidence || 'medium',
+                        responded_at: new Date().toISOString(),
+                        model_used: aiModel,
+                      };
+                      // Add 'local' to models if not there
+                      if (!consultation.models.includes('local')) consultation.models.push('local');
+                      console.log(`[ollama] Auto-resolved consultation ${consultId}: chose ${aiParsed.chosen}`);
+                      wsBroadcast('consultation_updated', { consultation_id: consultId, local_response: consultation.responses['local'] });
+                    } catch {
+                      // Response wasn't valid JSON, store raw
+                      consultation.responses['local'] = {
+                        chosen: null,
+                        reasoning: aiResponse.slice(0, 200),
+                        confidence: 'low',
+                        responded_at: new Date().toISOString(),
+                        model_used: aiModel,
+                      };
+                    }
+                  }
+                } catch {} // Non-fatal
+              });
+            }
 
             // Broadcast to WebSocket clients
             wsBroadcast('consultation_request', {
@@ -1136,6 +1213,8 @@ function handleHealth(req, res) {
     database: dbOk,
     ssd_database: ssdExists,
     cloud_configured: cloudStore.isConfigured(),
+    local_ai: ollamaAvailable,
+    local_ai_model: ollamaPreferredModel,
     ws_clients: wsClients.size,
     uptime_seconds: Math.floor(process.uptime()),
   });
@@ -2031,6 +2110,8 @@ function formatBytes(bytes) {
 // ── Periodic migration check (piggybacks on backup timer) ─────
 function doBackupAndMigrate() {
   doBackup();
+  // Recheck Ollama availability
+  checkOllama();
   // Quick migration check
   try {
     const moved = migrateRamToSsd();
@@ -2231,6 +2312,186 @@ function wsBroadcast(eventType, entry) {
   }
 }
 
+// ── Local AI (Ollama) ─────────────────────────────────────────
+
+const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
+let ollamaAvailable = false;
+let ollamaModels = [];
+let ollamaPreferredModel = null;
+
+// Model preference order for different tasks
+const MODEL_PREFS = {
+  summarize: ['llama3.1', 'qwen2.5-coder', 'glm-4.7-flash', 'gemma'],
+  embed: ['gemma', 'llama3.1', 'qwen2.5-coder'],
+  judge: ['llama3.1', 'glm-4.7-flash', 'qwen2.5-coder'],
+  code: ['qwen2.5-coder', 'llama3.1'],
+};
+
+async function checkOllama() {
+  try {
+    const data = await httpGet(`${OLLAMA_URL}/api/tags`);
+    const parsed = JSON.parse(data);
+    ollamaModels = (parsed.models || []).map(m => m.name);
+    ollamaAvailable = ollamaModels.length > 0;
+    // Pick preferred model (first match in preference order)
+    ollamaPreferredModel = null;
+    for (const pref of MODEL_PREFS.summarize) {
+      const match = ollamaModels.find(m => m.startsWith(pref));
+      if (match) { ollamaPreferredModel = match; break; }
+    }
+    if (!ollamaPreferredModel && ollamaModels.length > 0) {
+      ollamaPreferredModel = ollamaModels[0];
+    }
+    if (ollamaAvailable) {
+      console.log(`[ollama] Available: ${ollamaModels.join(', ')} (preferred: ${ollamaPreferredModel})`);
+    }
+  } catch {
+    ollamaAvailable = false;
+    ollamaModels = [];
+    ollamaPreferredModel = null;
+  }
+}
+
+function pickModel(task) {
+  if (!ollamaAvailable) return null;
+  const prefs = MODEL_PREFS[task] || MODEL_PREFS.summarize;
+  for (const pref of prefs) {
+    const match = ollamaModels.find(m => m.startsWith(pref));
+    if (match) return match;
+  }
+  return ollamaPreferredModel;
+}
+
+// Simple HTTP GET helper (for Ollama API)
+function httpGet(url) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const req = httpRequest(parsed, { method: 'GET', timeout: 5000 }, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks).toString()));
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    req.end();
+  });
+}
+
+// Call Ollama generate API
+function ollamaGenerate(model, prompt, options = {}) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      model,
+      prompt,
+      stream: false,
+      options: { temperature: options.temperature || 0.3, num_predict: options.maxTokens || 256 },
+    });
+    const parsed = new URL(`${OLLAMA_URL}/api/generate`);
+    const req = httpRequest(parsed, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      timeout: 30000,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        try {
+          const data = JSON.parse(Buffer.concat(chunks).toString());
+          resolve(data.response || '');
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('ollama timeout')); });
+    req.write(body);
+    req.end();
+  });
+}
+
+// Call Ollama embeddings API
+function ollamaEmbed(model, text) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({ model, prompt: text });
+    const parsed = new URL(`${OLLAMA_URL}/api/embeddings`);
+    const req = httpRequest(parsed, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      timeout: 15000,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        try {
+          const data = JSON.parse(Buffer.concat(chunks).toString());
+          resolve(data.embedding || []);
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('ollama embed timeout')); });
+    req.write(body);
+    req.end();
+  });
+}
+
+// ── Local AI endpoint handlers ────────────────────────────────
+
+// GET /ai/status — Show local AI status
+function handleAiStatus(req, res) {
+  sendJson(res, 200, {
+    ollama_available: ollamaAvailable,
+    ollama_url: OLLAMA_URL,
+    models: ollamaModels,
+    preferred: {
+      summarize: pickModel('summarize'),
+      embed: pickModel('embed'),
+      judge: pickModel('judge'),
+      code: pickModel('code'),
+    },
+    features: {
+      auto_summarize: ollamaAvailable,
+      auto_embed: ollamaAvailable,
+      auto_conflict_resolve: ollamaAvailable,
+      semantic_search: false, // Future: when embeddings are used for search
+    },
+  });
+}
+
+// POST /ai/summarize — Summarize entries using local AI
+async function handleAiSummarize(req, res) {
+  if (!ollamaAvailable) {
+    return sendJson(res, 503, { error: 'Local AI not available. Install Ollama: brew install ollama' });
+  }
+  const body = await readBody(req);
+  const ids = body.ids || [];
+  const model = pickModel('summarize');
+
+  if (ids.length === 0) {
+    // Summarize all entries older than 24h that don't have a summary
+    const rows = dbQuery(`SELECT id, content FROM entries WHERE reasoning IS NULL AND created_at < datetime('now', '-1 day') LIMIT 20;`);
+    for (const row of rows) {
+      try {
+        const summary = await ollamaGenerate(model, `Summarize in one sentence (max 50 words):\n\n${row.content.slice(0, 2000)}`, { maxTokens: 100 });
+        if (summary) dbExec(`UPDATE entries SET reasoning = ${esc(summary.trim())} WHERE id = ${row.id};`);
+      } catch {}
+    }
+    return sendJson(res, 200, { summarized: rows.length, model });
+  }
+
+  // Summarize specific entries
+  let count = 0;
+  for (const id of ids) {
+    const rows = dbQuery(`SELECT content FROM entries WHERE id = ${id};`);
+    if (rows[0]) {
+      try {
+        const summary = await ollamaGenerate(model, `Summarize in one sentence (max 50 words):\n\n${rows[0].content.slice(0, 2000)}`, { maxTokens: 100 });
+        if (summary) { dbExec(`UPDATE entries SET reasoning = ${esc(summary.trim())} WHERE id = ${id};`); count++; }
+      } catch {}
+    }
+  }
+  sendJson(res, 200, { summarized: count, model });
+}
+
 // ── Request router ─────────────────────────────────────────────
 const ENDPOINTS_LIST = [
   'POST   /store             — store context entry (body: {type,content,tags?,session?,namespace?,group?,reasoning?,conditions?,supersedes?,confidence?,status?})',
@@ -2257,6 +2518,8 @@ const ENDPOINTS_LIST = [
   'GET    /consult/:id       — check consultation status and aggregated results',
   'GET    /consult/pending?model= — list pending consultations for a model',
   'POST   /consult/auto-respond — batch respond to pending consultations {model, responses[]}',
+  'GET    /ai/status         — local AI (Ollama) status and capabilities',
+  'POST   /ai/summarize      — summarize entries using local AI {ids?:[]}',
   'WS     /ws                — WebSocket real-time push notifications (upgrade)',
   'WS     /ws?key=<apikey>   — WebSocket with API key auth',
 ];
@@ -2325,6 +2588,10 @@ const server = createServer(async (req, res) => {
       await handleConsultResponse(req, res);
     } else if (method === 'GET' && path.match(/^\/consult\/[^/]+$/) && !path.endsWith('/response')) {
       handleConsultStatus(req, res);
+    } else if (method === 'GET' && path === '/ai/status') {
+      handleAiStatus(req, res);
+    } else if (method === 'POST' && path === '/ai/summarize') {
+      await handleAiSummarize(req, res);
     } else {
       sendJson(res, 404, {
         error: 'Not found',
@@ -2376,6 +2643,9 @@ function shutdown(signal) {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
+// Check local AI availability
+checkOllama();
 
 // Start
 server.listen(PORT, '127.0.0.1', () => {
