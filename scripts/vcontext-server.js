@@ -44,6 +44,32 @@ const NAMESPACE_TAG_PREFIX = 'project:';
 const RAM_TO_SSD_DAYS = 7;
 const SSD_TO_CLOUD_DAYS = 30;
 
+// ── User identity ─────────────────────────────────────────────
+import { userInfo, hostname } from 'node:os';
+const LOCAL_USER = userInfo().username;
+const LOCAL_HOST = hostname();
+const LOCAL_USER_ID = `${LOCAL_USER}@${LOCAL_HOST}`;
+
+// ── API Key auth (for cloud/remote access) ────────────────────
+const API_KEYS_PATH = join(BACKUP_DIR, 'vcontext-api-keys.json');
+function loadApiKeys() {
+  try {
+    return JSON.parse(readFileSync(API_KEYS_PATH, 'utf-8'));
+  } catch { return { keys: {} }; }
+}
+function validateApiKey(req) {
+  const authHeader = req.headers['authorization'] || '';
+  const key = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+  if (!key) {
+    // No key = local access, use local user identity
+    return { valid: true, userId: LOCAL_USER_ID, local: true };
+  }
+  const keys = loadApiKeys();
+  const entry = keys.keys[key];
+  if (!entry) return { valid: false, userId: null, local: false };
+  return { valid: true, userId: entry.userId, local: false };
+}
+
 // ── SQLite helpers ─────────────────────────────────────────────
 
 /**
@@ -467,6 +493,10 @@ function parseTags(rows) {
  * Body: { type, content, tags?, session? }
  */
 async function handleStore(req, res) {
+  // Auth check
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
   const sizeCheck = checkDbSize();
   if (!sizeCheck.ok) {
     return sendJson(res, 507, { error: sizeCheck.msg });
@@ -482,12 +512,14 @@ async function handleStore(req, res) {
     return sendJson(res, 400, { error: `Invalid type. Must be one of: ${VALID_TYPES.join(', ')}` });
   }
 
-  // Auto-inject namespace as a tag (project:xxx)
+  // Auto-inject namespace and user identity as tags
   const tagList = Array.isArray(tags) ? [...tags] : [];
   if (namespace) {
     const nsTag = NAMESPACE_TAG_PREFIX + namespace;
     if (!tagList.includes(nsTag)) tagList.push(nsTag);
   }
+  const userTag = `user:${auth.userId}`;
+  if (!tagList.includes(userTag)) tagList.push(userTag);
   const tagsJson = JSON.stringify(tagList);
   const tokenEst = estimateTokens(content);
 
@@ -520,6 +552,9 @@ async function handleStore(req, res) {
  * Searches all tiers: RAM → SSD → Cloud (if configured)
  */
 function handleRecall(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
   const params = parseQuery(req.url);
   const q = params.q;
   if (!q) {
@@ -529,11 +564,12 @@ function handleRecall(req, res) {
   const limit = Math.min(parseInt(params.limit) || 10, 100);
   const type = params.type;
   const namespace = params.namespace; // filter by project:xxx
+  const userFilter = params.user || (params.my === 'true' ? auth.userId : null);
   const allResults = [];
   const seenIds = new Map(); // created_at+content → true (for cross-tier dedup)
 
   // --- Tier 1: RAM ---
-  const ramResults = searchTier(DB_PATH, q, type, limit, namespace);
+  const ramResults = searchTier(DB_PATH, q, type, limit, namespace, userFilter);
   for (const row of ramResults) {
     row._tier = 'ram';
     const key = `${row.created_at}||${row.type}||${String(row.content).slice(0, 100)}`;
@@ -546,7 +582,7 @@ function handleRecall(req, res) {
   // --- Tier 2: SSD (if still need more results) ---
   if (allResults.length < limit) {
     const ssdLimit = limit - allResults.length;
-    const ssdResults = searchTier(SSD_DB_PATH, q, type, ssdLimit, namespace);
+    const ssdResults = searchTier(SSD_DB_PATH, q, type, ssdLimit, namespace, userFilter);
     const promoted = [];
     for (const row of ssdResults) {
       const key = `${row.created_at}||${row.type}||${String(row.content).slice(0, 100)}`;
@@ -590,15 +626,16 @@ function handleRecall(req, res) {
 /**
  * Search a single tier's database using FTS5, with LIKE fallback.
  */
-function searchTier(dbPath, q, type, limit, namespace) {
+function searchTier(dbPath, q, type, limit, namespace, userFilter) {
   if (!existsSync(dbPath)) return [];
   const typeFilter = type && VALID_TYPES.includes(type) ? ` AND e.type = ${esc(type)}` : '';
   const nsFilter = namespace ? ` AND e.tags LIKE ${esc('%project:' + namespace + '%')}` : '';
+  const userFlt = userFilter ? ` AND e.tags LIKE ${esc('%user:' + userFilter + '%')}` : '';
 
   const ftsSql = `SELECT e.*, rank
     FROM entries_fts fts
     JOIN entries e ON e.id = fts.rowid
-    WHERE entries_fts MATCH ${esc(q)}${typeFilter}${nsFilter}
+    WHERE entries_fts MATCH ${esc(q)}${typeFilter}${nsFilter}${userFlt}
     ORDER BY rank * 0.7 + (julianday(e.created_at) - julianday('2024-01-01')) * 0.3
     LIMIT ${limit};`;
 
@@ -606,7 +643,7 @@ function searchTier(dbPath, q, type, limit, namespace) {
     return dbQuery(ftsSql, dbPath);
   } catch {
     // FTS query syntax error — fall back to LIKE search
-    const likeSql = `SELECT * FROM entries WHERE content LIKE ${esc('%' + q + '%')}${typeFilter}${nsFilter} ORDER BY created_at DESC LIMIT ${limit};`;
+    const likeSql = `SELECT * FROM entries WHERE content LIKE ${esc('%' + q + '%')}${typeFilter}${nsFilter}${userFlt} ORDER BY created_at DESC LIMIT ${limit};`;
     try {
       return dbQuery(likeSql, dbPath);
     } catch {
@@ -976,6 +1013,61 @@ async function handleTierConfig(req, res) {
   }
 }
 
+// ── Auth handlers ─────────────────────────────────────────────
+
+import { randomBytes } from 'node:crypto';
+
+/**
+ * POST /auth/create-key — Create a new API key for a user.
+ * Body: { userId: "tanaka@remote-pc", name: "Tanaka Remote" }
+ * Returns: { apiKey: "vctx_...", userId, name }
+ */
+async function handleCreateKey(req, res) {
+  // Only local users can create keys
+  const auth = validateApiKey(req);
+  if (!auth.local) {
+    return sendJson(res, 403, { error: 'Only local access can create API keys' });
+  }
+
+  const body = await readBody(req);
+  const { userId, name } = body;
+  if (!userId || !name) {
+    return sendJson(res, 400, { error: 'Required: userId, name' });
+  }
+
+  const apiKey = 'vctx_' + randomBytes(32).toString('hex');
+  const keys = loadApiKeys();
+  keys.keys[apiKey] = {
+    userId,
+    name,
+    createdAt: new Date().toISOString(),
+    createdBy: LOCAL_USER_ID,
+  };
+
+  mkdirSync(BACKUP_DIR, { recursive: true });
+  writeFileSync(API_KEYS_PATH, JSON.stringify(keys, null, 2), 'utf-8');
+
+  sendJson(res, 201, {
+    apiKey,
+    userId,
+    name,
+    _setup: `On the remote PC, set:\n  export VCONTEXT_API_KEY="${apiKey}"\n  export VCONTEXT_URL="http://<this-pc-ip>:${PORT}"\nThen curl with: -H "Authorization: Bearer ${apiKey}"`,
+  });
+}
+
+/**
+ * GET /auth/whoami — Show current user identity.
+ */
+function handleWhoami(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+  sendJson(res, 200, {
+    userId: auth.userId,
+    local: auth.local,
+    host: LOCAL_HOST,
+  });
+}
+
 // ── Utilities ──────────────────────────────────────────────────
 function formatBytes(bytes) {
   if (bytes === 0) return '0 B';
@@ -1015,6 +1107,8 @@ const ENDPOINTS_LIST = [
   'POST   /tier/migrate    — trigger tier migration',
   'GET    /tier/stats      — per-tier statistics',
   'POST   /tier/config     — configure cloud provider',
+  'POST   /auth/create-key — create API key {userId, name}',
+  'GET    /auth/whoami     — show current user identity',
 ];
 
 const server = createServer(async (req, res) => {
@@ -1055,6 +1149,10 @@ const server = createServer(async (req, res) => {
       handleTierStats(req, res);
     } else if (method === 'POST' && path === '/tier/config') {
       await handleTierConfig(req, res);
+    } else if (method === 'POST' && path === '/auth/create-key') {
+      await handleCreateKey(req, res);
+    } else if (method === 'GET' && path === '/auth/whoami') {
+      handleWhoami(req, res);
     } else {
       sendJson(res, 404, {
         error: 'Not found',
