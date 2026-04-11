@@ -2,25 +2,30 @@
 /**
  * vcontext-server.js — Virtual Context REST API
  *
- * A local HTTP server (port 3100) that provides Claude Code with a
+ * A local HTTP server (port 3150) that provides Claude Code with a
  * persistent "virtual memory" backed by SQLite + FTS5 on a RAM disk.
+ *
+ * Tiered storage: RAM (hot) → SSD (warm) → Cloud (cold, stub)
  *
  * Zero npm dependencies — uses Node.js built-in modules + sqlite3 CLI.
  *
  * Endpoints:
- *   POST   /store         — store a context entry
- *   GET    /recall        — full-text search (?q=keyword&type=&limit=10)
- *   GET    /recent        — recent entries (?n=20&type=)
- *   GET    /session/:id   — entries for a session
- *   POST   /summarize     — compact old entries into summaries
- *   GET    /stats         — database statistics
- *   DELETE /prune         — remove old entries (?older_than=7d)
- *   GET    /health        — health check
+ *   POST   /store           — store a context entry
+ *   GET    /recall          — full-text search (?q=keyword&type=&limit=10)
+ *   GET    /recent          — recent entries (?n=20&type=)
+ *   GET    /session/:id     — entries for a session
+ *   POST   /summarize       — compact old entries into summaries
+ *   GET    /stats           — database statistics
+ *   DELETE /prune           — remove old entries (?older_than=7d)
+ *   GET    /health          — health check
+ *   POST   /tier/migrate    — manually trigger tier migration
+ *   GET    /tier/stats      — per-tier statistics
+ *   POST   /tier/config     — configure cloud provider
  */
 
 import { createServer } from 'node:http';
 import { execSync, execFileSync } from 'node:child_process';
-import { existsSync, statSync, copyFileSync, mkdirSync } from 'node:fs';
+import { existsSync, statSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 // ── Configuration ──────────────────────────────────────────────
@@ -29,36 +34,42 @@ const MOUNT_POINT = '/Volumes/VContext';
 const DB_PATH = join(MOUNT_POINT, 'vcontext.db');
 const BACKUP_DIR = join(process.env.HOME, 'skills', 'data');
 const BACKUP_PATH = join(BACKUP_DIR, 'vcontext-backup.sqlite');
+const SSD_DB_PATH = join(BACKUP_DIR, 'vcontext-ssd.db');
+const CLOUD_CONFIG_PATH = join(BACKUP_DIR, 'vcontext-cloud.json');
 const BACKUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const WARN_SIZE_BYTES = 3 * 1024 * 1024 * 1024;     // 3 GB
 const MAX_SIZE_BYTES = 3.5 * 1024 * 1024 * 1024;     // 3.5 GB
 const VALID_TYPES = ['conversation', 'decision', 'observation', 'code', 'error'];
+const RAM_TO_SSD_DAYS = 7;
+const SSD_TO_CLOUD_DAYS = 30;
 
 // ── SQLite helpers ─────────────────────────────────────────────
 
 /**
  * Run a SQL statement that modifies data (INSERT, UPDATE, DELETE, CREATE).
- * Returns nothing.
+ * @param {string} sql
+ * @param {string} [dbPath=DB_PATH] - path to the database file
  */
-function dbExec(sql) {
+function dbExec(sql, dbPath = DB_PATH) {
   try {
-    execFileSync('sqlite3', [DB_PATH, sql], {
+    execFileSync('sqlite3', [dbPath, sql], {
       timeout: 10000,
       maxBuffer: 50 * 1024 * 1024,
     });
   } catch (e) {
-    console.error('[db exec error]', e.message);
+    console.error(`[db exec error @ ${dbPath}]`, e.message);
     throw new Error(`SQLite exec error: ${e.message}`);
   }
 }
 
 /**
  * Run a SQL query and return rows as a JS array.
- * Uses sqlite3 -json for structured output.
+ * @param {string} sql
+ * @param {string} [dbPath=DB_PATH] - path to the database file
  */
-function dbQuery(sql) {
+function dbQuery(sql, dbPath = DB_PATH) {
   try {
-    const out = execFileSync('sqlite3', ['-json', DB_PATH, sql], {
+    const out = execFileSync('sqlite3', ['-json', dbPath, sql], {
       timeout: 10000,
       maxBuffer: 50 * 1024 * 1024,
       encoding: 'utf-8',
@@ -69,7 +80,7 @@ function dbQuery(sql) {
   } catch (e) {
     // sqlite3 -json returns empty string for no results, which is fine
     if (e.status === 0 || (e.stdout && e.stdout.trim() === '')) return [];
-    console.error('[db query error]', e.message);
+    console.error(`[db query error @ ${dbPath}]`, e.message);
     throw new Error(`SQLite query error: ${e.message}`);
   }
 }
@@ -110,6 +121,140 @@ function ensureRamDisk() {
   }
 }
 
+// ── Schema migration for tiered storage columns ───────────────
+function migrateRamSchema() {
+  // Add tiered-storage columns if they do not already exist.
+  // SQLite does not support ADD COLUMN IF NOT EXISTS, so we check
+  // the table_info pragma first.
+  try {
+    const cols = dbQuery("PRAGMA table_info(entries);");
+    const colNames = cols.map(c => c.name);
+
+    if (!colNames.includes('last_accessed')) {
+      dbExec("ALTER TABLE entries ADD COLUMN last_accessed TEXT DEFAULT (datetime('now'));");
+      console.log('[vcontext] Added last_accessed column to RAM DB');
+    }
+    if (!colNames.includes('access_count')) {
+      dbExec("ALTER TABLE entries ADD COLUMN access_count INTEGER DEFAULT 0;");
+      console.log('[vcontext] Added access_count column to RAM DB');
+    }
+    if (!colNames.includes('tier')) {
+      dbExec("ALTER TABLE entries ADD COLUMN tier TEXT DEFAULT 'ram';");
+      console.log('[vcontext] Added tier column to RAM DB');
+    }
+
+    // Back-fill last_accessed for existing rows that have NULL
+    dbExec("UPDATE entries SET last_accessed = created_at WHERE last_accessed IS NULL;");
+  } catch (e) {
+    console.error('[vcontext] Schema migration for RAM DB failed:', e.message);
+  }
+}
+
+// ── SSD database initialisation ───────────────────────────────
+function ensureSsdDb() {
+  mkdirSync(BACKUP_DIR, { recursive: true });
+
+  if (!existsSync(SSD_DB_PATH)) {
+    console.log('[vcontext] Creating SSD database at', SSD_DB_PATH);
+    const schema = `
+CREATE TABLE IF NOT EXISTS entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,
+  content TEXT NOT NULL,
+  tags TEXT DEFAULT '[]',
+  session TEXT,
+  token_estimate INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now')),
+  last_accessed TEXT DEFAULT (datetime('now')),
+  access_count INTEGER DEFAULT 0,
+  tier TEXT DEFAULT 'ssd'
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
+  content,
+  tags,
+  content=entries,
+  content_rowid=id
+);
+CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
+  INSERT INTO entries_fts(rowid, content, tags) VALUES (new.id, new.content, new.tags);
+END;
+CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN
+  INSERT INTO entries_fts(entries_fts, rowid, content, tags) VALUES('delete', old.id, old.content, old.tags);
+END;
+CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN
+  INSERT INTO entries_fts(entries_fts, rowid, content, tags) VALUES('delete', old.id, old.content, old.tags);
+  INSERT INTO entries_fts(rowid, content, tags) VALUES (new.id, new.content, new.tags);
+END;
+`;
+    dbExec(schema, SSD_DB_PATH);
+    console.log('[vcontext] SSD database initialised');
+  } else {
+    // Ensure tiered columns exist in SSD DB too
+    try {
+      const cols = dbQuery("PRAGMA table_info(entries);", SSD_DB_PATH);
+      const colNames = cols.map(c => c.name);
+      if (!colNames.includes('last_accessed')) {
+        dbExec("ALTER TABLE entries ADD COLUMN last_accessed TEXT DEFAULT (datetime('now'));", SSD_DB_PATH);
+      }
+      if (!colNames.includes('access_count')) {
+        dbExec("ALTER TABLE entries ADD COLUMN access_count INTEGER DEFAULT 0;", SSD_DB_PATH);
+      }
+      if (!colNames.includes('tier')) {
+        dbExec("ALTER TABLE entries ADD COLUMN tier TEXT DEFAULT 'ssd';", SSD_DB_PATH);
+      }
+    } catch (e) {
+      console.error('[vcontext] SSD schema migration failed:', e.message);
+    }
+  }
+}
+
+// ── Cloud store (stub) ────────────────────────────────────────
+function loadCloudConfig() {
+  try {
+    if (existsSync(CLOUD_CONFIG_PATH)) {
+      return JSON.parse(readFileSync(CLOUD_CONFIG_PATH, 'utf-8'));
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+const cloudStore = {
+  /** Upload entries to cloud storage (stub). */
+  upload(entries) {
+    const cfg = loadCloudConfig();
+    if (!cfg || !cfg.provider) {
+      console.log('[vcontext:cloud] Cloud not configured — skipping upload of', entries.length, 'entries');
+      return { uploaded: 0, error: 'Cloud not configured' };
+    }
+    // Future: actual S3/GCS/R2 upload
+    console.log(`[vcontext:cloud] Would upload ${entries.length} entries to ${cfg.provider}://${cfg.bucket}/${cfg.prefix || ''}`);
+    return { uploaded: 0, error: 'Cloud upload not yet implemented' };
+  },
+
+  /** Search cloud storage (stub). */
+  search(query, limit) {
+    const cfg = loadCloudConfig();
+    if (!cfg || !cfg.provider) return [];
+    // Future: actual search against cloud index
+    console.log(`[vcontext:cloud] Would search cloud for "${query}" limit=${limit}`);
+    return [];
+  },
+
+  /** Download entries from cloud by IDs (stub). */
+  download(ids) {
+    const cfg = loadCloudConfig();
+    if (!cfg || !cfg.provider) return [];
+    console.log(`[vcontext:cloud] Would download ${ids.length} entries from cloud`);
+    return [];
+  },
+
+  /** Check whether cloud is configured. */
+  isConfigured() {
+    const cfg = loadCloudConfig();
+    return !!(cfg && cfg.provider);
+  },
+};
+
 // ── DB size check ──────────────────────────────────────────────
 function checkDbSize() {
   try {
@@ -149,6 +294,117 @@ function doBackup() {
 // ── Token estimation ───────────────────────────────────────────
 function estimateTokens(text) {
   return Math.ceil(String(text).length / 4);
+}
+
+// ── Access tracking ────────────────────────────────────────────
+/**
+ * Update last_accessed and increment access_count for given entry IDs.
+ * @param {number[]} ids
+ * @param {string} [dbPath=DB_PATH]
+ */
+function touchEntries(ids, dbPath = DB_PATH) {
+  if (!ids || ids.length === 0) return;
+  try {
+    dbExec(
+      `UPDATE entries SET last_accessed = datetime('now'), access_count = access_count + 1 WHERE id IN (${ids.join(',')});`,
+      dbPath,
+    );
+  } catch (e) {
+    console.error('[vcontext] touchEntries failed:', e.message);
+  }
+}
+
+// ── Tier migration logic ──────────────────────────────────────
+
+/**
+ * Move cold entries from RAM → SSD.
+ * Returns the count of moved entries.
+ */
+function migrateRamToSsd() {
+  try {
+    const staleRows = dbQuery(
+      `SELECT * FROM entries WHERE last_accessed < datetime('now', '-${RAM_TO_SSD_DAYS} days') ORDER BY last_accessed ASC;`,
+    );
+    if (staleRows.length === 0) return 0;
+
+    for (const row of staleRows) {
+      // Insert into SSD DB
+      dbExec(
+        `INSERT INTO entries (type, content, tags, session, token_estimate, created_at, last_accessed, access_count, tier)
+         VALUES (${esc(row.type)}, ${esc(row.content)}, ${esc(row.tags)}, ${esc(row.session)}, ${row.token_estimate || 0},
+                 ${esc(row.created_at)}, ${esc(row.last_accessed)}, ${row.access_count || 0}, 'ssd');`,
+        SSD_DB_PATH,
+      );
+    }
+
+    // Remove from RAM DB
+    const ids = staleRows.map(r => r.id).join(',');
+    dbExec(`DELETE FROM entries WHERE id IN (${ids});`);
+
+    console.log(`[vcontext:tier] Migrated ${staleRows.length} entries RAM → SSD`);
+    return staleRows.length;
+  } catch (e) {
+    console.error('[vcontext:tier] RAM→SSD migration error:', e.message);
+    return 0;
+  }
+}
+
+/**
+ * Move cold entries from SSD → Cloud (if configured).
+ * Returns the count of moved entries.
+ */
+function migrateSsdToCloud() {
+  if (!cloudStore.isConfigured()) return 0;
+  try {
+    const staleRows = dbQuery(
+      `SELECT * FROM entries WHERE last_accessed < datetime('now', '-${SSD_TO_CLOUD_DAYS} days') ORDER BY last_accessed ASC;`,
+      SSD_DB_PATH,
+    );
+    if (staleRows.length === 0) return 0;
+
+    const result = cloudStore.upload(staleRows);
+    if (result.error) {
+      console.log('[vcontext:tier] Cloud upload not ready:', result.error);
+      return 0;
+    }
+
+    // Only delete from SSD if upload succeeded
+    const ids = staleRows.map(r => r.id).join(',');
+    dbExec(`DELETE FROM entries WHERE id IN (${ids});`, SSD_DB_PATH);
+
+    console.log(`[vcontext:tier] Migrated ${staleRows.length} entries SSD → Cloud`);
+    return staleRows.length;
+  } catch (e) {
+    console.error('[vcontext:tier] SSD→Cloud migration error:', e.message);
+    return 0;
+  }
+}
+
+/**
+ * Auto-promote: copy an entry found in SSD/Cloud back to RAM for fast access.
+ * @param {object[]} rows - rows from a lower tier to promote
+ * @param {string} sourceTier - 'ssd' or 'cloud'
+ */
+function promoteToRam(rows, sourceTier) {
+  if (!rows || rows.length === 0) return;
+  try {
+    for (const row of rows) {
+      // Check if already in RAM (by original created_at + content hash to avoid dups)
+      const existing = dbQuery(
+        `SELECT id FROM entries WHERE created_at = ${esc(row.created_at)} AND type = ${esc(row.type)} AND content = ${esc(row.content)} LIMIT 1;`,
+      );
+      if (existing.length > 0) continue;
+
+      dbExec(
+        `INSERT INTO entries (type, content, tags, session, token_estimate, created_at, last_accessed, access_count, tier)
+         VALUES (${esc(row.type)}, ${esc(row.content)}, ${esc(row.tags)}, ${esc(row.session)}, ${row.token_estimate || 0},
+                 ${esc(row.created_at)}, datetime('now'), ${(row.access_count || 0) + 1}, 'ram');`,
+      );
+    }
+    console.log(`[vcontext:tier] Promoted ${rows.length} entries from ${sourceTier} → RAM`);
+  } catch (e) {
+    console.error('[vcontext:tier] Promote to RAM failed:', e.message);
+  }
 }
 
 // ── HTTP helpers ───────────────────────────────────────────────
@@ -194,6 +450,15 @@ function parsePath(url) {
   return idx >= 0 ? url.slice(0, idx) : url;
 }
 
+/**
+ * Parse tags JSON safely.
+ */
+function parseTags(rows) {
+  for (const row of rows) {
+    try { row.tags = JSON.parse(row.tags); } catch { /* keep as string */ }
+  }
+}
+
 // ── Route handlers ─────────────────────────────────────────────
 
 /**
@@ -219,7 +484,7 @@ async function handleStore(req, res) {
   const tagsJson = JSON.stringify(tags || []);
   const tokenEst = estimateTokens(content);
 
-  const sql = `INSERT INTO entries (type, content, tags, session, token_estimate) VALUES (${esc(type)}, ${esc(content)}, ${esc(tagsJson)}, ${esc(session || null)}, ${tokenEst});`;
+  const sql = `INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES (${esc(type)}, ${esc(content)}, ${esc(tagsJson)}, ${esc(session || null)}, ${tokenEst}, datetime('now'), 0, 'ram');`;
   dbExec(sql);
 
   // Get the inserted row
@@ -235,6 +500,7 @@ async function handleStore(req, res) {
 
 /**
  * GET /recall?q=keyword&type=conversation&limit=10
+ * Searches all tiers: RAM → SSD → Cloud (if configured)
  */
 function handleRecall(req, res) {
   const params = parseQuery(req.url);
@@ -245,8 +511,69 @@ function handleRecall(req, res) {
 
   const limit = Math.min(parseInt(params.limit) || 10, 100);
   const type = params.type;
+  const allResults = [];
+  const seenIds = new Map(); // created_at+content → true (for cross-tier dedup)
 
-  // FTS5 search with relevance ranking + recency boost
+  // --- Tier 1: RAM ---
+  const ramResults = searchTier(DB_PATH, q, type, limit);
+  for (const row of ramResults) {
+    row._tier = 'ram';
+    const key = `${row.created_at}||${row.type}||${String(row.content).slice(0, 100)}`;
+    seenIds.set(key, true);
+    allResults.push(row);
+  }
+  // Touch accessed entries in RAM
+  touchEntries(ramResults.map(r => r.id), DB_PATH);
+
+  // --- Tier 2: SSD (if still need more results) ---
+  if (allResults.length < limit) {
+    const ssdLimit = limit - allResults.length;
+    const ssdResults = searchTier(SSD_DB_PATH, q, type, ssdLimit);
+    const promoted = [];
+    for (const row of ssdResults) {
+      const key = `${row.created_at}||${row.type}||${String(row.content).slice(0, 100)}`;
+      if (seenIds.has(key)) continue;
+      row._tier = 'ssd';
+      seenIds.set(key, true);
+      allResults.push(row);
+      promoted.push(row);
+    }
+    // Touch accessed entries in SSD
+    touchEntries(ssdResults.map(r => r.id), SSD_DB_PATH);
+    // Auto-promote SSD hits to RAM
+    if (promoted.length > 0) {
+      promoteToRam(promoted, 'ssd');
+    }
+  }
+
+  // --- Tier 3: Cloud (if configured and still need more) ---
+  if (allResults.length < limit && cloudStore.isConfigured()) {
+    const cloudLimit = limit - allResults.length;
+    const cloudResults = cloudStore.search(q, cloudLimit);
+    const promoted = [];
+    for (const row of cloudResults) {
+      const key = `${row.created_at}||${row.type}||${String(row.content).slice(0, 100)}`;
+      if (seenIds.has(key)) continue;
+      row._tier = 'cloud';
+      seenIds.set(key, true);
+      allResults.push(row);
+      promoted.push(row);
+    }
+    if (promoted.length > 0) {
+      promoteToRam(promoted, 'cloud');
+    }
+  }
+
+  parseTags(allResults);
+
+  sendJson(res, 200, { results: allResults, count: allResults.length, query: q });
+}
+
+/**
+ * Search a single tier's database using FTS5, with LIKE fallback.
+ */
+function searchTier(dbPath, q, type, limit) {
+  if (!existsSync(dbPath)) return [];
   let sql;
   if (type && VALID_TYPES.includes(type)) {
     sql = `SELECT e.*, rank
@@ -266,45 +593,90 @@ function handleRecall(req, res) {
   }
 
   try {
-    const rows = dbQuery(sql);
-    // Parse tags back to arrays
-    for (const row of rows) {
-      try { row.tags = JSON.parse(row.tags); } catch { /* keep as string */ }
-    }
-    sendJson(res, 200, { results: rows, count: rows.length, query: q });
-  } catch (e) {
+    return dbQuery(sql, dbPath);
+  } catch {
     // FTS query syntax error — fall back to LIKE search
     const likeSql = type
       ? `SELECT * FROM entries WHERE content LIKE ${esc('%' + q + '%')} AND type = ${esc(type)} ORDER BY created_at DESC LIMIT ${limit};`
       : `SELECT * FROM entries WHERE content LIKE ${esc('%' + q + '%')} ORDER BY created_at DESC LIMIT ${limit};`;
-    const rows = dbQuery(likeSql);
-    for (const row of rows) {
-      try { row.tags = JSON.parse(row.tags); } catch { /* keep */ }
+    try {
+      return dbQuery(likeSql, dbPath);
+    } catch {
+      return [];
     }
-    sendJson(res, 200, { results: rows, count: rows.length, query: q, _note: 'Used LIKE fallback' });
   }
 }
 
 /**
  * GET /recent?n=20&type=conversation
+ * Cascading across tiers.
  */
 function handleRecent(req, res) {
   const params = parseQuery(req.url);
   const n = Math.min(parseInt(params.n) || 20, 200);
   const type = params.type;
+  const allResults = [];
+  const seenIds = new Map();
 
+  // --- Tier 1: RAM ---
+  const ramRows = recentFromTier(DB_PATH, type, n);
+  for (const row of ramRows) {
+    row._tier = 'ram';
+    const key = `${row.created_at}||${row.type}||${String(row.content).slice(0, 100)}`;
+    seenIds.set(key, true);
+    allResults.push(row);
+  }
+  touchEntries(ramRows.map(r => r.id), DB_PATH);
+
+  // --- Tier 2: SSD ---
+  if (allResults.length < n) {
+    const ssdLimit = n - allResults.length;
+    const ssdRows = recentFromTier(SSD_DB_PATH, type, ssdLimit);
+    const promoted = [];
+    for (const row of ssdRows) {
+      const key = `${row.created_at}||${row.type}||${String(row.content).slice(0, 100)}`;
+      if (seenIds.has(key)) continue;
+      row._tier = 'ssd';
+      seenIds.set(key, true);
+      allResults.push(row);
+      promoted.push(row);
+    }
+    touchEntries(ssdRows.map(r => r.id), SSD_DB_PATH);
+    if (promoted.length > 0) {
+      promoteToRam(promoted, 'ssd');
+    }
+  }
+
+  // --- Tier 3: Cloud ---
+  if (allResults.length < n && cloudStore.isConfigured()) {
+    // Cloud search stub returns [] for now
+    // Future: cloudStore.recent(type, n - allResults.length)
+  }
+
+  // Sort merged results by created_at descending
+  allResults.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+
+  parseTags(allResults);
+
+  sendJson(res, 200, { results: allResults.slice(0, n), count: Math.min(allResults.length, n) });
+}
+
+/**
+ * Query recent entries from a specific tier DB.
+ */
+function recentFromTier(dbPath, type, limit) {
+  if (!existsSync(dbPath)) return [];
   let sql;
   if (type && VALID_TYPES.includes(type)) {
-    sql = `SELECT * FROM entries WHERE type = ${esc(type)} ORDER BY created_at DESC LIMIT ${n};`;
+    sql = `SELECT * FROM entries WHERE type = ${esc(type)} ORDER BY created_at DESC LIMIT ${limit};`;
   } else {
-    sql = `SELECT * FROM entries ORDER BY created_at DESC LIMIT ${n};`;
+    sql = `SELECT * FROM entries ORDER BY created_at DESC LIMIT ${limit};`;
   }
-
-  const rows = dbQuery(sql);
-  for (const row of rows) {
-    try { row.tags = JSON.parse(row.tags); } catch { /* keep */ }
+  try {
+    return dbQuery(sql, dbPath);
+  } catch {
+    return [];
   }
-  sendJson(res, 200, { results: rows, count: rows.length });
 }
 
 /**
@@ -317,11 +689,26 @@ function handleSession(req, res) {
     return sendJson(res, 400, { error: 'Missing session ID' });
   }
 
-  const rows = dbQuery(`SELECT * FROM entries WHERE session = ${esc(sessionId)} ORDER BY created_at ASC;`);
-  for (const row of rows) {
-    try { row.tags = JSON.parse(row.tags); } catch { /* keep */ }
+  // Search RAM
+  const ramRows = dbQuery(`SELECT * FROM entries WHERE session = ${esc(sessionId)} ORDER BY created_at ASC;`);
+  for (const r of ramRows) r._tier = 'ram';
+  touchEntries(ramRows.map(r => r.id), DB_PATH);
+
+  // Search SSD
+  let ssdRows = [];
+  if (existsSync(SSD_DB_PATH)) {
+    try {
+      ssdRows = dbQuery(`SELECT * FROM entries WHERE session = ${esc(sessionId)} ORDER BY created_at ASC;`, SSD_DB_PATH);
+      for (const r of ssdRows) r._tier = 'ssd';
+      touchEntries(ssdRows.map(r => r.id), SSD_DB_PATH);
+    } catch { /* ignore */ }
   }
-  sendJson(res, 200, { session: sessionId, results: rows, count: rows.length });
+
+  const allRows = [...ramRows, ...ssdRows];
+  allRows.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+  parseTags(allRows);
+
+  sendJson(res, 200, { session: sessionId, results: allRows, count: allRows.length });
 }
 
 /**
@@ -371,7 +758,7 @@ async function handleSummarize(req, res) {
     const tagsJson = JSON.stringify([...allTags]);
 
     // Insert summary
-    dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate) VALUES (${esc(type)}, ${esc(summaryContent)}, ${esc(tagsJson)}, 'system-compaction', ${tokenEst});`);
+    dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES (${esc(type)}, ${esc(summaryContent)}, ${esc(tagsJson)}, 'system-compaction', ${tokenEst}, datetime('now'), 0, 'ram');`);
 
     // Delete old entries
     const ids = oldEntries.map((e) => e.id).join(',');
@@ -451,6 +838,7 @@ function handlePrune(req, res) {
 function handleHealth(req, res) {
   const mounted = existsSync(MOUNT_POINT);
   const dbExists = existsSync(DB_PATH);
+  const ssdExists = existsSync(SSD_DB_PATH);
   let dbOk = false;
   if (dbExists) {
     try {
@@ -463,8 +851,107 @@ function handleHealth(req, res) {
     status: mounted && dbOk ? 'healthy' : 'degraded',
     ram_disk: mounted,
     database: dbOk,
+    ssd_database: ssdExists,
+    cloud_configured: cloudStore.isConfigured(),
     uptime_seconds: Math.floor(process.uptime()),
   });
+}
+
+/**
+ * POST /tier/migrate — Manually trigger tier migration.
+ */
+function handleTierMigrate(req, res) {
+  const ramToSsd = migrateRamToSsd();
+  const ssdToCloud = migrateSsdToCloud();
+
+  sendJson(res, 200, {
+    ram_to_ssd: ramToSsd,
+    ssd_to_cloud: ssdToCloud,
+  });
+}
+
+/**
+ * GET /tier/stats — Per-tier statistics.
+ */
+function handleTierStats(req, res) {
+  // RAM stats
+  const ramCount = dbQuery('SELECT COUNT(*) as count FROM entries;');
+  const ramOldest = dbQuery('SELECT MIN(created_at) as oldest FROM entries;');
+  const ramNewest = dbQuery('SELECT MAX(created_at) as newest FROM entries;');
+  let ramSize = 0;
+  try { ramSize = statSync(DB_PATH).size; } catch { /* ok */ }
+
+  // SSD stats
+  let ssdCount = 0, ssdOldest = null, ssdNewest = null, ssdSize = 0;
+  if (existsSync(SSD_DB_PATH)) {
+    try {
+      const sc = dbQuery('SELECT COUNT(*) as count FROM entries;', SSD_DB_PATH);
+      ssdCount = sc[0]?.count || 0;
+      const so = dbQuery('SELECT MIN(created_at) as oldest FROM entries;', SSD_DB_PATH);
+      ssdOldest = so[0]?.oldest || null;
+      const sn = dbQuery('SELECT MAX(created_at) as newest FROM entries;', SSD_DB_PATH);
+      ssdNewest = sn[0]?.newest || null;
+      ssdSize = statSync(SSD_DB_PATH).size;
+    } catch { /* ok */ }
+  }
+
+  // Cloud stats
+  const cloudCfg = loadCloudConfig();
+
+  sendJson(res, 200, {
+    ram: {
+      entries: ramCount[0]?.count || 0,
+      size: formatBytes(ramSize),
+      oldest: ramOldest[0]?.oldest || null,
+      newest: ramNewest[0]?.newest || null,
+    },
+    ssd: {
+      entries: ssdCount,
+      size: formatBytes(ssdSize),
+      oldest: ssdOldest,
+      newest: ssdNewest,
+    },
+    cloud: {
+      configured: !!(cloudCfg && cloudCfg.provider),
+      provider: cloudCfg?.provider || null,
+      bucket: cloudCfg?.bucket || null,
+      entries: 0, // stub — no cloud entry count available yet
+    },
+  });
+}
+
+/**
+ * POST /tier/config — Configure cloud provider.
+ * Body: { provider, bucket, region?, prefix? }
+ */
+async function handleTierConfig(req, res) {
+  const body = await readBody(req);
+  const { provider, bucket, region, prefix } = body;
+
+  if (!provider || !bucket) {
+    return sendJson(res, 400, { error: 'Missing required fields: provider, bucket' });
+  }
+
+  const validProviders = ['s3', 'gcs', 'r2'];
+  if (!validProviders.includes(provider)) {
+    return sendJson(res, 400, { error: `Invalid provider. Must be one of: ${validProviders.join(', ')}` });
+  }
+
+  const config = {
+    provider,
+    bucket,
+    region: region || null,
+    prefix: prefix || 'vcontext/',
+    configured_at: new Date().toISOString(),
+  };
+
+  try {
+    mkdirSync(BACKUP_DIR, { recursive: true });
+    writeFileSync(CLOUD_CONFIG_PATH, JSON.stringify(config, null, 2), 'utf-8');
+    sendJson(res, 200, { message: 'Cloud config saved', config, _note: 'Cloud storage is not yet implemented. Config saved for future use.' });
+  } catch (e) {
+    sendJson(res, 500, { error: `Failed to save config: ${e.message}` });
+  }
 }
 
 // ── Utilities ──────────────────────────────────────────────────
@@ -475,7 +962,39 @@ function formatBytes(bytes) {
   return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i];
 }
 
+// ── Periodic migration check (piggybacks on backup timer) ─────
+function doBackupAndMigrate() {
+  doBackup();
+  // Quick migration check
+  try {
+    const moved = migrateRamToSsd();
+    if (moved > 0) console.log(`[vcontext:auto] Auto-migrated ${moved} entries RAM → SSD`);
+  } catch (e) {
+    console.error('[vcontext:auto] Auto-migration RAM→SSD failed:', e.message);
+  }
+  try {
+    const moved = migrateSsdToCloud();
+    if (moved > 0) console.log(`[vcontext:auto] Auto-migrated ${moved} entries SSD → Cloud`);
+  } catch (e) {
+    console.error('[vcontext:auto] Auto-migration SSD→Cloud failed:', e.message);
+  }
+}
+
 // ── Request router ─────────────────────────────────────────────
+const ENDPOINTS_LIST = [
+  'POST   /store           — store context entry',
+  'GET    /recall?q=       — full-text search (cascading tiers)',
+  'GET    /recent?n=       — recent entries (cascading tiers)',
+  'GET    /session/:id     — session entries',
+  'POST   /summarize       — compact old entries',
+  'GET    /stats           — database statistics',
+  'DELETE /prune           — remove old entries',
+  'GET    /health          — health check',
+  'POST   /tier/migrate    — trigger tier migration',
+  'GET    /tier/stats      — per-tier statistics',
+  'POST   /tier/config     — configure cloud provider',
+];
+
 const server = createServer(async (req, res) => {
   const method = req.method;
   const path = parsePath(req.url);
@@ -508,19 +1027,16 @@ const server = createServer(async (req, res) => {
       handlePrune(req, res);
     } else if (method === 'GET' && path === '/health') {
       handleHealth(req, res);
+    } else if (method === 'POST' && path === '/tier/migrate') {
+      handleTierMigrate(req, res);
+    } else if (method === 'GET' && path === '/tier/stats') {
+      handleTierStats(req, res);
+    } else if (method === 'POST' && path === '/tier/config') {
+      await handleTierConfig(req, res);
     } else {
       sendJson(res, 404, {
         error: 'Not found',
-        endpoints: [
-          'POST   /store        — store context entry',
-          'GET    /recall?q=    — full-text search',
-          'GET    /recent?n=    — recent entries',
-          'GET    /session/:id  — session entries',
-          'POST   /summarize    — compact old entries',
-          'GET    /stats        — database statistics',
-          'DELETE /prune        — remove old entries',
-          'GET    /health       — health check',
-        ],
+        endpoints: ENDPOINTS_LIST,
       });
     }
   } catch (e) {
@@ -534,8 +1050,14 @@ const server = createServer(async (req, res) => {
 // Ensure RAM disk + DB exist
 ensureRamDisk();
 
-// Periodic backup
-const backupTimer = setInterval(doBackup, BACKUP_INTERVAL_MS);
+// Migrate schema for tiered storage columns
+migrateRamSchema();
+
+// Ensure SSD database exists
+ensureSsdDb();
+
+// Periodic backup + migration check (replaces plain backup timer)
+const backupTimer = setInterval(doBackupAndMigrate, BACKUP_INTERVAL_MS);
 
 // Graceful shutdown
 function shutdown(signal) {
@@ -556,15 +1078,13 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 // Start
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`[vcontext] Virtual Context server running at http://127.0.0.1:${PORT}`);
-  console.log(`[vcontext] Database: ${DB_PATH}`);
+  console.log(`[vcontext] Tier 1 (RAM):   ${DB_PATH}`);
+  console.log(`[vcontext] Tier 2 (SSD):   ${SSD_DB_PATH}`);
+  console.log(`[vcontext] Tier 3 (Cloud): ${cloudStore.isConfigured() ? 'configured' : 'not configured'}`);
   console.log(`[vcontext] Backup every ${BACKUP_INTERVAL_MS / 1000}s to ${BACKUP_PATH}`);
+  console.log(`[vcontext] Auto-migrate: RAM→SSD after ${RAM_TO_SSD_DAYS}d, SSD→Cloud after ${SSD_TO_CLOUD_DAYS}d`);
   console.log('[vcontext] Endpoints:');
-  console.log('  POST   /store        — store context entry');
-  console.log('  GET    /recall?q=    — full-text search');
-  console.log('  GET    /recent?n=    — recent entries');
-  console.log('  GET    /session/:id  — session entries');
-  console.log('  POST   /summarize    — compact old entries');
-  console.log('  GET    /stats        — database statistics');
-  console.log('  DELETE /prune        — remove old entries');
-  console.log('  GET    /health       — health check');
+  for (const ep of ENDPOINTS_LIST) {
+    console.log(`  ${ep}`);
+  }
 });
