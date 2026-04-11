@@ -1,0 +1,27 @@
+{
+  "keys": {
+    "vctx_3e1204f7513689119cb031a5ec8a1d94500ab4d68fa3f083135d3f0835cbe852": {
+      "userId": "test@remote",
+      "name": "Test Remote",
+      "createdAt": "2026-04-11T01:28:47.356Z",
+      "createdBy": "mitsuru_nakajima@G171X9H07J.local"
+    },
+    "vctx_7be95c9833dc5e567505e1ae22b0e5384aa337396ba5fd52fe0e0598f06ebc6f": {
+      "userId": "tanaka@macbook",
+      "name": "田中",
+      "role": "member",
+      "groups": [
+        "dev-team/chatai"
+      ],
+      "createdAt": "2026-04-11T01:43:09.993Z",
+      "createdBy": "mitsuru_nakajima@G171X9H07J.local"
+    }
+  },
+  "groups": {
+    "dev-team/chatai": {
+      "name": "開発チーム / chatai",
+      "createdAt": "2026-04-11T01:43:09.970Z",
+      "createdBy": "mitsuru_nakajima@G171X9H07J.local"
+    }
+  }
+}
