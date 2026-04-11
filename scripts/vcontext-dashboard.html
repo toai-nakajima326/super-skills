@@ -352,15 +352,7 @@ async function refresh() {
     document.getElementById('tiers-content').innerHTML = tiersHtml;
   }
 
-  // AI (standalone card — kept for feature detail)
-  if (ai) {
-    document.getElementById('ai-content').innerHTML =
-      '<div style="margin-bottom:8px;">' + (ai.ollama_available ? '<span class="status-dot status-green"></span>Available' : '<span class="status-dot status-red"></span>Not available') + '</div>' +
-      '<div>' + (ai.models || []).map(function(m) { return '<span class="model-tag">' + escapeHtml(m) + '</span>'; }).join('') + '</div>' +
-      '<div style="margin-top:8px;font-size:12px;color:var(--text-muted);">' +
-        Object.entries(ai.features || {}).map(function(pair) { return (pair[1] ? 'ON' : 'OFF') + ' ' + escapeHtml(pair[0]); }).join(' &nbsp; ') +
-      '</div>';
-  }
+  // AI detail (rendered in Storage Tiers card, standalone card removed)
 
   // Recent
   const recent = await fetchJson('/recent?n=15');
