@@ -76,7 +76,7 @@
 </head>
 <body>
 <header>
-  <h1>AI OS Dashboard <span style="font-size:12px;color:var(--text-muted);font-weight:normal;">v2.0.0</span></h1>
+  <h1>AI OS Dashboard <span style="font-size:12px;color:var(--text-muted);font-weight:normal;">v2.1.0</span></h1>
   <div class="meta">
     <span id="status-indicator"><span class="status-dot status-yellow"></span>Loading...</span>
     &nbsp;|&nbsp; <span id="live-indicator" style="color:var(--green);">Connecting...</span>
@@ -145,6 +145,12 @@
   <div class="card wide">
     <h2>Sessions</h2>
     <div id="analytics-content">Loading...</div>
+  </div>
+
+  <!-- API Metrics -->
+  <div class="card wide">
+    <h2>API Metrics (24h)</h2>
+    <div id="metrics-content">Loading...</div>
   </div>
 </div>
 
@@ -444,6 +450,34 @@ async function refresh() {
     document.getElementById('analytics-content').innerHTML = html;
   } else {
     document.getElementById('analytics-content').innerHTML = '<div style="color:var(--text-muted);">No session data</div>';
+  }
+
+  // API Metrics
+  const metrics = await fetchJson('/metrics/report?hours=24');
+  if (metrics && metrics.operations) {
+    var mhtml = '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:12px;">';
+    for (var op of ['store', 'recall', 'recent']) {
+      var d = metrics.operations[op] || { count: 0, avg_latency_ms: 0, total_tokens_in: 0, total_tokens_out: 0 };
+      mhtml += '<div style="text-align:center;padding:8px;border:1px solid var(--border);border-radius:6px;">';
+      mhtml += '<div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">' + op + '</div>';
+      mhtml += '<div class="stat" style="font-size:24px;">' + d.count + '</div>';
+      mhtml += '<div style="font-size:11px;color:var(--text-dim);">' + d.avg_latency_ms + 'ms avg</div>';
+      mhtml += '<div style="font-size:10px;color:var(--text-dim);">' + (d.total_tokens_in + d.total_tokens_out) + ' tokens</div>';
+      mhtml += '</div>';
+    }
+    mhtml += '</div>';
+    if (metrics.derived) {
+      mhtml += '<div style="font-size:12px;color:var(--text-muted);border-top:1px solid var(--bg-bar);padding-top:8px;">';
+      mhtml += 'Resume cost: <strong>' + (metrics.derived.resume_cost_tokens || 0) + '</strong> tokens';
+      mhtml += ' | Hit rate: <strong>' + ((metrics.derived.search_hit_rate || 0) * 100).toFixed(0) + '%</strong>';
+      if (metrics.index) {
+        mhtml += ' | Index: <strong>' + metrics.index.indexed + '/' + metrics.index.total + '</strong>';
+      }
+      mhtml += '</div>';
+    }
+    document.getElementById('metrics-content').innerHTML = mhtml;
+  } else {
+    document.getElementById('metrics-content').innerHTML = '<div style="color:var(--text-muted);">No metrics data</div>';
   }
 }
 

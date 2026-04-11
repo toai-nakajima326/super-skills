@@ -261,6 +261,47 @@ function migrateRamSchema() {
     dbExec(`CREATE INDEX IF NOT EXISTS idx_analytics_skill ON analytics(skill_name);`);
     dbExec(`CREATE INDEX IF NOT EXISTS idx_analytics_event ON analytics(event_type);`);
   } catch {}
+
+  // Lightweight metadata index — avoids parsing raw JSON on every search
+  try {
+    dbExec(`CREATE TABLE IF NOT EXISTS entry_index (
+      entry_id INTEGER PRIMARY KEY,
+      type TEXT NOT NULL,
+      session TEXT,
+      tool_name TEXT,
+      file_path TEXT,
+      command TEXT,
+      token_estimate INTEGER DEFAULT 0,
+      has_embedding INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    );`);
+    dbExec(`CREATE INDEX IF NOT EXISTS idx_ei_type ON entry_index(type);`);
+    dbExec(`CREATE INDEX IF NOT EXISTS idx_ei_session ON entry_index(session);`);
+    dbExec(`CREATE INDEX IF NOT EXISTS idx_ei_tool ON entry_index(tool_name);`);
+  } catch {}
+
+  // Per-request API metrics
+  try {
+    dbExec(`CREATE TABLE IF NOT EXISTS api_metrics (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      operation TEXT NOT NULL,
+      latency_ms REAL NOT NULL,
+      request_chars INTEGER DEFAULT 0,
+      response_chars INTEGER DEFAULT 0,
+      estimated_tokens_in INTEGER DEFAULT 0,
+      estimated_tokens_out INTEGER DEFAULT 0,
+      result_count INTEGER DEFAULT 0,
+      used_ids TEXT,
+      task_kind TEXT,
+      session TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );`);
+    dbExec(`CREATE INDEX IF NOT EXISTS idx_am_op ON api_metrics(operation);`);
+    dbExec(`CREATE INDEX IF NOT EXISTS idx_am_created ON api_metrics(created_at);`);
+  } catch {}
+
+  // Backfill entry_index for existing entries
+  backfillIndex(500);
 }
 
 // ── SSD database initialisation ───────────────────────────────
@@ -344,6 +385,24 @@ END;
       console.error('[vcontext] SSD schema migration failed:', e.message);
     }
   }
+
+  // Ensure index + metrics tables exist on SSD too
+  try {
+    dbExec(`CREATE TABLE IF NOT EXISTS entry_index (
+      entry_id INTEGER PRIMARY KEY, type TEXT NOT NULL, session TEXT,
+      tool_name TEXT, file_path TEXT, command TEXT,
+      token_estimate INTEGER DEFAULT 0, has_embedding INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    );`, SSD_DB_PATH);
+    dbExec(`CREATE TABLE IF NOT EXISTS api_metrics (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, operation TEXT NOT NULL,
+      latency_ms REAL NOT NULL, request_chars INTEGER DEFAULT 0,
+      response_chars INTEGER DEFAULT 0, estimated_tokens_in INTEGER DEFAULT 0,
+      estimated_tokens_out INTEGER DEFAULT 0, result_count INTEGER DEFAULT 0,
+      used_ids TEXT, task_kind TEXT, session TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );`, SSD_DB_PATH);
+  } catch {}
 }
 
 // ── Cloud store (stub) ────────────────────────────────────────
@@ -432,6 +491,48 @@ function doBackup() {
 // ── Token estimation ───────────────────────────────────────────
 function estimateTokens(text) {
   return Math.ceil(String(text).length / 4);
+}
+
+// ── Index + Metrics helpers ─────────────────────────────────────
+
+function extractIndexFields(content) {
+  try {
+    const d = JSON.parse(content);
+    return {
+      tool_name: d.tool_name || null,
+      file_path: (d.tool_input && d.tool_input.file_path) || d.file_path || null,
+      command: (d.tool_input && d.tool_input.command) || d.command || null,
+    };
+  } catch { return { tool_name: null, file_path: null, command: null }; }
+}
+
+function insertIndex(entryId, type, session, content, tokenEst, hasEmbedding) {
+  try {
+    const f = extractIndexFields(content);
+    dbExec(`INSERT OR REPLACE INTO entry_index (entry_id, type, session, tool_name, file_path, command, token_estimate, has_embedding, created_at) VALUES (${Number(entryId)}, ${esc(type)}, ${esc(session)}, ${esc(f.tool_name)}, ${esc(f.file_path)}, ${esc(f.command)}, ${tokenEst || 0}, ${hasEmbedding ? 1 : 0}, datetime('now'));`);
+  } catch {}
+}
+
+function recordMetric({ operation, startTime, requestChars, responseChars, resultCount, usedIds, taskKind, session }) {
+  setImmediate(() => {
+    try {
+      const latency = Date.now() - startTime;
+      const tokIn = estimateTokens(String(requestChars || ''));
+      const tokOut = estimateTokens(String(responseChars || ''));
+      dbExec(`INSERT INTO api_metrics (operation, latency_ms, request_chars, response_chars, estimated_tokens_in, estimated_tokens_out, result_count, used_ids, task_kind, session) VALUES (${esc(operation)}, ${latency}, ${requestChars || 0}, ${responseChars || 0}, ${tokIn}, ${tokOut}, ${resultCount || 0}, ${esc(usedIds || null)}, ${esc(taskKind || null)}, ${esc(session || null)});`);
+    } catch {}
+  });
+}
+
+function backfillIndex(batchSize) {
+  try {
+    const missing = dbQuery(`SELECT id, type, session, content, token_estimate, embedding FROM entries WHERE id NOT IN (SELECT entry_id FROM entry_index) ORDER BY id ASC LIMIT ${batchSize};`);
+    for (const row of missing) {
+      const f = extractIndexFields(row.content || '');
+      dbExec(`INSERT OR IGNORE INTO entry_index (entry_id, type, session, tool_name, file_path, command, token_estimate, has_embedding, created_at) VALUES (${row.id}, ${esc(row.type)}, ${esc(row.session)}, ${esc(f.tool_name)}, ${esc(f.file_path)}, ${esc(f.command)}, ${row.token_estimate || 0}, ${row.embedding ? 1 : 0}, datetime('now'));`);
+    }
+    if (missing.length > 0) console.log(`[vcontext:index] Backfilled ${missing.length} entries`);
+  } catch {}
 }
 
 // ── Access tracking ────────────────────────────────────────────
@@ -606,6 +707,7 @@ function parseTags(rows) {
  * Body: { type, content, tags?, session?, reasoning?, conditions?, supersedes?, confidence?, status? }
  */
 async function handleStore(req, res) {
+  const _startTime = Date.now();
   // Auth check
   const auth = validateApiKey(req);
   if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
@@ -666,6 +768,9 @@ async function handleStore(req, res) {
   const rows = dbQuery('SELECT * FROM entries ORDER BY id DESC LIMIT 1;');
   const entry = rows[0] || {};
 
+  // Index this entry
+  insertIndex(entry.id, type, session, content, tokenEst, 0);
+
   // Write-through: immediately sync to SSD for crash safety
   try {
     const ssdSql = `INSERT OR REPLACE INTO entries (type, content, tags, session, token_estimate, created_at, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status) VALUES (${esc(type)}, ${esc(content)}, ${esc(tagsJson)}, ${esc(session || null)}, ${tokenEst}, ${esc(entry.created_at || now)}, ${esc(entry.created_at || now)}, 0, 'ssd', ${esc(reasoning)}, ${esc(conditions)}, ${supersedes === null ? 'NULL' : supersedes}, ${esc(confidence)}, ${esc(status)});`;
@@ -702,6 +807,7 @@ async function handleStore(req, res) {
         if (embedding && embedding.length > 0) {
           dbExec(`UPDATE entries SET embedding = ${esc(JSON.stringify(embedding))} WHERE id = ${entry.id};`);
           vecUpsert(entry.id, embedding);
+          try { dbExec(`UPDATE entry_index SET has_embedding = 1 WHERE entry_id = ${entry.id};`); } catch {}
         }
       } catch {} // Non-fatal
     });
@@ -825,6 +931,7 @@ async function handleStore(req, res) {
   }
 
   sendJson(res, 201, { stored: entry });
+  recordMetric({ operation: 'store', startTime: _startTime, requestChars: content.length, responseChars: JSON.stringify(entry).length, resultCount: 1, taskKind: type, session });
 
   // Broadcast to WebSocket clients
   wsBroadcast('new_entry', entry);
@@ -838,6 +945,7 @@ async function handleStore(req, res) {
  * Searches all tiers: RAM → SSD → Cloud (if configured)
  */
 function handleRecall(req, res) {
+  const _startTime = Date.now();
   const auth = validateApiKey(req);
   if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
 
@@ -909,6 +1017,7 @@ function handleRecall(req, res) {
   parseTags(allResults);
 
   sendJson(res, 200, { results: allResults, count: allResults.length, query: q });
+  recordMetric({ operation: 'recall', startTime: _startTime, requestChars: (q || '').length, responseChars: JSON.stringify(allResults).length, resultCount: allResults.length, usedIds: JSON.stringify(allResults.map(r => r.id)), taskKind: 'search' });
 }
 
 /**
@@ -962,6 +1071,7 @@ function searchTier(dbPath, q, type, limit, namespace, userFilter, accessibleGro
  * Cascading across tiers.
  */
 function handleRecent(req, res) {
+  const _startTime = Date.now();
   const auth = validateApiKey(req);
   if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
 
@@ -1015,6 +1125,7 @@ function handleRecent(req, res) {
   parseTags(allResults);
 
   sendJson(res, 200, { results: allResults.slice(0, n), count: Math.min(allResults.length, n) });
+  recordMetric({ operation: 'recent', startTime: _startTime, responseChars: JSON.stringify(allResults.slice(0, n)).length, resultCount: Math.min(allResults.length, n), taskKind: 'recent' });
 }
 
 /**
@@ -2147,6 +2258,7 @@ async function batchEmbed(limit = 5) {
       if (embedding && embedding.length > 0) {
         dbExec(`UPDATE entries SET embedding = ${esc(JSON.stringify(embedding))} WHERE id = ${row.id};`);
         vecUpsert(row.id, embedding);
+        try { dbExec(`UPDATE entry_index SET has_embedding = 1 WHERE entry_id = ${row.id};`); } catch {}
         done++;
       }
     } catch {
@@ -2169,6 +2281,8 @@ function doBackupAndMigrate() {
   try {
     vecSync();
   } catch {}
+  // Incremental index backfill
+  try { backfillIndex(200); } catch {}
   // Recheck Ollama availability
   checkOllama();
   // Batch embed: generate missing embeddings (up to 5 per cycle)
@@ -2921,6 +3035,58 @@ function handleAnalyticsReport(req, res) {
   });
 }
 
+// GET /metrics/report — API performance metrics
+function handleMetricsReport(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+  const params = parseQuery(req.url);
+  const hours = parseInt(params.hours) || 24;
+  const since = esc(new Date(Date.now() - hours * 3600000).toISOString().replace('T', ' ').slice(0, 19));
+
+  // Per-operation aggregates
+  const opRows = dbQuery(`SELECT operation, COUNT(*) as count, AVG(latency_ms) as avg_latency, AVG(result_count) as avg_results, SUM(estimated_tokens_in) as total_tokens_in, SUM(estimated_tokens_out) as total_tokens_out FROM api_metrics WHERE created_at >= ${since} GROUP BY operation;`);
+  const operations = {};
+  for (const r of opRows) {
+    operations[r.operation] = {
+      count: r.count,
+      avg_latency_ms: Math.round((r.avg_latency || 0) * 10) / 10,
+      avg_result_count: Math.round((r.avg_results || 0) * 10) / 10,
+      total_tokens_in: r.total_tokens_in || 0,
+      total_tokens_out: r.total_tokens_out || 0,
+    };
+  }
+
+  // Derived: resume cost (tokens used in session-recall operations)
+  const resumeRows = dbQuery(`SELECT SUM(estimated_tokens_out) as cost FROM api_metrics WHERE task_kind = 'session-recall' AND created_at >= ${since};`);
+  const resumeCost = resumeRows[0]?.cost || 0;
+
+  // Derived: search hit rate (avg results / requested limit proxy)
+  const recallOp = operations['recall'];
+  const hitRate = recallOp ? Math.min(1, (recallOp.avg_result_count || 0) / 10) : 0;
+
+  // Recent operations
+  const recentRows = dbQuery(`SELECT * FROM api_metrics ORDER BY id DESC LIMIT 20;`);
+
+  // Index stats
+  const indexCount = dbQuery('SELECT COUNT(*) as c FROM entry_index;');
+  const entryCount = dbQuery('SELECT COUNT(*) as c FROM entries;');
+
+  sendJson(res, 200, {
+    period_hours: hours,
+    operations,
+    derived: {
+      resume_cost_tokens: resumeCost,
+      search_hit_rate: Math.round(hitRate * 1000) / 1000,
+    },
+    index: {
+      indexed: indexCount[0]?.c || 0,
+      total: entryCount[0]?.c || 0,
+      coverage: entryCount[0]?.c ? Math.round((indexCount[0]?.c || 0) / entryCount[0].c * 1000) / 1000 : 0,
+    },
+    recent_operations: recentRows,
+  });
+}
+
 // ── Request router ─────────────────────────────────────────────
 const ENDPOINTS_LIST = [
   'POST   /store             — store context entry (body: {type,content,tags?,session?,namespace?,group?,reasoning?,conditions?,supersedes?,confidence?,status?})',
@@ -2952,6 +3118,7 @@ const ENDPOINTS_LIST = [
   'GET    /search/semantic?q= — semantic similarity search (&limit=10&threshold=0.5)',
   'POST   /analytics/track   — track usage event {event_type, skill_name?, session?, metadata?}',
   'GET    /analytics/report?days= — usage analytics report (default 30 days)',
+  'GET    /metrics/report?hours= — API performance metrics (default 24h)',
   'WS     /ws                — WebSocket real-time push notifications (upgrade)',
   'WS     /ws?key=<apikey>   — WebSocket with API key auth',
   'GET    /dashboard         — browser dashboard UI',
@@ -3031,6 +3198,8 @@ const server = createServer(async (req, res) => {
       await handleAnalyticsTrack(req, res);
     } else if (method === 'GET' && path === '/analytics/report') {
       handleAnalyticsReport(req, res);
+    } else if (method === 'GET' && path === '/metrics/report') {
+      handleMetricsReport(req, res);
     } else if (method === 'GET' && path === '/dashboard') {
       const html = readFileSync(join(SCRIPT_DIR, 'vcontext-dashboard.html'), 'utf-8');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
