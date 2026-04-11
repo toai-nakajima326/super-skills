@@ -5,47 +5,67 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AI OS Dashboard</title>
 <style>
+  :root {
+    --bg: #0d1117; --bg-card: #161b22; --border: #30363d; --bg-bar: #21262d;
+    --text: #e6edf3; --text-muted: #8b949e; --text-dim: #6e7681;
+    --accent: #58a6ff; --green: #3fb950; --red: #f85149; --yellow: #d29922; --purple: #bc8cff;
+    --badge-decision-bg: #1f6feb33; --badge-error-bg: #da363333;
+    --badge-observation-bg: #23843233; --badge-conversation-bg: #9e6a0333; --badge-code-bg: #8b5cf633;
+    --model-tag-bg: #1f6feb22; --model-tag-border: #1f6feb44;
+    --btn-bg: #21262d; --btn-hover: #30363d;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #ffffff; --bg-card: #f6f8fa; --border: #d0d7de; --bg-bar: #e1e4e8;
+      --text: #1f2328; --text-muted: #656d76; --text-dim: #8b949e;
+      --accent: #0969da; --green: #1a7f37; --red: #cf222e; --yellow: #9a6700; --purple: #8250df;
+      --badge-decision-bg: #ddf4ff; --badge-error-bg: #ffebe9;
+      --badge-observation-bg: #dafbe1; --badge-conversation-bg: #fff8c5; --badge-code-bg: #fbefff;
+      --model-tag-bg: #ddf4ff; --model-tag-border: #54aeff44;
+      --btn-bg: #f3f4f6; --btn-hover: #e1e4e8;
+    }
+  }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117; color: #e6edf3; padding: 20px; }
+  body { font-family: -apple-system, system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 20px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; max-width: 1400px; margin: 0 auto; }
-  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
-  .card h2 { font-size: 14px; color: #8b949e; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1px; }
-  .stat { font-size: 32px; font-weight: bold; color: #58a6ff; }
-  .stat-label { font-size: 12px; color: #8b949e; }
+  .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .card h2 { font-size: 14px; color: var(--text-muted); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1px; }
+  .stat { font-size: 32px; font-weight: bold; color: var(--accent); }
+  .stat-label { font-size: 12px; color: var(--text-muted); }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
-  .badge-decision { background: #1f6feb33; color: #58a6ff; }
-  .badge-error { background: #da363333; color: #f85149; }
-  .badge-observation { background: #23843233; color: #3fb950; }
-  .badge-conversation { background: #9e6a0333; color: #d29922; }
-  .badge-code { background: #8b5cf633; color: #bc8cff; }
-  .bar { height: 8px; border-radius: 4px; background: #21262d; margin: 4px 0; }
+  .badge-decision { background: var(--badge-decision-bg); color: var(--accent); }
+  .badge-error { background: var(--badge-error-bg); color: var(--red); }
+  .badge-observation { background: var(--badge-observation-bg); color: var(--green); }
+  .badge-conversation { background: var(--badge-conversation-bg); color: var(--yellow); }
+  .badge-code { background: var(--badge-code-bg); color: var(--purple); }
+  .bar { height: 8px; border-radius: 4px; background: var(--bg-bar); margin: 4px 0; }
   .bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
-  .entry { padding: 8px 0; border-bottom: 1px solid #21262d; font-size: 13px; }
+  .entry { padding: 8px 0; border-bottom: 1px solid var(--bg-bar); font-size: 13px; }
   .entry:last-child { border: none; }
-  .entry-time { color: #8b949e; font-size: 11px; }
-  .btn { background: #21262d; border: 1px solid #30363d; color: #e6edf3; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
-  .btn:hover { background: #30363d; }
+  .entry-time { color: var(--text-muted); font-size: 11px; }
+  .btn { background: var(--btn-bg); border: 1px solid var(--border); color: var(--text); padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  .btn:hover { background: var(--btn-hover); }
   .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-  .status-green { background: #3fb950; }
-  .status-red { background: #f85149; }
-  .status-yellow { background: #d29922; }
+  .status-green { background: var(--green); }
+  .status-red { background: var(--red); }
+  .status-yellow { background: var(--yellow); }
   header { max-width: 1400px; margin: 0 auto 20px; display: flex; justify-content: space-between; align-items: center; }
   header h1 { font-size: 20px; }
-  header .meta { font-size: 12px; color: #8b949e; }
-  .model-tag { display: inline-block; background: #1f6feb22; border: 1px solid #1f6feb44; color: #58a6ff; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin: 2px; }
+  header .meta { font-size: 12px; color: var(--text-muted); }
+  .model-tag { display: inline-block; background: var(--model-tag-bg); border: 1px solid var(--model-tag-border); color: var(--accent); padding: 2px 8px; border-radius: 4px; font-size: 11px; margin: 2px; }
   .chart-bar { display: flex; align-items: center; margin: 4px 0; }
-  .chart-bar .label { width: 120px; font-size: 12px; color: #8b949e; }
-  .chart-bar .bar-fill { background: #58a6ff; }
+  .chart-bar .label { width: 120px; font-size: 12px; color: var(--text-muted); }
+  .chart-bar .bar-fill { background: var(--accent); }
   .wide { grid-column: span 2; }
   @media (max-width: 768px) { .wide { grid-column: span 1; } }
 </style>
 </head>
 <body>
 <header>
-  <h1>AI OS Dashboard <span style="font-size:12px;color:#8b949e;font-weight:normal;">v1.7.0</span></h1>
+  <h1>AI OS Dashboard <span style="font-size:12px;color:var(--text-muted);font-weight:normal;">v1.8.0</span></h1>
   <div class="meta">
     <span id="status-indicator"><span class="status-dot status-yellow"></span>Loading...</span>
-    &nbsp;|&nbsp; <span id="live-indicator" style="color:#3fb950;">Connecting...</span>
+    &nbsp;|&nbsp; <span id="live-indicator" style="color:var(--green);">Connecting...</span>
     &nbsp;|&nbsp; <span id="uptime"></span>
   </div>
 </header>
@@ -76,7 +96,7 @@
       <button class="btn" onclick="doAction('/tier/migrate','POST')">Tier Migrate</button>
       <button class="btn" onclick="refresh()">Refresh</button>
     </div>
-    <div id="action-result" style="margin-top:8px;font-size:12px;color:#8b949e;"></div>
+    <div id="action-result" style="margin-top:8px;font-size:12px;color:var(--text-muted);"></div>
   </div>
 
   <!-- Recent Entries -->
@@ -94,6 +114,7 @@
 
 <script>
 const API = 'http://localhost:3150';
+function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue('--' + name).trim(); }
 
 async function fetchJson(path) {
   try {
@@ -199,25 +220,25 @@ async function refresh() {
   if (tiers) {
     const maxEntries = Math.max(tiers.ram.entries, tiers.ssd.entries, 1);
     var tiersHtml =
-      '<div class="chart-bar"><span class="label">RAM (' + escapeHtml(tiers.ram.size) + ')</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (tiers.ram.entries / maxEntries * 100) + '%;background:#58a6ff"></div></div><span style="margin-left:8px;font-size:13px;">' + tiers.ram.entries + '</span></div>' +
-      '<div class="chart-bar"><span class="label">SSD (' + escapeHtml(tiers.ssd.size) + ')</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (tiers.ssd.entries / maxEntries * 100) + '%;background:#3fb950"></div></div><span style="margin-left:8px;font-size:13px;">' + tiers.ssd.entries + '</span></div>' +
-      '<div class="chart-bar"><span class="label">Cloud</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (tiers.cloud.entries > 0 ? tiers.cloud.entries / maxEntries * 100 : 0) + '%;background:#d29922"></div></div><span style="margin-left:8px;font-size:13px;">' + (tiers.cloud.configured ? tiers.cloud.entries : 'stub') + '</span></div>';
+      '<div class="chart-bar"><span class="label">RAM (' + escapeHtml(tiers.ram.size) + ')</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (tiers.ram.entries / maxEntries * 100) + '%;background:var(--accent)"></div></div><span style="margin-left:8px;font-size:13px;">' + tiers.ram.entries + '</span></div>' +
+      '<div class="chart-bar"><span class="label">SSD (' + escapeHtml(tiers.ssd.size) + ')</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (tiers.ssd.entries / maxEntries * 100) + '%;background:var(--green)"></div></div><span style="margin-left:8px;font-size:13px;">' + tiers.ssd.entries + '</span></div>' +
+      '<div class="chart-bar"><span class="label">Cloud</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (tiers.cloud.entries > 0 ? tiers.cloud.entries / maxEntries * 100 : 0) + '%;background:var(--yellow)"></div></div><span style="margin-left:8px;font-size:13px;">' + (tiers.cloud.configured ? tiers.cloud.entries : 'stub') + '</span></div>';
 
     // Local AI status inline
     if (ai) {
       var embedCount = ai.embedding_count || 0;
       var totalCount = tiers.ram.entries || 1;
       var embedPct = Math.round(embedCount / totalCount * 100);
-      tiersHtml += '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #21262d;">';
-      tiersHtml += '<div style="font-size:12px;color:#8b949e;margin-bottom:6px;">LOCAL AI</div>';
+      tiersHtml += '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--bg-bar);">';
+      tiersHtml += '<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">LOCAL AI</div>';
       tiersHtml += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:12px;">';
       tiersHtml += '<div><span class="status-dot status-' + (ai.ollama_available ? 'green' : 'red') + '"></span>Ollama</div>';
       tiersHtml += '<div>' + (ai.preferred ? escapeHtml(ai.preferred.embed || '') : '') + '</div>';
       tiersHtml += '</div>';
       var remaining = totalCount - embedCount;
-      tiersHtml += '<div class="chart-bar" style="margin-top:4px;"><span class="label">Embedding</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + embedPct + '%;background:#bc8cff"></div></div><span style="margin-left:8px;font-size:13px;">' + embedCount + '/' + totalCount + ' (' + embedPct + '%)</span></div>';
-      if (remaining > 0) tiersHtml += '<div style="font-size:11px;color:#d29922;margin-top:2px;">' + remaining + ' entries pending</div>';
-      tiersHtml += '<div style="font-size:11px;color:#6e7681;margin-top:2px;">' + (ai.models || []).map(function(m){ return escapeHtml(m); }).join(', ') + '</div>';
+      tiersHtml += '<div class="chart-bar" style="margin-top:4px;"><span class="label">Embedding</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + embedPct + '%;background:var(--purple)"></div></div><span style="margin-left:8px;font-size:13px;">' + embedCount + '/' + totalCount + ' (' + embedPct + '%)</span></div>';
+      if (remaining > 0) tiersHtml += '<div style="font-size:11px;color:var(--yellow);margin-top:2px;">' + remaining + ' entries pending</div>';
+      tiersHtml += '<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">' + (ai.models || []).map(function(m){ return escapeHtml(m); }).join(', ') + '</div>';
       tiersHtml += '</div>';
     }
     document.getElementById('tiers-content').innerHTML = tiersHtml;
@@ -228,7 +249,7 @@ async function refresh() {
     document.getElementById('ai-content').innerHTML =
       '<div style="margin-bottom:8px;">' + (ai.ollama_available ? '<span class="status-dot status-green"></span>Available' : '<span class="status-dot status-red"></span>Not available') + '</div>' +
       '<div>' + (ai.models || []).map(function(m) { return '<span class="model-tag">' + escapeHtml(m) + '</span>'; }).join('') + '</div>' +
-      '<div style="margin-top:8px;font-size:12px;color:#8b949e;">' +
+      '<div style="margin-top:8px;font-size:12px;color:var(--text-muted);">' +
         Object.entries(ai.features || {}).map(function(pair) { return (pair[1] ? 'ON' : 'OFF') + ' ' + escapeHtml(pair[0]); }).join(' &nbsp; ') +
       '</div>';
   }
@@ -247,9 +268,9 @@ async function refresh() {
       var model = parsed.model || '';
       return '<div class="entry">' +
         '<span class="' + badgeClass(r.type) + '">' + escapeHtml(r.type) + '</span>' +
-        (sessionShort ? '<span style="margin-left:6px;font-size:10px;color:#6e7681;font-family:monospace;" title="' + escapeHtml(sessionId) + '">' + sessionShort + '</span>' : '') +
-        (projectName ? '<span style="margin-left:4px;font-size:10px;color:#58a6ff;">' + escapeHtml(projectName) + '</span>' : '') +
-        (model ? '<span style="margin-left:4px;font-size:10px;color:#bc8cff;">' + escapeHtml(model) + '</span>' : '') +
+        (sessionShort ? '<span style="margin-left:6px;font-size:10px;color:var(--text-dim);font-family:monospace;" title="' + escapeHtml(sessionId) + '">' + sessionShort + '</span>' : '') +
+        (projectName ? '<span style="margin-left:4px;font-size:10px;color:var(--accent);">' + escapeHtml(projectName) + '</span>' : '') +
+        (model ? '<span style="margin-left:4px;font-size:10px;color:var(--purple);">' + escapeHtml(model) + '</span>' : '') +
         '<div style="margin-top:2px;">' + escapeHtml(summary) + '</div>' +
         '<div class="entry-time">' + toJST(r.created_at) + (r._tier ? ' | ' + escapeHtml(r._tier) : '') + '</div>' +
       '</div>';
@@ -294,27 +315,27 @@ async function refresh() {
     }
 
     var html = '<table style="width:100%;font-size:12px;border-collapse:collapse;">';
-    html += '<tr style="color:#8b949e;text-align:left;"><th style="padding:4px;">Session</th><th>Project</th><th>Last Active</th><th>Events</th><th>Breakdown</th></tr>';
+    html += '<tr style="color:var(--text-muted);text-align:left;"><th style="padding:4px;">Session</th><th>Project</th><th>Last Active</th><th>Events</th><th>Breakdown</th></tr>';
     for (var j = 0; j < Math.min(sortedSessions.length, 10); j++) {
       var sid2 = sortedSessions[j][0];
       var info = sortedSessions[j][1];
       var isEnded = info.types['session-end'] > 0;
-      var rowColor = isEnded ? '#6e7681' : '#e6edf3';
+      var rowColor = isEnded ? cssVar('text-dim') : cssVar('text');
       var statusDot = isEnded ? 'status-red' : 'status-green';
       var breakdown = Object.entries(info.types).map(function(p) { return p[0] + ':' + p[1]; }).join(' ');
-      html += '<tr style="color:' + rowColor + ';border-top:1px solid #21262d;">';
+      html += '<tr style="color:' + rowColor + ';border-top:1px solid var(--bg-bar);">';
       html += '<td style="padding:4px;font-family:monospace;"><span class="status-dot ' + statusDot + '"></span>' + escapeHtml(sid2.slice(0, 8)) + '</td>';
-      html += '<td style="color:#58a6ff;">' + escapeHtml(info.project || '-') + '</td>';
+      html += '<td style="color:var(--accent);">' + escapeHtml(info.project || '-') + '</td>';
       html += '<td>' + timeAgo(info.lastActive) + '</td>';
       html += '<td>' + info.events + '</td>';
-      html += '<td style="font-size:11px;color:#8b949e;">' + escapeHtml(breakdown) + '</td>';
+      html += '<td style="font-size:11px;color:var(--text-muted);">' + escapeHtml(breakdown) + '</td>';
       html += '</tr>';
     }
     html += '</table>';
-    html += '<div style="margin-top:8px;font-size:11px;color:#6e7681;">' + sortedSessions.length + ' sessions total | <span class="status-dot status-green" style="margin-left:4px;"></span>active <span class="status-dot status-red" style="margin-left:8px;"></span>ended</div>';
+    html += '<div style="margin-top:8px;font-size:11px;color:var(--text-dim);">' + sortedSessions.length + ' sessions total | <span class="status-dot status-green" style="margin-left:4px;"></span>active <span class="status-dot status-red" style="margin-left:8px;"></span>ended</div>';
     document.getElementById('analytics-content').innerHTML = html;
   } else {
-    document.getElementById('analytics-content').innerHTML = '<div style="color:#8b949e;">No session data</div>';
+    document.getElementById('analytics-content').innerHTML = '<div style="color:var(--text-muted);">No session data</div>';
   }
 }
 
@@ -342,7 +363,7 @@ function connectWs() {
       wsRetryDelay = 1000;
       setStatus('green', 'LIVE');
       document.getElementById('live-indicator').textContent = 'Live: ' + liveCount + ' events';
-      document.getElementById('live-indicator').style.color = '#3fb950';
+      document.getElementById('live-indicator').style.color = cssVar('green');
       ws.send(JSON.stringify({ action: 'subscribe' }));
       startPolling();
       refresh();
@@ -361,7 +382,7 @@ function connectWs() {
       wsConnected = false;
       setStatus('yellow', 'Reconnecting (' + Math.round(wsRetryDelay/1000) + 's)...');
       document.getElementById('live-indicator').textContent = 'WS disconnected';
-      document.getElementById('live-indicator').style.color = '#d29922';
+      document.getElementById('live-indicator').style.color = cssVar('yellow');
       startPolling();
       wsReconnectTimer = setTimeout(connectWs, wsRetryDelay);
       wsRetryDelay = Math.min(wsRetryDelay * 1.5, 15000);
