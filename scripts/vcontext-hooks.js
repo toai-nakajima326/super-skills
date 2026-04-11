@@ -171,6 +171,30 @@ async function recordEvent(eventName) {
       }
     } catch {} // Non-fatal
   }
+
+  // Check for pending consultations from other AIs (piggyback on tool-use)
+  if (eventName === 'tool-use') {
+    try {
+      await checkPendingConsultations();
+    } catch {} // Non-fatal
+  }
+}
+
+// ── Auto-consult: check for pending consultations ────────────────
+async function checkPendingConsultations() {
+  const model = process.env.VCONTEXT_MODEL || 'claude';
+  const pending = await get(`/consult/pending?model=${encodeURIComponent(model)}`);
+  if (!pending.pending || pending.pending.length === 0) return;
+
+  for (const p of pending.pending.slice(0, 2)) {
+    const lines = [
+      `[vcontext] Consultation requested (${p.consultation_id}):`,
+      `  Question: ${p.query}`,
+      `  ${(p.prompt || '').slice(0, 300)}`,
+      `  To respond: curl -s -X POST http://127.0.0.1:${VCONTEXT_PORT}/consult/${p.consultation_id}/response -H 'Content-Type: application/json' -d '{"model":"${model}","chosen":N,"reasoning":"...","confidence":"high|medium|low"}'`,
+    ];
+    process.stdout.write(lines.join('\n') + '\n');
+  }
 }
 
 // ── Summarize entry for recall display ───────────────────────────
