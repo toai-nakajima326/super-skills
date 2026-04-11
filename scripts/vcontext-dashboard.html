@@ -102,7 +102,7 @@
 
   <!-- API Metrics + Health (top row) -->
   <div class="card">
-    <h2>API Metrics (24h)</h2>
+    <h2>Metrics</h2>
     <div id="metrics-content">Loading...</div>
   </div>
 
@@ -470,17 +470,22 @@ async function refresh() {
     mhtml += '</div>';
     mhtml += '</div>';
 
-    // Effectiveness
+    // Effectiveness — period + cumulative
     mhtml += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--bg-bar);font-size:12px;">';
-    var savingsRate = Math.round((derived.credit_savings_rate || 0) * 100);
-    var savingsColor = savingsRate >= 50 ? 'var(--green)' : savingsRate >= 20 ? 'var(--yellow)' : 'var(--text-dim)';
-    mhtml += '<div style="font-size:16px;font-weight:bold;color:' + savingsColor + ';">';
-    mhtml += 'Credit savings: ' + savingsRate + '%';
+    var pRate = Math.round((derived.period_savings_rate || 0) * 100);
+    var cRate = Math.round((derived.cumulative_savings_rate || 0) * 100);
+    var pColor = pRate >= 50 ? 'var(--green)' : pRate >= 20 ? 'var(--yellow)' : 'var(--text-dim)';
+    var cColor = cRate >= 50 ? 'var(--green)' : cRate >= 20 ? 'var(--yellow)' : 'var(--text-dim)';
+    mhtml += '<div style="display:flex;gap:16px;">';
+    mhtml += '<div><div style="font-size:10px;color:var(--text-muted);">24h savings</div>';
+    mhtml += '<div style="font-size:18px;font-weight:bold;color:' + pColor + ';">' + pRate + '%</div></div>';
+    mhtml += '<div><div style="font-size:10px;color:var(--text-muted);">Cumulative</div>';
+    mhtml += '<div style="font-size:18px;font-weight:bold;color:' + cColor + ';">' + cRate + '%</div></div>';
     mhtml += '</div>';
-    mhtml += '<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">';
-    mhtml += 'Stored: ' + (derived.stored_tokens || 0).toLocaleString() + ' tok';
-    mhtml += ' | New (24h): ' + (derived.period_new_tokens || 0).toLocaleString() + ' tok';
-    mhtml += ' | Sessions: ' + (derived.active_sessions || 0);
+    mhtml += '<div style="font-size:10px;color:var(--text-dim);margin-top:4px;">';
+    mhtml += '24h: ' + (derived.period_stored_tokens || 0).toLocaleString() + ' stored / ' + (derived.period_new_tokens || 0).toLocaleString() + ' new';
+    mhtml += ' | Total: ' + (derived.cumulative_stored_tokens || 0).toLocaleString() + ' tok';
+    mhtml += ' | ' + (derived.active_sessions || 0) + ' sessions';
     mhtml += '</div>';
     mhtml += '</div>';
 
