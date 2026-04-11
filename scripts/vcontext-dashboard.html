@@ -113,7 +113,7 @@
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
       <button class="btn" onclick="confirmAction('Summarize Old', '24時間以上前のエントリをOllamaで1文に要約します。元データは消えません。', '/ai/summarize', 'POST')">Summarize Old</button>
       <button class="btn" onclick="confirmAction('Tier Migrate', '古いエントリをRAM→SSD→Cloudに移動します。RAM上の古いデータが整理されます。', '/tier/migrate', 'POST')">Tier Migrate</button>
-      <button class="btn" onclick="refresh()">Refresh</button>
+      <button class="btn" onclick="confirmAction('Refresh', 'ダッシュボードの全データを最新に更新します。WebSocket接続中は自動更新されています。', '_refresh', '')">Refresh</button>
     </div>
     <div id="action-confirm" style="display:none;margin-top:8px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-bar);font-size:12px;">
       <div id="action-confirm-title" style="font-weight:bold;margin-bottom:4px;"></div>
@@ -168,6 +168,7 @@ function confirmAction(title, desc, path, method) {
   var okBtn = document.getElementById('action-confirm-ok');
   okBtn.onclick = function() {
     box.style.display = 'none';
+    if (path === '_refresh') { refresh(); return; }
     doAction(path, method);
   };
   box.style.display = 'block';
