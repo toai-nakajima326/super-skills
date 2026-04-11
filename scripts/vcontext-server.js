@@ -484,12 +484,22 @@ async function handleStore(req, res) {
   const tagsJson = JSON.stringify(tags || []);
   const tokenEst = estimateTokens(content);
 
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
   const sql = `INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES (${esc(type)}, ${esc(content)}, ${esc(tagsJson)}, ${esc(session || null)}, ${tokenEst}, datetime('now'), 0, 'ram');`;
   dbExec(sql);
 
   // Get the inserted row
   const rows = dbQuery('SELECT * FROM entries ORDER BY id DESC LIMIT 1;');
   const entry = rows[0] || {};
+
+  // Write-through: immediately sync to SSD for crash safety
+  try {
+    const ssdSql = `INSERT OR REPLACE INTO entries (type, content, tags, session, token_estimate, created_at, last_accessed, access_count, tier) VALUES (${esc(type)}, ${esc(content)}, ${esc(tagsJson)}, ${esc(session || null)}, ${tokenEst}, ${esc(entry.created_at || now)}, ${esc(entry.created_at || now)}, 0, 'ssd');`;
+    dbExec(ssdSql, SSD_DB_PATH);
+  } catch (e) {
+    // SSD write failure is non-fatal, log but don't block
+    console.error('[write-through] SSD sync failed:', e.message);
+  }
 
   if (sizeCheck.msg) {
     entry._warning = sizeCheck.msg;
@@ -829,7 +839,22 @@ function handlePrune(req, res) {
   // Rebuild FTS
   dbExec("INSERT INTO entries_fts(entries_fts) VALUES('rebuild');");
 
-  sendJson(res, 200, { pruned: countToDelete, older_than: olderThan });
+  // Write-through: also prune matching entries from SSD
+  let ssdPruned = 0;
+  try {
+    if (existsSync(SSD_DB_PATH)) {
+      const ssdBefore = dbQuery(`SELECT COUNT(*) as count FROM entries WHERE created_at < datetime('now', '-${num} ${sqlUnit}');`, SSD_DB_PATH);
+      ssdPruned = ssdBefore[0]?.count || 0;
+      if (ssdPruned > 0) {
+        dbExec(`DELETE FROM entries WHERE created_at < datetime('now', '-${num} ${sqlUnit}');`, SSD_DB_PATH);
+        dbExec("INSERT INTO entries_fts(entries_fts) VALUES('rebuild');", SSD_DB_PATH);
+      }
+    }
+  } catch (e) {
+    console.error('[write-through] SSD prune failed:', e.message);
+  }
+
+  sendJson(res, 200, { pruned: countToDelete, ssd_pruned: ssdPruned, older_than: olderThan });
 }
 
 /**
