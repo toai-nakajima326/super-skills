@@ -42,7 +42,7 @@
 </head>
 <body>
 <header>
-  <h1>AI OS Dashboard <span style="font-size:12px;color:#8b949e;font-weight:normal;">v1.6.0</span></h1>
+  <h1>AI OS Dashboard <span style="font-size:12px;color:#8b949e;font-weight:normal;">v1.7.0</span></h1>
   <div class="meta">
     <span id="status-indicator"><span class="status-dot status-yellow"></span>Loading...</span>
     &nbsp;|&nbsp; <span id="live-indicator" style="color:#3fb950;">Connecting...</span>
@@ -87,7 +87,7 @@
 
   <!-- Activity Stats -->
   <div class="card wide">
-    <h2>Activity (30 days)</h2>
+    <h2>Sessions</h2>
     <div id="analytics-content">Loading...</div>
   </div>
 </div>
@@ -256,26 +256,65 @@ async function refresh() {
     }).join('');
   }
 
-  // Analytics
-  const analytics = await fetchJson('/analytics/report?days=30');
-  if (analytics && analytics.skill_usage) {
-    var maxCount = Math.max.apply(null, analytics.skill_usage.map(function(s) { return s.count; }).concat([1]));
-    document.getElementById('analytics-content').innerHTML =
-      '<div style="margin-bottom:8px;font-size:13px;">Total events: <strong>' + analytics.total_events + '</strong></div>' +
-      analytics.skill_usage.slice(0, 10).map(function(s) {
-        var tools = ['Bash','Read','Grep','Edit','Write','Glob','Agent','MultiEdit'];
-        var isTool = tools.indexOf(s.skill) >= 0;
-        var color = isTool ? '#58a6ff' : '#bc8cff';
-        var label = isTool ? s.skill : s.skill + ' (skill)';
-        return '<div class="chart-bar">' +
-          '<span class="label">' + escapeHtml(label) + '</span>' +
-          '<div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (s.count / maxCount * 100) + '%;background:' + color + '"></div></div>' +
-          '<span style="margin-left:8px;font-size:13px;">' + s.count + '</span>' +
-        '</div>';
-      }).join('') +
-      (analytics.never_used && analytics.never_used.length > 0 ? '<div style="margin-top:8px;font-size:12px;color:#8b949e;">Never used: ' + escapeHtml(analytics.never_used.join(', ')) + '</div>' : '');
+  // Sessions — aggregate from recent entries
+  const allRecent = await fetchJson('/recent?n=200');
+  if (allRecent && allRecent.results) {
+    var sessions = {};
+    for (var i = 0; i < allRecent.results.length; i++) {
+      var entry = allRecent.results[i];
+      var parsed2 = {};
+      try { parsed2 = JSON.parse(entry.content); } catch {}
+      var sid = parsed2.session_id || entry.session || '';
+      if (!sid) continue;
+      if (!sessions[sid]) {
+        sessions[sid] = { events: 0, types: {}, project: '', model: '', lastActive: entry.created_at, firstSeen: entry.created_at };
+      }
+      var s = sessions[sid];
+      s.events++;
+      s.types[entry.type] = (s.types[entry.type] || 0) + 1;
+      s.firstSeen = entry.created_at;
+      if (!s.project && parsed2.cwd) s.project = parsed2.cwd.split('/').filter(Boolean).pop();
+      if (!s.model && parsed2.model) s.model = parsed2.model;
+    }
+
+    var sortedSessions = Object.entries(sessions).sort(function(a, b) {
+      return (b[1].lastActive || '').localeCompare(a[1].lastActive || '');
+    });
+
+    function timeAgo(utcStr) {
+      if (!utcStr) return '';
+      try {
+        var d = new Date(utcStr.replace(' ', 'T') + 'Z');
+        var diff = Math.floor((Date.now() - d.getTime()) / 1000);
+        if (diff < 60) return diff + 's ago';
+        if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+        if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+        return Math.floor(diff / 86400) + 'd ago';
+      } catch { return ''; }
+    }
+
+    var html = '<table style="width:100%;font-size:12px;border-collapse:collapse;">';
+    html += '<tr style="color:#8b949e;text-align:left;"><th style="padding:4px;">Session</th><th>Project</th><th>Last Active</th><th>Events</th><th>Breakdown</th></tr>';
+    for (var j = 0; j < Math.min(sortedSessions.length, 10); j++) {
+      var sid2 = sortedSessions[j][0];
+      var info = sortedSessions[j][1];
+      var isEnded = info.types['session-end'] > 0;
+      var rowColor = isEnded ? '#6e7681' : '#e6edf3';
+      var statusDot = isEnded ? 'status-red' : 'status-green';
+      var breakdown = Object.entries(info.types).map(function(p) { return p[0] + ':' + p[1]; }).join(' ');
+      html += '<tr style="color:' + rowColor + ';border-top:1px solid #21262d;">';
+      html += '<td style="padding:4px;font-family:monospace;"><span class="status-dot ' + statusDot + '"></span>' + escapeHtml(sid2.slice(0, 8)) + '</td>';
+      html += '<td style="color:#58a6ff;">' + escapeHtml(info.project || '-') + '</td>';
+      html += '<td>' + timeAgo(info.lastActive) + '</td>';
+      html += '<td>' + info.events + '</td>';
+      html += '<td style="font-size:11px;color:#8b949e;">' + escapeHtml(breakdown) + '</td>';
+      html += '</tr>';
+    }
+    html += '</table>';
+    html += '<div style="margin-top:8px;font-size:11px;color:#6e7681;">' + sortedSessions.length + ' sessions total | <span class="status-dot status-green" style="margin-left:4px;"></span>active <span class="status-dot status-red" style="margin-left:8px;"></span>ended</div>';
+    document.getElementById('analytics-content').innerHTML = html;
   } else {
-    document.getElementById('analytics-content').innerHTML = '<div style="color:#8b949e;">No analytics data yet</div>';
+    document.getElementById('analytics-content').innerHTML = '<div style="color:#8b949e;">No session data</div>';
   }
 }
 
