@@ -35,6 +35,8 @@ import { createServer, request as httpRequest } from 'node:http';
 import { execSync, execFileSync } from 'node:child_process';
 import { existsSync, statSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
 
 // ── Configuration ──────────────────────────────────────────────
 const PORT = parseInt(process.env.VCONTEXT_PORT || '3150', 10);
@@ -698,8 +700,8 @@ async function handleStore(req, res) {
         if (!model) return;
         const embedding = await ollamaEmbed(model, content.slice(0, 1000));
         if (embedding && embedding.length > 0) {
-          // Store as JSON blob (SQLite has no native vector type)
           dbExec(`UPDATE entries SET embedding = ${esc(JSON.stringify(embedding))} WHERE id = ${entry.id};`);
+          vecUpsert(entry.id, embedding);
         }
       } catch {} // Non-fatal
     });
@@ -2141,6 +2143,10 @@ function doBackupAndMigrate() {
   } catch (e) {
     console.error('[vcontext:auto] RAM→SSD sync failed:', e.message);
   }
+  // Sync new embeddings to vec index
+  try {
+    vecSync();
+  } catch {}
   // Recheck Ollama availability
   checkOllama();
   // Quick migration check
@@ -2410,7 +2416,61 @@ function wsBroadcast(eventType, entry) {
   }
 }
 
-// ── Local AI (Ollama) ─────────────────────────────────────────
+// ── sqlite-vec (optional, for fast vector search) ────────────
+let vecDb = null; // better-sqlite3 instance with vec0 extension
+const EMBED_DIM = 2048; // gemma:2b dimension
+
+function initVecDb() {
+  try {
+    const Database = require('better-sqlite3');
+    const sqliteVec = require('sqlite-vec');
+    vecDb = new Database(join(MOUNT_POINT, 'vcontext-vec.db'));
+    sqliteVec.load(vecDb);
+    vecDb.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS vec_entries USING vec0(embedding float[${EMBED_DIM}])`);
+    console.log('[sqlite-vec] Loaded — fast vector search enabled');
+  } catch (e) {
+    console.log(`[sqlite-vec] Not available (${e.message}) — falling back to JS cosine`);
+    vecDb = null;
+  }
+}
+
+function vecUpsert(id, embedding) {
+  if (!vecDb || !embedding || embedding.length !== EMBED_DIM) return;
+  try {
+    const embJson = JSON.stringify(embedding).replace(/'/g, "''");
+    vecDb.exec(`INSERT OR REPLACE INTO vec_entries(rowid, embedding) VALUES (${Number(id)}, vec_f32('${embJson}'))`);
+  } catch {}
+}
+
+function vecSearch(queryEmbedding, limit = 10) {
+  if (!vecDb) return [];
+  try {
+    const qJson = JSON.stringify(queryEmbedding).replace(/'/g, "''");
+    return vecDb.prepare(`SELECT rowid, distance FROM vec_entries WHERE embedding MATCH vec_f32('${qJson}') ORDER BY distance LIMIT ${Number(limit)}`).all();
+  } catch { return []; }
+}
+
+function vecSync() {
+  if (!vecDb) return;
+  try {
+    const vecCount = vecDb.prepare('SELECT count(*) as c FROM vec_entries').get().c;
+    const rows = dbQuery(`SELECT id, embedding FROM entries WHERE embedding IS NOT NULL AND id > ${vecCount} ORDER BY id;`);
+    let synced = 0;
+    for (const row of rows) {
+      try {
+        const emb = JSON.parse(row.embedding);
+        if (emb.length === EMBED_DIM) {
+          const embStr = row.embedding.replace(/'/g, "''");
+          vecDb.exec(`INSERT OR IGNORE INTO vec_entries(rowid, embedding) VALUES (${Number(row.id)}, vec_f32('${embStr}'))`);
+          synced++;
+        }
+      } catch {}
+    }
+    if (synced > 0) console.log(`[sqlite-vec] Synced ${synced} vectors`);
+  } catch {}
+}
+
+// ── Local AI (Ollama, optional) ───────────────────────────────
 
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
 let ollamaAvailable = false;
@@ -2636,31 +2696,53 @@ async function handleSemanticSearch(req, res) {
     return sendJson(res, 500, { error: 'Failed to generate embedding' });
   }
 
-  // Load all entries with embeddings for similarity comparison
-  const rows = dbQuery("SELECT id, type, content, tags, created_at, embedding, reasoning FROM entries WHERE embedding IS NOT NULL;");
-
-  // Calculate similarities
   const results = [];
-  for (const row of rows) {
-    try {
-      const entryEmbed = JSON.parse(row.embedding);
-      const sim = cosineSimilarity(queryEmbed, entryEmbed);
-      if (sim >= threshold) {
-        results.push({
-          id: row.id,
-          type: row.type,
-          content: row.content,
-          tags: row.tags,
-          created_at: row.created_at,
-          reasoning: row.reasoning,
-          similarity: Math.round(sim * 1000) / 1000,
-        });
+
+  // Fast path: sqlite-vec index search
+  if (vecDb) {
+    const vecResults = vecSearch(queryEmbed, limit * 2); // over-fetch for threshold filter
+    if (vecResults.length > 0) {
+      const ids = vecResults.map(r => r.rowid);
+      const placeholders = ids.map(() => '?').join(',');
+      const entries = dbQuery(`SELECT id, type, content, tags, created_at, reasoning FROM entries WHERE id IN (${ids.join(',')});`);
+      const entryMap = {};
+      for (const e of entries) entryMap[e.id] = e;
+
+      for (const vr of vecResults) {
+        const entry = entryMap[vr.rowid];
+        if (!entry) continue;
+        // vec0 returns L2 distance; convert to similarity (0-1 range, approximate)
+        const similarity = Math.round(Math.max(0, 1 - vr.distance / 4) * 1000) / 1000;
+        if (similarity >= threshold) {
+          results.push({
+            id: entry.id, type: entry.type, content: entry.content,
+            tags: entry.tags, created_at: entry.created_at, reasoning: entry.reasoning,
+            similarity, _engine: 'sqlite-vec',
+          });
+        }
       }
-    } catch {}
+      results.sort((a, b) => b.similarity - a.similarity);
+    }
   }
 
-  // Sort by similarity descending
-  results.sort((a, b) => b.similarity - a.similarity);
+  // Slow path fallback: JS cosine over all entries (if sqlite-vec unavailable or empty)
+  if (results.length === 0 && !vecDb) {
+    const rows = dbQuery("SELECT id, type, content, tags, created_at, embedding, reasoning FROM entries WHERE embedding IS NOT NULL;");
+    for (const row of rows) {
+      try {
+        const entryEmbed = JSON.parse(row.embedding);
+        const sim = cosineSimilarity(queryEmbed, entryEmbed);
+        if (sim >= threshold) {
+          results.push({
+            id: row.id, type: row.type, content: row.content,
+            tags: row.tags, created_at: row.created_at, reasoning: row.reasoning,
+            similarity: Math.round(sim * 1000) / 1000, _engine: 'js-cosine',
+          });
+        }
+      } catch {}
+    }
+    results.sort((a, b) => b.similarity - a.similarity);
+  }
 
   // Apply group access filter
   const accessibleGroups = getAccessibleGroups(auth);
@@ -2675,7 +2757,7 @@ async function handleSemanticSearch(req, res) {
   sendJson(res, 200, {
     results: filtered.slice(0, limit),
     count: Math.min(filtered.length, limit),
-    total_with_embeddings: rows.length,
+    engine: results[0]?._engine || (vecDb ? 'sqlite-vec' : 'js-cosine'),
     model_used: model,
     threshold,
   });
@@ -2935,6 +3017,10 @@ ensureSsdDb();
 // Restore RAM from SSD if RAM is empty (e.g. after reboot)
 restoreRamFromSsd();
 
+// Initialize sqlite-vec (optional — falls back to JS cosine if not installed)
+initVecDb();
+if (vecDb) vecSync();
+
 // Periodic backup + migration check (replaces plain backup timer)
 const backupTimer = setInterval(doBackupAndMigrate, BACKUP_INTERVAL_MS);
 
@@ -2948,6 +3034,7 @@ function shutdown(signal) {
   }
   wsClients.clear();
   doBackup();
+  if (vecDb) { try { vecDb.close(); } catch {} }
   server.close(() => {
     console.log('[vcontext] Server closed');
     process.exit(0);

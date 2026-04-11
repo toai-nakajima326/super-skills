@@ -42,7 +42,7 @@
 </head>
 <body>
 <header>
-  <h1>AI OS Dashboard <span style="font-size:12px;color:#8b949e;font-weight:normal;">v1.5.0</span></h1>
+  <h1>AI OS Dashboard <span style="font-size:12px;color:#8b949e;font-weight:normal;">v1.6.0</span></h1>
   <div class="meta">
     <span id="status-indicator"><span class="status-dot status-yellow"></span>Loading...</span>
     &nbsp;|&nbsp; <span id="live-indicator" style="color:#3fb950;">Connecting...</span>
@@ -85,9 +85,9 @@
     <div id="recent-content">Loading...</div>
   </div>
 
-  <!-- Skill Usage -->
+  <!-- Activity Stats -->
   <div class="card wide">
-    <h2>Skill Usage (30 days)</h2>
+    <h2>Activity (30 days)</h2>
     <div id="analytics-content">Loading...</div>
   </div>
 </div>
@@ -214,7 +214,9 @@ async function refresh() {
       tiersHtml += '<div><span class="status-dot status-' + (ai.ollama_available ? 'green' : 'red') + '"></span>Ollama</div>';
       tiersHtml += '<div>' + (ai.preferred ? escapeHtml(ai.preferred.embed || '') : '') + '</div>';
       tiersHtml += '</div>';
-      tiersHtml += '<div class="chart-bar" style="margin-top:4px;"><span class="label">Embedding</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + embedPct + '%;background:#bc8cff"></div></div><span style="margin-left:8px;font-size:13px;">' + embedPct + '%</span></div>';
+      var remaining = totalCount - embedCount;
+      tiersHtml += '<div class="chart-bar" style="margin-top:4px;"><span class="label">Embedding</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + embedPct + '%;background:#bc8cff"></div></div><span style="margin-left:8px;font-size:13px;">' + embedCount + '/' + totalCount + ' (' + embedPct + '%)</span></div>';
+      if (remaining > 0) tiersHtml += '<div style="font-size:11px;color:#d29922;margin-top:2px;">' + remaining + ' entries pending</div>';
       tiersHtml += '<div style="font-size:11px;color:#6e7681;margin-top:2px;">' + (ai.models || []).map(function(m){ return escapeHtml(m); }).join(', ') + '</div>';
       tiersHtml += '</div>';
     }
@@ -236,12 +238,18 @@ async function refresh() {
   if (recent && recent.results) {
     document.getElementById('recent-content').innerHTML = recent.results.map(function(r) {
       var summary = summarizeContent(r.type, r.content);
-      var session = '';
-      try { session = JSON.parse(r.content).session_id || ''; } catch {}
-      var sessionShort = session ? session.slice(0, 8) : '';
+      var parsed = {};
+      try { parsed = JSON.parse(r.content); } catch {}
+      var sessionId = parsed.session_id || '';
+      var sessionShort = sessionId ? sessionId.slice(0, 8) : '';
+      var cwd = parsed.cwd || '';
+      var projectName = cwd ? cwd.split('/').filter(Boolean).pop() : '';
+      var model = parsed.model || '';
       return '<div class="entry">' +
         '<span class="' + badgeClass(r.type) + '">' + escapeHtml(r.type) + '</span>' +
-        (sessionShort ? '<span style="margin-left:6px;font-size:10px;color:#6e7681;font-family:monospace;">' + sessionShort + '</span>' : '') +
+        (sessionShort ? '<span style="margin-left:6px;font-size:10px;color:#6e7681;font-family:monospace;" title="' + escapeHtml(sessionId) + '">' + sessionShort + '</span>' : '') +
+        (projectName ? '<span style="margin-left:4px;font-size:10px;color:#58a6ff;">' + escapeHtml(projectName) + '</span>' : '') +
+        (model ? '<span style="margin-left:4px;font-size:10px;color:#bc8cff;">' + escapeHtml(model) + '</span>' : '') +
         '<div style="margin-top:2px;">' + escapeHtml(summary) + '</div>' +
         '<div class="entry-time">' + toJST(r.created_at) + (r._tier ? ' | ' + escapeHtml(r._tier) : '') + '</div>' +
       '</div>';
@@ -255,9 +263,13 @@ async function refresh() {
     document.getElementById('analytics-content').innerHTML =
       '<div style="margin-bottom:8px;font-size:13px;">Total events: <strong>' + analytics.total_events + '</strong></div>' +
       analytics.skill_usage.slice(0, 10).map(function(s) {
+        var tools = ['Bash','Read','Grep','Edit','Write','Glob','Agent','MultiEdit'];
+        var isTool = tools.indexOf(s.skill) >= 0;
+        var color = isTool ? '#58a6ff' : '#bc8cff';
+        var label = isTool ? s.skill : s.skill + ' (skill)';
         return '<div class="chart-bar">' +
-          '<span class="label">' + escapeHtml(s.skill) + '</span>' +
-          '<div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (s.count / maxCount * 100) + '%;background:#58a6ff"></div></div>' +
+          '<span class="label">' + escapeHtml(label) + '</span>' +
+          '<div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (s.count / maxCount * 100) + '%;background:' + color + '"></div></div>' +
           '<span style="margin-left:8px;font-size:13px;">' + s.count + '</span>' +
         '</div>';
       }).join('') +
