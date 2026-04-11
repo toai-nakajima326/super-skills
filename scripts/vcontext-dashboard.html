@@ -112,12 +112,6 @@
     <div id="health-content">Loading...</div>
   </div>
 
-  <!-- Storage Tiers -->
-  <div class="card">
-    <h2>Storage Tiers</h2>
-    <div id="tiers-content">Loading...</div>
-  </div>
-
   <!-- Quick Actions -->
   <div class="card">
     <h2>Quick Actions</h2>
@@ -133,6 +127,12 @@
       <button class="btn" onclick="document.getElementById('action-confirm').style.display='none'">Cancel</button>
     </div>
     <div id="action-result" style="margin-top:8px;font-size:12px;color:var(--text-muted);"></div>
+  </div>
+
+  <!-- Storage Tiers -->
+  <div class="card">
+    <h2>Storage Tiers</h2>
+    <div id="tiers-content">Loading...</div>
   </div>
 
   <!-- Recent Entries -->
@@ -438,29 +438,52 @@ async function refresh() {
     document.getElementById('analytics-content').innerHTML = '<div style="color:var(--text-muted);">No session data</div>';
   }
 
-  // API Metrics
+  // API Metrics — human-readable status + effectiveness
   const metrics = await fetchJson('/metrics/report?hours=24');
   if (metrics && metrics.operations) {
-    var mhtml = '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:12px;">';
-    for (var op of ['store', 'recall', 'recent']) {
-      var d = metrics.operations[op] || { count: 0, avg_latency_ms: 0, total_tokens_in: 0, total_tokens_out: 0 };
-      mhtml += '<div style="text-align:center;padding:8px;border:1px solid var(--border);border-radius:6px;">';
-      mhtml += '<div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;">' + op + '</div>';
-      mhtml += '<div class="stat" style="font-size:24px;">' + d.count + '</div>';
-      mhtml += '<div style="font-size:11px;color:var(--text-dim);">' + d.avg_latency_ms + 'ms avg</div>';
-      mhtml += '<div style="font-size:10px;color:var(--text-dim);">' + (d.total_tokens_in + d.total_tokens_out) + ' tokens</div>';
-      mhtml += '</div>';
+    var storeOp = metrics.operations['store'] || { count: 0, avg_latency_ms: 0, total_tokens_in: 0, total_tokens_out: 0 };
+    var recallOp = metrics.operations['recall'] || { count: 0, avg_latency_ms: 0, avg_result_count: 0 };
+    var recentOp = metrics.operations['recent'] || { count: 0, avg_latency_ms: 0 };
+    var idx = metrics.index || { indexed: 0, total: 0, coverage: 0 };
+    var derived = metrics.derived || {};
+    var totalEntries = idx.total;
+    var idxPct = Math.round(idx.coverage * 100);
+    var totalTokens = (storeOp.total_tokens_in || 0) + (storeOp.total_tokens_out || 0) + (recallOp.total_tokens_in || 0) + (recallOp.total_tokens_out || 0);
+
+    // Status line
+    var storeStatus = storeOp.avg_latency_ms < 200 ? 'fast' : storeOp.avg_latency_ms < 1000 ? 'normal' : 'slow';
+    var recallStatus = recallOp.avg_latency_ms < 200 ? 'fast' : recallOp.avg_latency_ms < 1000 ? 'normal' : 'slow';
+    var storeColor = storeStatus === 'fast' ? 'var(--green)' : storeStatus === 'normal' ? 'var(--yellow)' : 'var(--red)';
+    var recallColor = recallStatus === 'fast' ? 'var(--green)' : recallStatus === 'normal' ? 'var(--yellow)' : 'var(--red)';
+
+    var mhtml = '<div style="font-size:13px;line-height:1.8;">';
+    mhtml += '<div>Record: <strong>' + totalEntries.toLocaleString() + '</strong> entries ';
+    mhtml += '<span style="color:' + storeColor + ';">(' + Math.round(storeOp.avg_latency_ms) + 'ms/write)</span></div>';
+    mhtml += '<div>Search: <strong>' + recallOp.count + '</strong> queries ';
+    mhtml += '<span style="color:' + recallColor + ';">(' + Math.round(recallOp.avg_latency_ms) + 'ms avg)</span>';
+    if (recallOp.avg_result_count > 0) mhtml += ' <span style="color:var(--text-dim);">' + recallOp.avg_result_count.toFixed(1) + ' hits/query</span>';
+    mhtml += '</div>';
+    mhtml += '<div>Index: ';
+    if (idxPct >= 100) {
+      mhtml += '<span style="color:var(--green);">complete</span>';
+    } else {
+      mhtml += '<span style="color:var(--yellow);">' + idxPct + '% built</span> (' + idx.indexed + '/' + idx.total + ')';
     }
     mhtml += '</div>';
-    if (metrics.derived) {
-      mhtml += '<div style="font-size:12px;color:var(--text-muted);border-top:1px solid var(--bg-bar);padding-top:8px;">';
-      mhtml += 'Resume cost: <strong>' + (metrics.derived.resume_cost_tokens || 0) + '</strong> tokens';
-      mhtml += ' | Hit rate: <strong>' + ((metrics.derived.search_hit_rate || 0) * 100).toFixed(0) + '%</strong>';
-      if (metrics.index) {
-        mhtml += ' | Index: <strong>' + metrics.index.indexed + '/' + metrics.index.total + '</strong>';
-      }
-      mhtml += '</div>';
-    }
+    mhtml += '</div>';
+
+    // Effectiveness
+    mhtml += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--bg-bar);font-size:12px;">';
+    var savingsRate = Math.round((derived.credit_savings_rate || 0) * 100);
+    var savingsColor = savingsRate >= 50 ? 'var(--green)' : savingsRate >= 20 ? 'var(--yellow)' : 'var(--text-dim)';
+    mhtml += '<div style="font-size:16px;font-weight:bold;color:' + savingsColor + ';">';
+    mhtml += 'Credit savings: ' + savingsRate + '%';
+    mhtml += '</div>';
+    mhtml += '<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">';
+    mhtml += (derived.tokens_served_from_context || 0).toLocaleString() + ' tokens reused / ' + (derived.tokens_total || 0).toLocaleString() + ' total';
+    mhtml += '</div>';
+    mhtml += '</div>';
+
     document.getElementById('metrics-content').innerHTML = mhtml;
   } else {
     document.getElementById('metrics-content').innerHTML = '<div style="color:var(--text-muted);">No metrics data</div>';

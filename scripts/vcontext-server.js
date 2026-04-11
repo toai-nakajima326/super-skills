@@ -3071,12 +3071,24 @@ function handleMetricsReport(req, res) {
   const indexCount = dbQuery('SELECT COUNT(*) as c FROM entry_index;');
   const entryCount = dbQuery('SELECT COUNT(*) as c FROM entries;');
 
+  // Credit savings: tokens served from vcontext recall vs total tokens that
+  // would have been needed without context reuse (recall_out + store_in)
+  const recallTokensOut = operations['recall']?.total_tokens_out || 0;
+  const recentTokensOut = operations['recent']?.total_tokens_out || 0;
+  const storeTokensIn = operations['store']?.total_tokens_in || 0;
+  const servedFromContext = recallTokensOut + recentTokensOut;
+  const totalWithoutContext = servedFromContext + storeTokensIn;
+  const savingsRate = totalWithoutContext > 0 ? Math.round(servedFromContext / totalWithoutContext * 1000) / 1000 : 0;
+
   sendJson(res, 200, {
     period_hours: hours,
     operations,
     derived: {
       resume_cost_tokens: resumeCost,
       search_hit_rate: Math.round(hitRate * 1000) / 1000,
+      credit_savings_rate: savingsRate,
+      tokens_served_from_context: servedFromContext,
+      tokens_total: totalWithoutContext,
     },
     index: {
       indexed: indexCount[0]?.c || 0,
