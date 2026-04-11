@@ -2178,6 +2178,53 @@ function syncRamToSsd() {
   console.log(`[vcontext:sync] Caught up ${gap} entries RAM→SSD (${ssdMaxId}→${ramMaxId})`);
 }
 
+// ── SSD → RAM restore (after reboot / RAM disk wipe) ────────────
+function restoreRamFromSsd() {
+  if (!existsSync(SSD_DB_PATH)) return;
+  const ramCount = dbQuery("SELECT COALESCE(COUNT(*),0) as c FROM entries;");
+  const ssdCount = dbQuery("SELECT COALESCE(COUNT(*),0) as c FROM entries;", SSD_DB_PATH);
+  const ramC = ramCount[0]?.c || 0;
+  const ssdC = ssdCount[0]?.c || 0;
+
+  if (ramC >= ssdC) return; // RAM already has everything
+
+  const gap = ssdC - ramC;
+  const ramMaxId = dbQuery("SELECT COALESCE(MAX(id),0) as max_id FROM entries;")[0]?.max_id || 0;
+
+  console.log(`[vcontext:restore] RAM has ${ramC} entries, SSD has ${ssdC} (${gap} missing). Restoring...`);
+
+  try {
+    dbExec(`
+      ATTACH '${SSD_DB_PATH}' AS ssd;
+      INSERT OR IGNORE INTO main.entries (id, type, content, tags, session, created_at, token_estimate, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status, embedding)
+        SELECT id, type, content, tags, session, created_at, token_estimate, last_accessed, access_count, 'ram', reasoning, conditions, supersedes, confidence, status, embedding
+        FROM ssd.entries WHERE id > ${ramMaxId};
+      DETACH ssd;
+    `);
+    const afterCount = dbQuery("SELECT COUNT(*) as c FROM entries;")[0]?.c || 0;
+    console.log(`[vcontext:restore] Restored ${afterCount - ramC} entries from SSD → RAM (now ${afterCount} total)`);
+  } catch (e) {
+    console.error(`[vcontext:restore] SSD → RAM restore failed: ${e.message}`);
+    // Fallback: try backup file
+    if (existsSync(BACKUP_PATH)) {
+      console.log('[vcontext:restore] Trying backup file...');
+      try {
+        dbExec(`
+          ATTACH '${BACKUP_PATH}' AS bak;
+          INSERT OR IGNORE INTO main.entries (id, type, content, tags, session, created_at, token_estimate, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status)
+            SELECT id, type, content, tags, session, created_at, token_estimate, last_accessed, access_count, 'ram', reasoning, conditions, supersedes, confidence, status
+            FROM bak.entries WHERE id > ${ramMaxId};
+          DETACH bak;
+        `);
+        const afterCount = dbQuery("SELECT COUNT(*) as c FROM entries;")[0]?.c || 0;
+        console.log(`[vcontext:restore] Restored from backup → RAM (now ${afterCount} total)`);
+      } catch (e2) {
+        console.error(`[vcontext:restore] Backup restore also failed: ${e2.message}`);
+      }
+    }
+  }
+}
+
 // ── WebSocket (minimal, zero-dep) ─────────────────────────────
 const WS_MAGIC = '258EAFA5-E914-47DA-95CA-5B56-A3CE3E4E2D';
 const wsClients = new Map(); // id -> { socket, userId, groups, subscriptions }
@@ -2877,6 +2924,9 @@ migrateRamSchema();
 
 // Ensure SSD database exists
 ensureSsdDb();
+
+// Restore RAM from SSD if RAM is empty (e.g. after reboot)
+restoreRamFromSsd();
 
 // Periodic backup + migration check (replaces plain backup timer)
 const backupTimer = setInterval(doBackupAndMigrate, BACKUP_INTERVAL_MS);
