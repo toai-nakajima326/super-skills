@@ -25,6 +25,7 @@
  *   POST   /consult         — create multi-model consultation
  *   POST   /consult/:id/response — submit model response
  *   GET    /consult/:id     — check consultation status
+ *   WS     /ws              — WebSocket real-time push notifications
  */
 
 import { createServer } from 'node:http';
@@ -672,6 +673,12 @@ async function handleStore(req, res) {
   }
 
   sendJson(res, 201, { stored: entry });
+
+  // Broadcast to WebSocket clients
+  wsBroadcast('new_entry', entry);
+  if (entry._conflicts) {
+    wsBroadcast('conflict_detected', { ...entry, _conflicts: entry._conflicts });
+  }
 }
 
 /**
@@ -1077,6 +1084,7 @@ function handleHealth(req, res) {
     database: dbOk,
     ssd_database: ssdExists,
     cloud_configured: cloudStore.isConfigured(),
+    ws_clients: wsClients.size,
     uptime_seconds: Math.floor(process.uptime()),
   });
 }
@@ -1245,7 +1253,7 @@ async function handleTierConfig(req, res) {
 
 // ── Auth handlers ─────────────────────────────────────────────
 
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 
 /**
  * POST /auth/create-key — Create a new API key for a user.
@@ -1886,6 +1894,191 @@ function doBackupAndMigrate() {
   }
 }
 
+// ── WebSocket (minimal, zero-dep) ─────────────────────────────
+const WS_MAGIC = '258EAFA5-E914-47DA-95CA-5B56-A3CE3E4E2D';
+const wsClients = new Map(); // id -> { socket, userId, groups, subscriptions }
+let wsIdCounter = 0;
+
+function handleWsUpgrade(req, socket) {
+  const key = req.headers['sec-websocket-key'];
+  if (!key) { socket.destroy(); return; }
+
+  // Auth: check API key from query params or headers
+  const url = new URL(req.url, `http://localhost:${PORT}`);
+  const apiKey = url.searchParams.get('key') || '';
+  let auth;
+  if (apiKey) {
+    const keys = loadApiKeys();
+    const entry = keys.keys[apiKey];
+    if (!entry) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
+    auth = { userId: entry.userId, role: entry.role || 'member', groups: entry.groups || [] };
+  } else {
+    auth = { userId: LOCAL_USER_ID, role: 'owner', groups: ['*'] };
+  }
+
+  // WebSocket handshake
+  const acceptKey = createHash('sha1')
+    .update(key + WS_MAGIC)
+    .digest('base64');
+
+  socket.write(
+    'HTTP/1.1 101 Switching Protocols\r\n' +
+    'Upgrade: websocket\r\n' +
+    'Connection: Upgrade\r\n' +
+    `Sec-WebSocket-Accept: ${acceptKey}\r\n` +
+    '\r\n'
+  );
+
+  const clientId = ++wsIdCounter;
+  const client = {
+    socket,
+    userId: auth.userId,
+    role: auth.role,
+    groups: auth.groups,
+    subscriptions: new Set(['all']), // default: receive all events
+  };
+  wsClients.set(clientId, client);
+  console.log(`[ws] Client ${clientId} connected (${auth.userId})`);
+
+  socket.on('data', (buf) => {
+    try {
+      const msg = decodeWsFrame(buf);
+      if (!msg) return;
+      const data = JSON.parse(msg);
+      // Handle subscription changes
+      if (data.action === 'subscribe') {
+        if (data.namespace) client.subscriptions.add(`ns:${data.namespace}`);
+        if (data.type) client.subscriptions.add(`type:${data.type}`);
+        wsSend(client, { event: 'subscribed', subscriptions: [...client.subscriptions] });
+      } else if (data.action === 'unsubscribe') {
+        if (data.namespace) client.subscriptions.delete(`ns:${data.namespace}`);
+        if (data.type) client.subscriptions.delete(`type:${data.type}`);
+        wsSend(client, { event: 'unsubscribed', subscriptions: [...client.subscriptions] });
+      } else if (data.action === 'ping') {
+        wsSend(client, { event: 'pong', ts: new Date().toISOString() });
+      }
+    } catch {} // Ignore malformed messages
+  });
+
+  socket.on('close', () => {
+    wsClients.delete(clientId);
+    console.log(`[ws] Client ${clientId} disconnected`);
+  });
+
+  socket.on('error', () => {
+    wsClients.delete(clientId);
+  });
+
+  // Send welcome
+  wsSend(client, { event: 'connected', clientId, userId: auth.userId });
+}
+
+// Minimal WebSocket frame encoder/decoder (text frames only)
+function encodeWsFrame(data) {
+  const json = typeof data === 'string' ? data : JSON.stringify(data);
+  const buf = Buffer.from(json, 'utf-8');
+  const len = buf.length;
+  let frame;
+  if (len < 126) {
+    frame = Buffer.alloc(2 + len);
+    frame[0] = 0x81; // text frame, FIN
+    frame[1] = len;
+    buf.copy(frame, 2);
+  } else if (len < 65536) {
+    frame = Buffer.alloc(4 + len);
+    frame[0] = 0x81;
+    frame[1] = 126;
+    frame.writeUInt16BE(len, 2);
+    buf.copy(frame, 4);
+  } else {
+    frame = Buffer.alloc(10 + len);
+    frame[0] = 0x81;
+    frame[1] = 127;
+    frame.writeBigUInt64BE(BigInt(len), 2);
+    buf.copy(frame, 10);
+  }
+  return frame;
+}
+
+function decodeWsFrame(buf) {
+  if (buf.length < 2) return null;
+  const opcode = buf[0] & 0x0f;
+  if (opcode === 0x08) return null; // close frame
+  if (opcode !== 0x01) return null; // only text frames
+  const masked = (buf[1] & 0x80) !== 0;
+  let payloadLen = buf[1] & 0x7f;
+  let offset = 2;
+  if (payloadLen === 126) {
+    payloadLen = buf.readUInt16BE(2);
+    offset = 4;
+  } else if (payloadLen === 127) {
+    payloadLen = Number(buf.readBigUInt64BE(2));
+    offset = 10;
+  }
+  let mask = null;
+  if (masked) {
+    mask = buf.slice(offset, offset + 4);
+    offset += 4;
+  }
+  const payload = buf.slice(offset, offset + payloadLen);
+  if (mask) {
+    for (let i = 0; i < payload.length; i++) {
+      payload[i] ^= mask[i % 4];
+    }
+  }
+  return payload.toString('utf-8');
+}
+
+function wsSend(client, data) {
+  try {
+    client.socket.write(encodeWsFrame(data));
+  } catch {} // Client may have disconnected
+}
+
+// Broadcast to relevant clients based on entry metadata
+function wsBroadcast(eventType, entry) {
+  const entryTags = entry.tags || '[]';
+  const entryTagsStr = typeof entryTags === 'string' ? entryTags : JSON.stringify(entryTags);
+
+  for (const [, client] of wsClients) {
+    // Group access check
+    if (!client.groups.includes('*')) {
+      const hasGroupAccess = client.groups.some(g => entryTagsStr.includes(`group:${g}`));
+      // If entry has group tags but client can't access them, skip
+      if (entryTagsStr.includes('group:') && !hasGroupAccess) continue;
+    }
+
+    // Subscription check
+    const subs = client.subscriptions;
+    let match = subs.has('all');
+    if (!match && entry.type) match = subs.has(`type:${entry.type}`);
+    if (!match) {
+      // Check namespace subscriptions
+      for (const sub of subs) {
+        if (sub.startsWith('ns:') && entryTagsStr.includes(`project:${sub.slice(3)}`)) {
+          match = true;
+          break;
+        }
+      }
+    }
+
+    if (match) {
+      wsSend(client, {
+        event: eventType,
+        entry: {
+          id: entry.id,
+          type: entry.type,
+          content: entry.content ? entry.content.slice(0, 200) : '',
+          tags: entry.tags,
+          session: entry.session,
+          created_at: entry.created_at,
+          userId: entryTagsStr.match(/user:([^",\]]+)/)?.[1] || null,
+        },
+      });
+    }
+  }
+}
+
 // ── Request router ─────────────────────────────────────────────
 const ENDPOINTS_LIST = [
   'POST   /store             — store context entry (body: {type,content,tags?,session?,namespace?,group?,reasoning?,conditions?,supersedes?,confidence?,status?})',
@@ -1910,6 +2103,8 @@ const ENDPOINTS_LIST = [
   'POST   /consult           — create multi-model consultation {query, context?, models, candidates?}',
   'POST   /consult/:id/response — submit model response to consultation {model, chosen, reasoning?, confidence?}',
   'GET    /consult/:id       — check consultation status and aggregated results',
+  'WS     /ws                — WebSocket real-time push notifications (upgrade)',
+  'WS     /ws?key=<apikey>   — WebSocket with API key auth',
 ];
 
 const server = createServer(async (req, res) => {
@@ -1984,6 +2179,11 @@ const server = createServer(async (req, res) => {
   }
 });
 
+// WebSocket upgrade handler
+server.on('upgrade', (req, socket, head) => {
+  handleWsUpgrade(req, socket);
+});
+
 // ── Lifecycle ──────────────────────────────────────────────────
 
 // Ensure RAM disk + DB exist
@@ -2002,6 +2202,11 @@ const backupTimer = setInterval(doBackupAndMigrate, BACKUP_INTERVAL_MS);
 function shutdown(signal) {
   console.log(`\n[vcontext] Received ${signal}, shutting down...`);
   clearInterval(backupTimer);
+  // Close all WebSocket connections
+  for (const [id, client] of wsClients) {
+    try { client.socket.destroy(); } catch {}
+  }
+  wsClients.clear();
   doBackup();
   server.close(() => {
     console.log('[vcontext] Server closed');
@@ -2022,6 +2227,7 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`[vcontext] Tier 3 (Cloud): ${cloudStore.isConfigured() ? 'configured' : 'not configured'}`);
   console.log(`[vcontext] Backup every ${BACKUP_INTERVAL_MS / 1000}s to ${BACKUP_PATH}`);
   console.log(`[vcontext] Auto-migrate: RAM→SSD after ${RAM_TO_SSD_DAYS}d, SSD→Cloud after ${SSD_TO_CLOUD_DAYS}d`);
+  console.log(`[vcontext] WebSocket:   ws://127.0.0.1:${PORT}/ws`);
   console.log('[vcontext] Endpoints:');
   for (const ep of ENDPOINTS_LIST) {
     console.log(`  ${ep}`);
