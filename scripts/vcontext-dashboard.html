@@ -116,6 +116,14 @@ function badgeClass(type) {
   return 'badge badge-' + (type || 'observation');
 }
 
+function toJST(utcStr) {
+  if (!utcStr) return '';
+  try {
+    const d = new Date(utcStr.replace(' ', 'T') + 'Z');
+    return d.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch { return utcStr; }
+}
+
 function escapeHtml(str) {
   if (!str) return '';
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -167,7 +175,7 @@ async function refresh() {
       return '<div class="entry">' +
         '<span class="' + badgeClass(r.type) + '">' + escapeHtml(r.type) + '</span>' +
         '<span style="margin-left:8px;">' + escapeHtml((r.content || '').slice(0, 120)) + '</span>' +
-        '<div class="entry-time">' + escapeHtml(r.created_at) + (r._tier ? ' | ' + escapeHtml(r._tier) : '') + '</div>' +
+        '<div class="entry-time">' + toJST(r.created_at) + (r._tier ? ' | ' + escapeHtml(r._tier) : '') + '</div>' +
       '</div>';
     }).join('');
   }
