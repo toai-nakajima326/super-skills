@@ -135,6 +135,11 @@ async function handleToolUse() {
         }
       }
     } catch {} // Never block on recall failure
+
+    // Check for pending consultations (piggyback on tool-use hook)
+    try {
+      await handleAutoConsult();
+    } catch {} // Never block on auto-consult failure
   } catch {
     // Non-JSON input — store as-is
     await store('observation', input.slice(0, 2000), ['raw-hook']);
@@ -205,6 +210,32 @@ async function handleStoreCode(content, tagsStr) {
   tags.push('code');
   const result = await store('code', content, [...new Set(tags)]);
   console.log(JSON.stringify(result, null, 2));
+}
+
+/**
+ * Check for pending consultations and auto-respond.
+ * Called by PostToolUse hook to piggyback on existing hook calls.
+ * The AI model evaluates the consultation prompt itself — the output
+ * goes to stdout where the AI session can see it and act on it.
+ */
+async function handleAutoConsult() {
+  const model = process.env.VCONTEXT_MODEL || 'claude'; // 'claude' or 'codex'
+
+  // Check for pending consultations
+  const pending = await get(`/consult/pending?model=${encodeURIComponent(model)}`);
+  if (!pending.pending || pending.pending.length === 0) return;
+
+  // Output consultation prompts for the AI to evaluate
+  // The AI sees this in stdout and can evaluate + respond
+  for (const p of pending.pending.slice(0, 2)) { // Max 2 at a time
+    const lines = [
+      `[vcontext] Consultation requested (${p.consultation_id}):`,
+      `  Question: ${p.query}`,
+      `  ${(p.prompt || '').slice(0, 300)}`,
+      `  → To respond: curl -X POST http://127.0.0.1:${VCONTEXT_PORT}/consult/${p.consultation_id}/response -H 'Content-Type: application/json' -d '{"model":"${model}","chosen":N,"reasoning":"...","confidence":"high|medium|low"}'`,
+    ];
+    process.stdout.write(lines.join('\n') + '\n');
+  }
 }
 
 // ── Stdin reader ───────────────────────────────────────────────
@@ -379,6 +410,9 @@ switch (command) {
   case 'store-code':
     handleStoreCode(args[0], args[1]).catch(() => process.exit(0));
     break;
+  case 'auto-consult':
+    handleAutoConsult().catch(() => process.exit(0));
+    break;
   default:
     console.log(`vcontext-hooks — Claude Code context auto-capture
 
@@ -388,6 +422,7 @@ Usage:
 Hook commands (called by Claude Code):
   tool-use          Process PostToolUse hook (reads stdin)
   notification      Process Notification hook (reads stdin)
+  auto-consult      Check for pending consultations and output prompts
 
 Manual commands:
   store-conversation "content"       Store a conversation entry

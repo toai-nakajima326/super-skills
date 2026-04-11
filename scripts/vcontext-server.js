@@ -667,6 +667,58 @@ async function handleStore(req, res) {
             entries: existing.map(e => ({ id: e.id, content: e.content.slice(0, 100), conditions: e.conditions })),
             resolve_hint: `POST /resolve with candidates [${entry.id}, ${existing.map(e => e.id).join(', ')}] to evaluate which applies`,
           };
+
+          // Auto-create consultation for conflicting decisions
+          try {
+            const conflictIds = [entry.id, ...existing.map(e => e.id)];
+            const consultId = `auto_${Date.now()}`;
+            const candidates = conflictIds.map(id => {
+              const rows = dbQuery(`SELECT * FROM entries WHERE id = ${id};`);
+              return rows[0] || null;
+            }).filter(Boolean);
+
+            // Build consultation
+            const candidateText = candidates.map((c, i) =>
+              `[${i+1}] (${c.created_at}, ${c.status || 'active'}, confidence: ${c.confidence || 'medium'})\nContent: ${c.content}\nReasoning: ${c.reasoning || 'not recorded'}\nConditions: ${c.conditions || 'not recorded'}`
+            ).join('\n\n');
+
+            const basePrompt = `Evaluate these conflicting decisions. Context: ${conditions || content}\n\n${candidateText}\n\nRespond ONLY with JSON: {"chosen":<1-N>,"reasoning":"<why>","confidence":"high|medium|low"}`;
+
+            const autoModels = ['claude', 'codex'];
+            const autoPackages = {};
+            for (const model of autoModels) {
+              autoPackages[model] = { prompt: basePrompt };
+            }
+
+            const consultation = {
+              id: consultId,
+              consultationId: consultId,
+              query: content,
+              context: conditions || '',
+              candidates,
+              models: autoModels,
+              packages: autoPackages,
+              responses: {},
+              consensus: null,
+              status: 'pending_responses',
+              created_at: new Date().toISOString(),
+              createdAt: new Date().toISOString(),
+              auto: true,
+            };
+
+            consultations.set(consultId, consultation);
+            entry._auto_consultation = consultId;
+
+            // Broadcast to WebSocket clients
+            wsBroadcast('consultation_request', {
+              consultation_id: consultId,
+              query: content,
+              candidate_count: candidates.length,
+              prompt: basePrompt,
+            });
+          } catch (e) {
+            console.error('[auto-consult] Failed to create:', e.message);
+          }
         }
       }
     } catch {} // Non-fatal
@@ -1868,6 +1920,106 @@ function handleConsultStatus(req, res) {
   });
 }
 
+/**
+ * GET /consult/pending?model=claude
+ * Returns consultations that still need responses from the given model.
+ * AI sessions poll this to discover work they need to evaluate.
+ */
+function handleConsultPending(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  const params = parseQuery(req.url);
+  const model = params.model || 'claude';
+
+  const pending = [];
+  for (const [id, c] of consultations) {
+    if (c.status === 'pending_responses' || c.status === 'partial') {
+      if (!c.responses[model]) {
+        pending.push({
+          consultation_id: id,
+          query: c.query,
+          context: c.context,
+          prompt: c.packages[model]?.prompt || '',
+          candidate_count: c.candidates?.length || 0,
+          auto: c.auto || false,
+          created_at: c.created_at || c.createdAt,
+        });
+      }
+    }
+  }
+
+  sendJson(res, 200, { pending, count: pending.length });
+}
+
+/**
+ * POST /consult/auto-respond
+ * Body: { model: "claude", responses: [{ consultation_id, chosen, reasoning, confidence }] }
+ * Allows an AI session to evaluate and respond to ALL pending consultations in one call.
+ */
+async function handleConsultAutoRespond(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  const body = await readBody(req);
+  const { model, responses } = body;
+  if (!model || !responses || !Array.isArray(responses)) {
+    return sendJson(res, 400, { error: 'Required: model, responses[]' });
+  }
+
+  const results = [];
+  for (const r of responses) {
+    const consultation = consultations.get(r.consultation_id);
+    if (!consultation) {
+      results.push({ id: r.consultation_id, status: 'not_found' });
+      continue;
+    }
+    if (consultation.responses[model]) {
+      results.push({ id: r.consultation_id, status: 'already_responded' });
+      continue;
+    }
+
+    consultation.responses[model] = {
+      chosen: r.chosen,
+      reasoning: r.reasoning,
+      confidence: r.confidence,
+      responded_at: new Date().toISOString(),
+      respondedBy: auth.userId,
+    };
+
+    // Check if all models have responded
+    const responseValues = Object.values(consultation.responses);
+    const total = consultation.models.length;
+    if (responseValues.length >= total) {
+      consultation.status = 'complete';
+    } else {
+      consultation.status = 'partial';
+    }
+
+    // Calculate consensus (majority vote on chosen)
+    const votes = {};
+    for (const resp of responseValues) {
+      votes[resp.chosen] = (votes[resp.chosen] || 0) + 1;
+    }
+    const maxVote = Math.max(...Object.values(votes));
+    const winner = Object.keys(votes).find(k => votes[k] === maxVote);
+    if (maxVote > total / 2) {
+      consultation.consensus = { chosen: parseInt(winner), agreement: `${maxVote}/${responseValues.length}` };
+    }
+
+    results.push({ id: r.consultation_id, status: consultation.status, consensus: consultation.consensus || null });
+
+    // Broadcast update
+    wsBroadcast('consultation_updated', {
+      consultation_id: r.consultation_id,
+      status: consultation.status,
+      consensus: consultation.consensus,
+    });
+  }
+
+  sendJson(res, 200, { processed: results.length, results });
+}
+
 // ── Utilities ──────────────────────────────────────────────────
 function formatBytes(bytes) {
   if (bytes === 0) return '0 B';
@@ -2103,6 +2255,8 @@ const ENDPOINTS_LIST = [
   'POST   /consult           — create multi-model consultation {query, context?, models, candidates?}',
   'POST   /consult/:id/response — submit model response to consultation {model, chosen, reasoning?, confidence?}',
   'GET    /consult/:id       — check consultation status and aggregated results',
+  'GET    /consult/pending?model= — list pending consultations for a model',
+  'POST   /consult/auto-respond — batch respond to pending consultations {model, responses[]}',
   'WS     /ws                — WebSocket real-time push notifications (upgrade)',
   'WS     /ws?key=<apikey>   — WebSocket with API key auth',
 ];
@@ -2163,6 +2317,10 @@ const server = createServer(async (req, res) => {
       await handleResolve(req, res);
     } else if (method === 'POST' && path === '/consult') {
       await handleConsult(req, res);
+    } else if (method === 'GET' && path === '/consult/pending') {
+      handleConsultPending(req, res);
+    } else if (method === 'POST' && path === '/consult/auto-respond') {
+      await handleConsultAutoRespond(req, res);
     } else if (method === 'POST' && path.match(/^\/consult\/[^/]+\/response$/)) {
       await handleConsultResponse(req, res);
     } else if (method === 'GET' && path.match(/^\/consult\/[^/]+$/) && !path.endsWith('/response')) {
