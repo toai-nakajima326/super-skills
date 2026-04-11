@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "afterEdit": [
+      {
+        "command": "/Users/mitsuru_nakajima/.nvm/versions/node/v18.20.7/bin/node /Users/mitsuru_nakajima/skills/scripts/vcontext-hooks.js tool-use"
+      }
+    ],
+    "onStart": [
+      {
+        "command": "/Users/mitsuru_nakajima/.nvm/versions/node/v18.20.7/bin/node /Users/mitsuru_nakajima/skills/scripts/vcontext-hooks.js session-recall"
+      }
+    ],
+    "onStop": [
+      {
+        "command": "/Users/mitsuru_nakajima/.nvm/versions/node/v18.20.7/bin/node /Users/mitsuru_nakajima/skills/scripts/vcontext-hooks.js session-end"
+      }
+    ]
+  }
+}

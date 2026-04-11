@@ -165,6 +165,91 @@ function applyPlan(plan) {
     console.log(`  ${dryRun ? '(dry-run) ' : ''}${comp.name}/`);
   }
 
+  // Step 2b: Install vcontext hooks for the target
+  console.log(`\n[2b/3] Installing vcontext hooks for ${target}...`);
+  const pluginsDir = join(SELF_ROOT, 'plugins');
+
+  if (target === 'codex') {
+    const hooksSrc = join(pluginsDir, 'codex', 'hooks.json');
+    const hooksDest = join(targetRoot, '.codex', 'hooks.json');
+    if (existsSync(hooksSrc)) {
+      if (!dryRun) {
+        mkdirSync(join(targetRoot, '.codex'), { recursive: true });
+        if (existsSync(hooksDest)) {
+          // Merge: load existing, add vcontext hooks
+          try {
+            const existing = JSON.parse(readFileSync(hooksDest, 'utf-8'));
+            const incoming = JSON.parse(readFileSync(hooksSrc, 'utf-8'));
+            for (const [event, hooks] of Object.entries(incoming.hooks || {})) {
+              if (!existing.hooks) existing.hooks = {};
+              if (!existing.hooks[event]) existing.hooks[event] = [];
+              // Avoid duplicates by checking command strings
+              for (const hook of hooks) {
+                const isDuplicate = existing.hooks[event].some(
+                  h => h.command === hook.command
+                );
+                if (!isDuplicate) existing.hooks[event].push(hook);
+              }
+            }
+            writeFileSync(hooksDest, JSON.stringify(existing, null, 2) + '\n');
+          } catch {
+            cpSync(hooksSrc, hooksDest);
+          }
+        } else {
+          cpSync(hooksSrc, hooksDest);
+        }
+      }
+      console.log(`  ${dryRun ? '(dry-run) ' : ''}.codex/hooks.json`);
+    }
+  } else if (target === 'cursor') {
+    const hooksSrc = join(pluginsDir, 'cursor', 'hooks.json');
+    const hooksDest = join(targetRoot, '.cursor', 'hooks.json');
+    if (existsSync(hooksSrc)) {
+      if (!dryRun) {
+        mkdirSync(join(targetRoot, '.cursor'), { recursive: true });
+        if (existsSync(hooksDest)) {
+          try {
+            const existing = JSON.parse(readFileSync(hooksDest, 'utf-8'));
+            const incoming = JSON.parse(readFileSync(hooksSrc, 'utf-8'));
+            for (const [event, hooks] of Object.entries(incoming.hooks || {})) {
+              if (!existing.hooks) existing.hooks = {};
+              if (!existing.hooks[event]) existing.hooks[event] = [];
+              for (const hook of hooks) {
+                const isDuplicate = existing.hooks[event].some(
+                  h => h.command === hook.command
+                );
+                if (!isDuplicate) existing.hooks[event].push(hook);
+              }
+            }
+            writeFileSync(hooksDest, JSON.stringify(existing, null, 2) + '\n');
+          } catch {
+            cpSync(hooksSrc, hooksDest);
+          }
+        } else {
+          cpSync(hooksSrc, hooksDest);
+        }
+      }
+      console.log(`  ${dryRun ? '(dry-run) ' : ''}.cursor/hooks.json`);
+    }
+  } else if (target === 'kiro') {
+    const kiroHooksDir = join(pluginsDir, 'kiro', 'hooks');
+    const kiroDestDir = join(targetRoot, '.kiro', 'hooks');
+    if (existsSync(kiroHooksDir)) {
+      if (!dryRun) {
+        mkdirSync(kiroDestDir, { recursive: true });
+        for (const file of ['vcontext-recall.md', 'vcontext-store.md', 'vcontext-end.md']) {
+          const src = join(kiroHooksDir, file);
+          if (existsSync(src)) {
+            cpSync(src, join(kiroDestDir, file));
+          }
+        }
+      }
+      console.log(`  ${dryRun ? '(dry-run) ' : ''}.kiro/hooks/vcontext-*.md`);
+    }
+  } else if (target === 'claude') {
+    console.log(`  Claude Code — hooks configured via global settings.json (no per-project action)`);
+  }
+
   // Step 3: Copy extra target-specific files (e.g., antigravity catalog)
   if (target === 'antigravity') {
     const catalogSrc = join(SELF_ROOT, '.antigravity', 'skills-catalog.json');
