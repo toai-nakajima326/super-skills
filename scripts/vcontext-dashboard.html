@@ -116,7 +116,9 @@
   <div class="card">
     <h2>Storage</h2>
     <div id="tiers-content">Loading...</div>
-    <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);display:flex;gap:4px;flex-wrap:wrap;">
+    <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);">
+    <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Quick Actions</div>
+    <div style="display:flex;gap:4px;flex-wrap:wrap;">
       <button class="btn" style="font-size:11px;padding:3px 8px;" onclick="confirmAction('Summarize', '24時間以上前のエントリをOllamaで要約', '/ai/summarize', 'POST')">Summarize</button>
       <button class="btn" style="font-size:11px;padding:3px 8px;" onclick="confirmAction('Migrate', 'RAM→SSD→Cloudに移動', '/tier/migrate', 'POST')">Migrate</button>
       <button class="btn" style="font-size:11px;padding:3px 8px;" onclick="confirmAction('Refresh', 'ダッシュボード更新', '_refresh', '')">Refresh</button>
@@ -128,6 +130,7 @@
       <button class="btn" style="font-size:11px;padding:2px 8px;" onclick="document.getElementById('action-confirm').style.display='none'">Cancel</button>
     </div>
     <div id="action-result" style="margin-top:4px;font-size:11px;color:var(--text-muted);"></div>
+    </div>
   </div>
 
   <!-- Sessions (compact) -->

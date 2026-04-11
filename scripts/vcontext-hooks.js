@@ -268,6 +268,14 @@ async function handleSessionRecall() {
   if (output.trim().length > 50) {
     process.stdout.write(output);
   }
+
+  // Track session-recall as a metric (enables credit savings calculation)
+  await post('/store', {
+    type: 'session-recall',
+    content: JSON.stringify({ output_chars: output.length, session: sessionId, entries_served: (own.results?.length || 0) + (recent.results?.length || 0) }),
+    tags: ['session-recall'],
+    session: sessionId,
+  });
 }
 
 // ── Skill context enrichment ─────────────────────────────────────
