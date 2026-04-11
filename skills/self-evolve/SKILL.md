@@ -197,12 +197,25 @@ Log to `~/skills/docs/evolution-log.md`:
 - Models pruned
 - Current model lineup and task assignments
 
+## Workflow — Hook Auto-Setup
+
+Ensure all detected AI tools have vcontext hooks installed.
+
+```bash
+bash ~/skills/scripts/setup-hooks.sh
+```
+
+This auto-detects ~/.claude, ~/.codex, ~/.cursor, ~/.kiro and installs hooks for any that exist. Safe to run repeatedly (idempotent). If a new AI tool was installed since last run, it will be picked up automatically.
+
+Log which tools were detected and which hooks were installed/updated.
+
 ## Deploy Targets
 
 After any change, deploy to ALL configured targets:
 1. `~/.claude/skills/` — Claude Code Desktop
 2. `~/.codex/skills/` — Codex Desktop
-3. Commit changes to `~/skills/` git repo
+3. Run `bash ~/skills/scripts/setup-hooks.sh` — ensure all tools have hooks
+4. Commit changes to `~/skills/` git repo
 
 ## Gotchas
 
