@@ -1787,8 +1787,57 @@ function handleListKeys(req, res) {
   sendJson(res, 200, { keys: result, count: result.length });
 }
 
-// ── Consultations storage (in-memory, does not persist across restarts) ──
-const consultations = new Map();
+// ── Consultations storage (SQLite-backed, persists across restarts) ──
+
+function ensureConsultationsTable() {
+  try {
+    dbExec(`CREATE TABLE IF NOT EXISTS consultations (
+      id TEXT PRIMARY KEY,
+      query TEXT NOT NULL,
+      context TEXT,
+      models TEXT DEFAULT '[]',
+      candidates TEXT DEFAULT '[]',
+      packages TEXT DEFAULT '[]',
+      responses TEXT DEFAULT '[]',
+      status TEXT DEFAULT 'pending',
+      consensus TEXT,
+      created_by TEXT,
+      claimed_by TEXT,
+      claimed_at TEXT,
+      closed_at TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );`);
+    dbExec(`CREATE INDEX IF NOT EXISTS idx_consult_status ON consultations(status);`);
+  } catch {}
+}
+
+function getConsultation(id) {
+  const rows = dbQuery(`SELECT * FROM consultations WHERE id = ${esc(id)};`);
+  if (!rows[0]) return null;
+  const r = rows[0];
+  try { r.models = JSON.parse(r.models); } catch { r.models = []; }
+  try { r.candidates = JSON.parse(r.candidates); } catch { r.candidates = []; }
+  try { r.packages = JSON.parse(r.packages); } catch { r.packages = []; }
+  try { r.responses = JSON.parse(r.responses); } catch { r.responses = []; }
+  try { r.consensus = JSON.parse(r.consensus); } catch {}
+  return r;
+}
+
+function saveConsultation(c) {
+  dbExec(`INSERT OR REPLACE INTO consultations (id, query, context, models, candidates, packages, responses, status, consensus, created_by, claimed_by, claimed_at, closed_at, created_at)
+    VALUES (${esc(c.id)}, ${esc(c.query)}, ${esc(c.context || null)}, ${esc(JSON.stringify(c.models || []))}, ${esc(JSON.stringify(c.candidates || []))}, ${esc(JSON.stringify(c.packages || []))}, ${esc(JSON.stringify(c.responses || []))}, ${esc(c.status || 'pending')}, ${esc(c.consensus ? JSON.stringify(c.consensus) : null)}, ${esc(c.created_by || null)}, ${esc(c.claimed_by || null)}, ${esc(c.claimed_at || null)}, ${esc(c.closed_at || null)}, ${esc(c.created_at || new Date().toISOString().replace('T', ' ').slice(0, 19))});`);
+}
+
+function listConsultations(filter) {
+  const where = filter ? `WHERE status = ${esc(filter)}` : '';
+  const rows = dbQuery(`SELECT * FROM consultations ${where} ORDER BY created_at DESC LIMIT 50;`);
+  return rows.map(r => {
+    try { r.models = JSON.parse(r.models); } catch { r.models = []; }
+    try { r.responses = JSON.parse(r.responses); } catch { r.responses = []; }
+    try { r.consensus = JSON.parse(r.consensus); } catch {}
+    return r;
+  });
+}
 
 // ── Decision Resolution handlers ─────────────────────────────
 
@@ -2012,19 +2061,18 @@ Respond in JSON:
     };
   }
 
-  // Store consultation
-  consultations.set(consultationId, {
-    consultationId,
+  // Store consultation (SQLite-backed)
+  saveConsultation({
+    id: consultationId,
     query,
     context: context || null,
     models,
     candidates,
-    packages,
-    responses: {},
+    packages: Object.values(packages),
+    responses: [],
+    status: 'pending',
     consensus: null,
-    status: 'pending_responses',
-    createdAt: new Date().toISOString(),
-    createdBy: auth.userId,
+    created_by: auth.userId,
   });
 
   sendJson(res, 201, {
@@ -2050,7 +2098,8 @@ async function handleConsultResponse(req, res) {
   // parts: ['', 'consult', '<id>', 'response']
   const consultId = parts[2];
 
-  if (!consultId || !consultations.has(consultId)) {
+  const consultation = getConsultation(consultId);
+  if (!consultation) {
     return sendJson(res, 404, { error: 'Consultation not found' });
   }
 
@@ -2060,42 +2109,38 @@ async function handleConsultResponse(req, res) {
     return sendJson(res, 400, { error: 'Missing required fields: model, chosen' });
   }
 
-  const consultation = consultations.get(consultId);
-  consultation.responses[String(model).toLowerCase()] = {
+  // Add response
+  const responses = consultation.responses || [];
+  responses.push({
+    model: String(model).toLowerCase(),
     chosen: Number(chosen),
     reasoning: reasoning || null,
     confidence: confidence || 'medium',
-    respondedAt: new Date().toISOString(),
-    respondedBy: auth.userId,
-  };
+    responded_at: new Date().toISOString(),
+    responded_by: auth.userId,
+  });
+  consultation.responses = responses;
 
   // Calculate consensus and status
-  const responseCount = Object.keys(consultation.responses).length;
-  const totalModels = consultation.models.length;
+  const responseCount = responses.length;
+  const totalModels = (consultation.models || []).length;
 
-  if (responseCount >= totalModels) {
-    consultation.status = 'complete';
-  } else {
-    consultation.status = 'partial';
-  }
+  consultation.status = responseCount >= totalModels ? 'complete' : 'partial';
 
   // Check for consensus (majority agreement on chosen)
   const votes = {};
-  for (const resp of Object.values(consultation.responses)) {
+  for (const resp of responses) {
     const key = String(resp.chosen);
     votes[key] = (votes[key] || 0) + 1;
   }
   const maxVoteEntry = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
   if (maxVoteEntry && maxVoteEntry[1] > responseCount / 2) {
-    consultation.consensus = {
-      chosen: Number(maxVoteEntry[0]),
-      agreement: `${maxVoteEntry[1]}/${responseCount}`,
-    };
+    consultation.consensus = { chosen: Number(maxVoteEntry[0]), agreement: `${maxVoteEntry[1]}/${responseCount}` };
   } else {
     consultation.consensus = null;
   }
 
-  consultations.set(consultId, consultation);
+  saveConsultation(consultation);
 
   sendJson(res, 200, {
     consultation_id: consultId,
@@ -2119,21 +2164,22 @@ function handleConsultStatus(req, res) {
   const parts = path.split('/');
   const consultId = parts[2];
 
-  if (!consultId || !consultations.has(consultId)) {
+  const consultation = getConsultation(consultId);
+  if (!consultation) {
     return sendJson(res, 404, { error: 'Consultation not found' });
   }
 
-  const consultation = consultations.get(consultId);
-
   sendJson(res, 200, {
-    consultation_id: consultation.consultationId,
+    consultation_id: consultation.id,
     query: consultation.query,
     context: consultation.context,
     candidates: consultation.candidates,
     responses: consultation.responses,
     consensus: consultation.consensus,
     status: consultation.status,
-    createdAt: consultation.createdAt,
+    claimed_by: consultation.claimed_by,
+    closed_at: consultation.closed_at,
+    created_at: consultation.created_at,
   });
 }
 
@@ -2149,18 +2195,21 @@ function handleConsultPending(req, res) {
   const params = parseQuery(req.url);
   const model = params.model || 'claude';
 
+  const all = listConsultations();
   const pending = [];
-  for (const [id, c] of consultations) {
-    if (c.status === 'pending_responses' || c.status === 'partial') {
-      if (!c.responses[model]) {
+  for (const c of all) {
+    if (c.status === 'pending' || c.status === 'partial') {
+      // Check if this model hasn't responded yet
+      const responded = (c.responses || []).some(r => r.model === model);
+      // Check if this model is in the target list
+      const targeted = (c.models || []).includes(model);
+      if (targeted && !responded) {
         pending.push({
-          consultation_id: id,
+          consultation_id: c.id,
           query: c.query,
           context: c.context,
-          prompt: c.packages[model]?.prompt || '',
-          candidate_count: c.candidates?.length || 0,
-          auto: c.auto || false,
-          created_at: c.created_at || c.createdAt,
+          candidate_count: (c.candidates || []).length,
+          created_at: c.created_at,
         });
       }
     }
@@ -2186,55 +2235,89 @@ async function handleConsultAutoRespond(req, res) {
 
   const results = [];
   for (const r of responses) {
-    const consultation = consultations.get(r.consultation_id);
+    const consultation = getConsultation(r.consultation_id);
     if (!consultation) {
       results.push({ id: r.consultation_id, status: 'not_found' });
       continue;
     }
-    if (consultation.responses[model]) {
+    const already = (consultation.responses || []).some(resp => resp.model === model);
+    if (already) {
       results.push({ id: r.consultation_id, status: 'already_responded' });
       continue;
     }
 
-    consultation.responses[model] = {
-      chosen: r.chosen,
-      reasoning: r.reasoning,
-      confidence: r.confidence,
-      responded_at: new Date().toISOString(),
-      respondedBy: auth.userId,
-    };
+    consultation.responses.push({
+      model, chosen: r.chosen, reasoning: r.reasoning,
+      confidence: r.confidence, responded_at: new Date().toISOString(), responded_by: auth.userId,
+    });
 
-    // Check if all models have responded
-    const responseValues = Object.values(consultation.responses);
-    const total = consultation.models.length;
-    if (responseValues.length >= total) {
-      consultation.status = 'complete';
-    } else {
-      consultation.status = 'partial';
-    }
+    const total = (consultation.models || []).length;
+    consultation.status = consultation.responses.length >= total ? 'complete' : 'partial';
 
-    // Calculate consensus (majority vote on chosen)
     const votes = {};
-    for (const resp of responseValues) {
-      votes[resp.chosen] = (votes[resp.chosen] || 0) + 1;
-    }
+    for (const resp of consultation.responses) { votes[resp.chosen] = (votes[resp.chosen] || 0) + 1; }
     const maxVote = Math.max(...Object.values(votes));
     const winner = Object.keys(votes).find(k => votes[k] === maxVote);
     if (maxVote > total / 2) {
-      consultation.consensus = { chosen: parseInt(winner), agreement: `${maxVote}/${responseValues.length}` };
+      consultation.consensus = { chosen: parseInt(winner), agreement: `${maxVote}/${consultation.responses.length}` };
     }
 
+    saveConsultation(consultation);
     results.push({ id: r.consultation_id, status: consultation.status, consensus: consultation.consensus || null });
 
-    // Broadcast update
-    wsBroadcast('consultation_updated', {
-      consultation_id: r.consultation_id,
-      status: consultation.status,
-      consensus: consultation.consensus,
-    });
+    wsBroadcast('consultation_updated', { consultation_id: r.consultation_id, status: consultation.status, consensus: consultation.consensus });
   }
 
   sendJson(res, 200, { processed: results.length, results });
+}
+
+
+/**
+ * POST /consult/:id/claim - Claim a consultation (lock for this model)
+ */
+async function handleConsultClaim(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+  const parts = parsePath(req.url).split('/');
+  const consultId = parts[2];
+  const consultation = getConsultation(consultId);
+  if (!consultation) return sendJson(res, 404, { error: 'Consultation not found' });
+  const body = await readBody(req);
+  if (consultation.claimed_by && consultation.claimed_by !== body.model) {
+    return sendJson(res, 409, { error: 'Already claimed by ' + consultation.claimed_by });
+  }
+  consultation.claimed_by = body.model || auth.userId;
+  consultation.claimed_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  saveConsultation(consultation);
+  sendJson(res, 200, { consultation_id: consultId, claimed_by: consultation.claimed_by });
+}
+
+/**
+ * POST /consult/:id/close - Close a consultation
+ */
+async function handleConsultClose(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+  const parts = parsePath(req.url).split('/');
+  const consultId = parts[2];
+  const consultation = getConsultation(consultId);
+  if (!consultation) return sendJson(res, 404, { error: 'Consultation not found' });
+  consultation.status = 'closed';
+  consultation.closed_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  saveConsultation(consultation);
+  wsBroadcast('consultation_updated', { consultation_id: consultId, status: 'closed' });
+  sendJson(res, 200, { consultation_id: consultId, status: 'closed', closed_at: consultation.closed_at });
+}
+
+/**
+ * GET /consult/list - List all consultations with optional status filter
+ */
+function handleConsultList(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+  const params = parseQuery(req.url);
+  const results = listConsultations(params.status || null);
+  sendJson(res, 200, { consultations: results, count: results.length });
 }
 
 // ── Utilities ──────────────────────────────────────────────────
@@ -3269,6 +3352,12 @@ const server = createServer(async (req, res) => {
       await handleConsultAutoRespond(req, res);
     } else if (method === 'POST' && path.match(/^\/consult\/[^/]+\/response$/)) {
       await handleConsultResponse(req, res);
+    } else if (method === 'POST' && path.match(/^\/consult\/[^/]+\/claim$/)) {
+      await handleConsultClaim(req, res);
+    } else if (method === 'POST' && path.match(/^\/consult\/[^/]+\/close$/)) {
+      await handleConsultClose(req, res);
+    } else if (method === 'GET' && path === '/consult/list') {
+      handleConsultList(req, res);
     } else if (method === 'GET' && path.match(/^\/consult\/[^/]+$/) && !path.endsWith('/response')) {
       handleConsultStatus(req, res);
     } else if (method === 'GET' && path === '/ai/status') {
@@ -3314,6 +3403,9 @@ migrateRamSchema();
 
 // Ensure SSD database exists
 ensureSsdDb();
+
+// Ensure consultations table
+ensureConsultationsTable();
 
 // Restore RAM from SSD if RAM is empty (e.g. after reboot)
 restoreRamFromSsd();
