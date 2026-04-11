@@ -9,6 +9,7 @@
  */
 
 import { request } from 'node:http';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
 const VCONTEXT_PORT = process.env.VCONTEXT_PORT || '3150';
 const VCONTEXT_URL = `http://127.0.0.1:${VCONTEXT_PORT}`;
@@ -83,6 +84,48 @@ function extractSessionId(input) {
   return process.env.CLAUDE_SESSION_ID || `session-${Date.now()}`;
 }
 
+// ── Transcript parser — extract AI responses ────────────────────
+// Reads the JSONL transcript file and extracts assistant text blocks
+// that appeared since the last read position.
+
+function extractNewAssistantMessages(transcriptPath, sessionId) {
+  if (!transcriptPath || !existsSync(transcriptPath)) return [];
+
+  const posFile = `/tmp/vcontext-transcript-pos-${sessionId.replace(/[^a-zA-Z0-9-]/g, '')}`;
+  let lastPos = 0;
+  try { lastPos = parseInt(readFileSync(posFile, 'utf-8').trim(), 10) || 0; } catch {}
+
+  let content;
+  try { content = readFileSync(transcriptPath, 'utf-8'); } catch { return []; }
+
+  // Read from last position
+  const newContent = content.slice(lastPos);
+  if (!newContent.trim()) return [];
+
+  const messages = [];
+  for (const line of newContent.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const d = JSON.parse(line);
+      if (d.type !== 'assistant') continue;
+      const msg = d.message || {};
+      const blocks = msg.content || [];
+      if (!Array.isArray(blocks)) continue;
+      const texts = blocks
+        .filter(b => b && b.type === 'text' && b.text)
+        .map(b => b.text);
+      if (texts.length > 0) {
+        messages.push(texts.join('\n'));
+      }
+    } catch {}
+  }
+
+  // Save new position
+  try { writeFileSync(posFile, String(content.length), 'utf-8'); } catch {}
+
+  return messages;
+}
+
 // ── Universal recorder ───────────────────────────────────────────
 
 async function recordEvent(eventName) {
@@ -91,12 +134,43 @@ async function recordEvent(eventName) {
 
   const sessionId = extractSessionId(input);
 
+  // Store the raw hook event
   await post('/store', {
     type: eventName,
     content: input.slice(0, 500000),
     tags: [eventName],
     session: sessionId,
   });
+
+  // On tool-use/session-end: extract and store AI response text from transcript
+  if (eventName === 'tool-use' || eventName === 'session-end') {
+    try {
+      const data = JSON.parse(input);
+      // transcript_path for intermediate messages
+      const transcriptPath = data.transcript_path;
+      if (transcriptPath) {
+        const aiMessages = extractNewAssistantMessages(transcriptPath, sessionId);
+        for (const msg of aiMessages) {
+          if (msg.length < 5) continue;
+          await post('/store', {
+            type: 'assistant-response',
+            content: msg.slice(0, 500000),
+            tags: ['assistant-response'],
+            session: sessionId,
+          });
+        }
+      }
+      // last_assistant_message for Stop hook
+      if (data.last_assistant_message) {
+        await post('/store', {
+          type: 'assistant-response',
+          content: data.last_assistant_message.slice(0, 500000),
+          tags: ['assistant-response', 'final'],
+          session: sessionId,
+        });
+      }
+    } catch {} // Non-fatal
+  }
 }
 
 // ── Summarize entry for recall display ───────────────────────────

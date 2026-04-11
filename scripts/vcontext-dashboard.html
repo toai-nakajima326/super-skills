@@ -76,7 +76,7 @@
 </head>
 <body>
 <header>
-  <h1>AI OS Dashboard <span style="font-size:12px;color:var(--text-muted);font-weight:normal;">v1.9.0</span></h1>
+  <h1>AI OS Dashboard <span style="font-size:12px;color:var(--text-muted);font-weight:normal;">v2.0.0</span></h1>
   <div class="meta">
     <span id="status-indicator"><span class="status-dot status-yellow"></span>Loading...</span>
     &nbsp;|&nbsp; <span id="live-indicator" style="color:var(--green);">Connecting...</span>
@@ -243,6 +243,7 @@ function badgeClass(type) {
     'user-prompt': 'conversation', 'session-end': 'conversation',
     'compact': 'conversation', 'pre-compact': 'conversation',
     'subagent-start': 'code', 'subagent-stop': 'code',
+    'assistant-response': 'decision',
     'tool-error': 'error', 'notification': 'error',
     'permission-request': 'decision', 'permission-denied': 'error',
   };
@@ -262,6 +263,9 @@ function summarizeContent(type, raw) {
 
     if (type === 'user-prompt') {
       return (prompt || d.content || d.message || raw).slice(0, 200);
+    }
+    if (type === 'assistant-response') {
+      return raw.slice(0, 200);
     }
     if (type === 'tool-use' || type === 'pre-tool') {
       var inputStr = typeof input === 'string' ? input : (input.command || input.file_path || input.pattern || input.query || JSON.stringify(input)).slice(0, 120);
