@@ -478,11 +478,9 @@ async function refresh() {
     mhtml += 'Credit savings: ' + savingsRate + '%';
     mhtml += '</div>';
     mhtml += '<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">';
-    mhtml += 'Context reuse: ' + (derived.tokens_served_from_context || 0).toLocaleString() + ' tok';
-    mhtml += ' | File re-reads: ' + (derived.additional_read_tokens || 0).toLocaleString() + ' tok';
-    mhtml += '</div>';
-    mhtml += '<div style="font-size:10px;color:var(--text-dim);">';
-    mhtml += 'Total context: ' + (derived.total_context_tokens || 0).toLocaleString() + ' tokens stored';
+    mhtml += 'Stored: ' + (derived.stored_tokens || 0).toLocaleString() + ' tok';
+    mhtml += ' | New (24h): ' + (derived.period_new_tokens || 0).toLocaleString() + ' tok';
+    mhtml += ' | Sessions: ' + (derived.active_sessions || 0);
     mhtml += '</div>';
     mhtml += '</div>';
 

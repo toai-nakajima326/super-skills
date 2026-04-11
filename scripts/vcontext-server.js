@@ -3072,44 +3072,48 @@ function handleMetricsReport(req, res) {
   const entryCount = dbQuery('SELECT COUNT(*) as c FROM entries;');
 
   // Credit savings calculation:
-  // "Without vcontext" = every session restart would re-read all context
-  // from files (Read tool). We estimate this as total tokens stored in entries.
-  // "With vcontext" = session-recall serves cached context directly,
-  // but some file reads still happen after recall (additional_reads).
   //
-  // Savings = 1 - (additional_reads_tokens / total_context_tokens)
+  // "Without vcontext": every session restart loses all context.
+  // The AI would need to re-read files, re-discover decisions, and
+  // re-generate responses that were already produced in prior sessions.
+  // This cost = total tokens stored in vcontext (all past context).
+  //
+  // "With vcontext": that context is already recorded and retrievable.
+  // The savings = stored context / (stored context + new API consumption).
+  //
+  // In other words: what % of the total knowledge was "free" because
+  // vcontext already had it, vs what had to be freshly generated.
 
-  // Total context available in vcontext (all stored tokens)
+  // All context stored in vcontext (accumulated knowledge)
   const totalContextRows = dbQuery(`SELECT SUM(token_estimate) as total FROM entries;`);
-  const totalContextTokens = totalContextRows[0]?.total || 0;
+  const storedTokens = totalContextRows[0]?.total || 0;
 
-  // Tokens served via recall/recent (context reuse)
-  const recallTokensOut = operations['recall']?.total_tokens_out || 0;
-  const recentTokensOut = operations['recent']?.total_tokens_out || 0;
-  const servedFromContext = recallTokensOut + recentTokensOut;
+  // New tokens consumed in this period (all tool I/O = new API work)
+  const periodTokensRows = dbQuery(`SELECT SUM(token_estimate) as total FROM entry_index WHERE created_at >= ${since};`);
+  const periodNewTokens = periodTokensRows[0]?.total || 0;
 
-  // Additional file reads after recall: count Read/Grep tool uses from entry_index
-  // within the period. These represent context that vcontext couldn't serve.
-  const additionalReads = dbQuery(`SELECT SUM(token_estimate) as total FROM entry_index WHERE tool_name IN ('Read','Grep','Glob') AND created_at >= ${since};`);
-  const additionalReadTokens = additionalReads[0]?.total || 0;
+  // Savings = stored / (stored + new)
+  // "Of all knowledge available, X% was already in vcontext for free"
+  const totalKnowledge = storedTokens + periodNewTokens;
+  const savingsRate = totalKnowledge > 0 ? Math.round(storedTokens / totalKnowledge * 1000) / 1000 : 0;
 
-  // Savings: if vcontext serves context, those tokens don't need to come from file reads
-  // savings_rate = context_served / (context_served + additional_reads)
-  const totalEffort = servedFromContext + additionalReadTokens;
-  const savingsRate = totalEffort > 0 ? Math.round(servedFromContext / totalEffort * 1000) / 1000 : 0;
+  // Session count for context
+  const sessionCountRows = dbQuery(`SELECT COUNT(DISTINCT session) as c FROM entry_index WHERE created_at >= ${since};`);
+  const activeSessions = sessionCountRows[0]?.c || 0;
 
   // Per-session breakdown
   const sessionRows = dbQuery(`SELECT session, COUNT(*) as events, SUM(token_estimate) as tokens FROM entry_index WHERE session IS NOT NULL AND created_at >= ${since} GROUP BY session ORDER BY events DESC LIMIT 20;`);
   const perSession = sessionRows.map(r => {
-    const readsRow = dbQuery(`SELECT SUM(token_estimate) as t FROM entry_index WHERE session = ${esc(r.session)} AND tool_name IN ('Read','Grep','Glob') AND created_at >= ${since};`);
-    const readTok = readsRow[0]?.t || 0;
-    const totalTok = r.tokens || 0;
+    const sessionNewTok = r.tokens || 0;
+    // For per-session savings: stored context available to this session
+    // = total stored - this session's own new tokens
+    const sessionSaved = Math.max(0, storedTokens - sessionNewTok);
+    const sessionTotal = sessionSaved + sessionNewTok;
     return {
       session: r.session,
       events: r.events,
-      tokens: totalTok,
-      read_tokens: readTok,
-      savings_rate: totalTok > 0 ? Math.round((1 - readTok / totalTok) * 1000) / 1000 : 0,
+      tokens: sessionNewTok,
+      savings_rate: sessionTotal > 0 ? Math.round(sessionSaved / sessionTotal * 1000) / 1000 : 0,
     };
   });
 
@@ -3149,9 +3153,9 @@ function handleMetricsReport(req, res) {
       resume_cost_tokens: resumeCost,
       search_hit_rate: Math.round(hitRate * 1000) / 1000,
       credit_savings_rate: savingsRate,
-      tokens_served_from_context: servedFromContext,
-      additional_read_tokens: additionalReadTokens,
-      total_context_tokens: totalContextTokens,
+      stored_tokens: storedTokens,
+      period_new_tokens: periodNewTokens,
+      active_sessions: activeSessions,
     },
     per_session: perSession,
     per_user: perUser,
