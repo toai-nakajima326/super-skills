@@ -19,7 +19,15 @@
       "WebFetch(domain:machinelearningmastery.com)",
       "WebFetch(domain:www.stackai.com)",
       "WebFetch(domain:thenewstack.io)",
-      "Read(//Users/mitsuru_nakajima/.claude/skills/**)"
+      "Read(//Users/mitsuru_nakajima/.claude/skills/**)",
+      "Bash(wc -c ~/.claude/skills/*/SKILL.md)",
+      "Bash(wc -l ~/.claude/skills/*/SKILL.md)",
+      "Bash(node scripts/session-state.js capture)",
+      "Bash(node scripts/compress-skills.js)",
+      "Bash(node -e \"const p = require\\('./package.json'\\); console.log\\(p.type || 'no type field'\\)\")",
+      "Bash(node scripts/session-state.js restore)",
+      "Bash(node scripts/session-state.js auto)",
+      "Bash(node scripts/session-state.js --help)"
     ]
   }
 }
