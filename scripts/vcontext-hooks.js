@@ -87,6 +87,136 @@ function extractKeywords(text) {
   return unique.join(' ');
 }
 
+// ── Skill auto-injection triggers ─────────────────────────────
+const SKILL_TRIGGERS = [
+  {
+    name: 'ui-implementation',
+    detect: (toolName, input, output) =>
+      /\.(tsx|jsx|css|scss)/.test(input) && ['Edit', 'Write', 'MultiEdit'].includes(toolName),
+    inject: [
+      '[skill:ui-implementation] Design.md準拠を確認:',
+      '  - カラー: var(--color-*, fallback) 必須。HEXハードコード禁止',
+      '  - フォント: 13px, ボタンpadding 6px 16px, border-radius 4px',
+      '  - チェッカー検証後にコミット',
+    ]
+  },
+  {
+    name: 'investigate',
+    detect: (toolName, input, output) =>
+      /error|exception|failed|ENOENT|EACCES|TypeError|ReferenceError|SyntaxError|Cannot|undefined is not|null/i.test(output),
+    inject: [
+      '[skill:investigate] エラー検出 — 根本原因ファースト:',
+      '  1) 推測で直さない。まず証拠収集',
+      '  2) 実行パスを追跡',
+      '  3) 最小仮説を立てて検証',
+      '  4) 検証後に修正提案',
+    ]
+  },
+  {
+    name: 'guard',
+    detect: (toolName, input, output) =>
+      toolName === 'Bash' && /rm\s+-rf|drop\s+table|git\s+push\s+-f|git\s+reset\s+--hard|truncate|delete\s+from/i.test(input),
+    inject: [
+      '[skill:guard] ⚠️ 危険な操作を検出:',
+      '  - この操作は不可逆です',
+      '  - バックアップを確認してください',
+      '  - 本当に実行しますか？',
+    ]
+  },
+  {
+    name: 'ship-release',
+    detect: (toolName, input, output) =>
+      toolName === 'Bash' && /git\s+push|npm\s+publish|deploy/i.test(input),
+    inject: [
+      '[skill:ship-release] リリース前チェック:',
+      '  1) テスト全通過を確認',
+      '  2) チェンジログ更新済み',
+      '  3) バージョンバンプ済み',
+      '  4) 人間の承認を待つ（自動pushしない）',
+    ]
+  },
+  {
+    name: 'security-review',
+    detect: (toolName, input, output) =>
+      /password|secret|token|api.?key|credential|auth|bearer|jwt|oauth/i.test(input + output),
+    inject: [
+      '[skill:security-review] 機密情報を検出:',
+      '  - シークレットがコードにハードコードされていないか確認',
+      '  - 環境変数または設定ファイルを使用',
+      '  - ログに出力されていないか確認',
+    ]
+  },
+  {
+    name: 'careful',
+    detect: (toolName, input, output) =>
+      /production|本番|prod\.|\-\-force|migrate|migration/i.test(input),
+    inject: [
+      '[skill:careful] 本番環境/重要操作を検出:',
+      '  1) 現在の状態をバックアップ',
+      '  2) 影響範囲を確認',
+      '  3) 実行前に確認を待つ',
+    ]
+  },
+  {
+    name: 'review',
+    detect: (toolName, input, output) =>
+      toolName === 'Bash' && /git\s+diff|gh\s+pr\s+(view|review|create)/i.test(input),
+    inject: [
+      '[skill:review] コードレビューモード:',
+      '  - 正確性 > 回帰リスク > セキュリティ > バリデーション不足 > テスト不足',
+      '  - Findings優先、ファイル名と行番号を明示',
+    ]
+  },
+  {
+    name: 'tdd-workflow',
+    detect: (toolName, input, output) =>
+      toolName === 'Bash' && /jest|vitest|pytest|test.*run|npm\s+test|npx\s+test/i.test(input),
+    inject: [
+      '[skill:tdd-workflow] テスト実行検出:',
+      '  - 失敗テスト → 最小実装 → 成功確認 → リファクタ',
+    ]
+  },
+  {
+    name: 'coding-standards',
+    detect: (toolName, input, output) =>
+      ['Edit', 'Write', 'MultiEdit'].includes(toolName) && /\.(ts|js|py|go|rs|java)/.test(input),
+    inject: [
+      '[skill:coding-standards] コード変更検出:',
+      '  - 既存パターンに合わせる（命名規則、フォーマット）',
+      '  - バリデーション・エラーハンドリングを確認',
+    ]
+  },
+  {
+    name: 'backend-patterns',
+    detect: (toolName, input, output) =>
+      ['Edit', 'Write'].includes(toolName) && /(controller|service|repository|middleware|route|handler|api)\.(ts|js|py)/i.test(input),
+    inject: [
+      '[skill:backend-patterns] バックエンド変更検出:',
+      '  - 関心の分離を維持',
+      '  - 冪等操作、優雅な失敗処理',
+    ]
+  },
+  {
+    name: 'frontend-patterns',
+    detect: (toolName, input, output) =>
+      ['Edit', 'Write'].includes(toolName) && /(component|hook|context|store|page)\.(tsx|jsx)/i.test(input),
+    inject: [
+      '[skill:frontend-patterns] フロントエンド変更検出:',
+      '  - コンポーネント合成 > 継承',
+      '  - 共有ミュータブル状態を最小化',
+    ]
+  },
+  {
+    name: 'plan-architecture',
+    detect: (toolName, input, output) =>
+      /architect|設計|design.*system|data.*flow|api.*boundary/i.test(input + output),
+    inject: [
+      '[skill:plan-architecture] アーキテクチャ検討:',
+      '  1) コンテキストマッピング → 2) コンポーネント特定 → 3) インターフェース契約 → 4) 障害モード分析',
+    ]
+  },
+];
+
 // ── Hook handlers ──────────────────────────────────────────────
 
 /**
@@ -149,6 +279,44 @@ async function handleToolUse() {
     try {
       await handleAutoConsult();
     } catch {} // Never block on auto-consult failure
+
+    // ── Skill auto-injection ──────────────────────────────────────
+    // Detect context and inject relevant skill workflow into AI's context
+    try {
+      const triggered = [];
+      for (const skill of SKILL_TRIGGERS) {
+        try {
+          if (skill.detect(toolName, inputStr, outputStr)) {
+            triggered.push(skill);
+          }
+        } catch {}
+      }
+
+      // Always inject safety skills; limit other skills to first match
+      const safetySkills = triggered.filter(s => ['guard', 'security-review', 'careful'].includes(s.name));
+      const otherSkills = triggered.filter(s => !['guard', 'security-review', 'careful'].includes(s.name));
+      const toInject = [...safetySkills, ...otherSkills.slice(0, 1)];
+
+      if (toInject.length > 0) {
+        const lines = [];
+        for (const skill of toInject) {
+          lines.push(...skill.inject);
+        }
+        process.stdout.write(lines.join('\n') + '\n');
+
+        // Track which skills were auto-injected
+        for (const skill of toInject) {
+          try {
+            await post('/analytics/track', {
+              event_type: 'skill_auto_inject',
+              skill_name: skill.name,
+              session: SESSION_ID,
+              metadata: { tool: toolName }
+            });
+          } catch {}
+        }
+      }
+    } catch {} // Never block on skill injection failure
   } catch {
     // Non-JSON input — store as-is
     await store('observation', input.slice(0, 2000), ['raw-hook']);
