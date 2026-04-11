@@ -36,6 +36,7 @@
     { "name": "debate-consensus", "type": "skill", "source": "skills/debate-consensus" },
     { "name": "drift-detect", "type": "skill", "source": "skills/drift-detect" },
     { "name": "model-selector", "type": "skill", "source": "skills/model-selector" },
-    { "name": "confidence-filter", "type": "skill", "source": "skills/confidence-filter" }
+    { "name": "confidence-filter", "type": "skill", "source": "skills/confidence-filter" },
+    { "name": "agent-memory", "type": "skill", "source": "skills/agent-memory" }
   ]
 }

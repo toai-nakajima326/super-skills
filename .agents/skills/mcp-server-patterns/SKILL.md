@@ -41,6 +41,26 @@ Servers can request the host to make an LLM call on their behalf.
 - **Safety**: host retains model selection authority; server cannot force a specific model; user must consent per session
 - **Pattern**: use for server-side reasoning tasks (e.g., classifying tool output before returning to client)
 
+## Tasks Primitive (SEP-1686) — Async Long-Running Operations
+
+The Tasks primitive provides a **call-now / fetch-later** pattern for operations that outlast a single request/response cycle.
+
+- Client calls server to **start** a task; server returns a task ID immediately (call-now)
+- Client polls or receives a notification when complete; fetches result by task ID (fetch-later)
+- Enables long CI runs, data pipelines, or multi-step operations without blocking the client context window
+- **Design**: expose a `tasks/start` tool + `tasks/get` resource; keep task IDs stable and scoped per-session
+- **Retry semantics**: servers must define retry policy (transient vs permanent failure) and communicate it in task status; clients must not retry permanent failures
+- **Expiry**: publish result retention time in task metadata; clients should fetch before expiry
+
+## MCP Server Cards — Capability Discovery
+
+Server Cards expose structured metadata via a `.well-known/` URL so clients and registries can discover capabilities **without connecting first**.
+
+- Format: `GET /.well-known/mcp-server-card.json`
+- Include: server name, version, supported primitives, available tools (names + short descriptions), required auth methods
+- Used by: MCP registries, IDE integrations, and orchestrators for auto-discovery
+- **Design**: keep Server Card lightweight — full tool schemas stay in the MCP handshake, not in the card
+
 ## Trust Boundaries (updated)
 
 Per spec 2025-11-25: tool annotations (descriptions) are explicitly **untrusted unless from a trusted server**.

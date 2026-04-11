@@ -62,7 +62,19 @@
       "Bash(bash /Users/mitsuru_nakajima/skills/scripts/vcontext-setup.sh stop)",
       "Bash(mount)",
       "Bash(sqlite3 /Volumes/VContext/vcontext.db \"SELECT COUNT\\(*\\) as entries FROM entries;\")",
-      "Bash(sqlite3 -json /Volumes/VContext/vcontext.db \"SELECT id, type, substr\\(content,1,60\\) as content_preview FROM entries ORDER BY id;\")"
+      "Bash(sqlite3 -json /Volumes/VContext/vcontext.db \"SELECT id, type, substr\\(content,1,60\\) as content_preview FROM entries ORDER BY id;\")",
+      "Bash(./scripts/vcontext-setup.sh status:*)",
+      "Bash(curl -s -X POST http://localhost:3150/store -H 'Content-Type: application/json' -d '{\"type\":\"decision\",\"content\":\"Super Skills framework built with 37 skills, virtual context system with 4GB RAM disk, auto-evolve with daily web discovery, deployed to Claude Code + Codex\",\"tags\":[\"super-skills\",\"architecture\",\"milestone\"],\"session\":\"init-session\"}')",
+      "Bash(curl -s 'http://localhost:3150/recall?q=super+skills&limit=3')",
+      "Bash(./scripts/vcontext-setup.sh install:*)",
+      "Bash(launchctl load:*)",
+      "Bash(curl -s -X POST http://localhost:3150/store -H 'Content-Type: application/json' -d '{\"type\":\"conversation\",\"content\":\"このセッションでSuper Skillsフレームワークを構築した。37スキル、5ターゲット対応、auto-router自動ルーティング、self-evolve毎朝自動進化、仮想コンテキスト4GB RAM+SSDバックアップ。CLAUDE.mdを18KB→1.5KBに91%削減。Codex Desktopにも全スキルデプロイ済み。\",\"tags\":[\"super-skills\",\"session-summary\",\"milestone\"],\"session\":\"current\"}')",
+      "Bash(curl -s 'http://localhost:3150/recall?q=Super+Skills&limit=5')",
+      "Bash(python3 -c 'print\\(f\"{4 * 1024**3 / 4 / 1_000_000:.0f}M tokens\"\\)')",
+      "Bash(echo \"RAM 4GB: $\\(python3 -c 'print\\(f\"{4 * 1024**3 / 4 / 1_000_000:.0f}M tokens\"\\)'\\)\")",
+      "Bash(python3 -c 'print\\(f\"{256 * 1024**3 / 4 / 1_000_000:.0f}M tokens\"\\)')",
+      "Bash(echo \"SSD \\(仮に256GB\\): $\\(python3 -c 'print\\(f\"{256 * 1024**3 / 4 / 1_000_000:.0f}M tokens\"\\)'\\)\")",
+      "Bash(python3 -c ':*)"
     ]
   }
 }
