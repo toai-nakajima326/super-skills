@@ -3071,14 +3071,32 @@ function handleMetricsReport(req, res) {
   const indexCount = dbQuery('SELECT COUNT(*) as c FROM entry_index;');
   const entryCount = dbQuery('SELECT COUNT(*) as c FROM entries;');
 
-  // Credit savings: tokens served from vcontext recall vs total tokens that
-  // would have been needed without context reuse (recall_out + store_in)
+  // Credit savings calculation:
+  // "Without vcontext" = every session restart would re-read all context
+  // from files (Read tool). We estimate this as total tokens stored in entries.
+  // "With vcontext" = session-recall serves cached context directly,
+  // but some file reads still happen after recall (additional_reads).
+  //
+  // Savings = 1 - (additional_reads_tokens / total_context_tokens)
+
+  // Total context available in vcontext (all stored tokens)
+  const totalContextRows = dbQuery(`SELECT SUM(token_estimate) as total FROM entries;`);
+  const totalContextTokens = totalContextRows[0]?.total || 0;
+
+  // Tokens served via recall/recent (context reuse)
   const recallTokensOut = operations['recall']?.total_tokens_out || 0;
   const recentTokensOut = operations['recent']?.total_tokens_out || 0;
-  const storeTokensIn = operations['store']?.total_tokens_in || 0;
   const servedFromContext = recallTokensOut + recentTokensOut;
-  const totalWithoutContext = servedFromContext + storeTokensIn;
-  const savingsRate = totalWithoutContext > 0 ? Math.round(servedFromContext / totalWithoutContext * 1000) / 1000 : 0;
+
+  // Additional file reads after recall: count Read/Grep tool uses from entry_index
+  // within the period. These represent context that vcontext couldn't serve.
+  const additionalReads = dbQuery(`SELECT SUM(token_estimate) as total FROM entry_index WHERE tool_name IN ('Read','Grep','Glob') AND created_at >= ${since};`);
+  const additionalReadTokens = additionalReads[0]?.total || 0;
+
+  // Savings: if vcontext serves context, those tokens don't need to come from file reads
+  // savings_rate = context_served / (context_served + additional_reads)
+  const totalEffort = servedFromContext + additionalReadTokens;
+  const savingsRate = totalEffort > 0 ? Math.round(servedFromContext / totalEffort * 1000) / 1000 : 0;
 
   sendJson(res, 200, {
     period_hours: hours,
@@ -3088,7 +3106,8 @@ function handleMetricsReport(req, res) {
       search_hit_rate: Math.round(hitRate * 1000) / 1000,
       credit_savings_rate: savingsRate,
       tokens_served_from_context: servedFromContext,
-      tokens_total: totalWithoutContext,
+      additional_read_tokens: additionalReadTokens,
+      total_context_tokens: totalContextTokens,
     },
     index: {
       indexed: indexCount[0]?.c || 0,
