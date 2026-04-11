@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AI OS Dashboard</title>
 <style>
-  :root {
+  :root, [data-theme="dark"] {
     --bg: #0d1117; --bg-card: #161b22; --border: #30363d; --bg-bar: #21262d;
     --text: #e6edf3; --text-muted: #8b949e; --text-dim: #6e7681;
     --accent: #58a6ff; --green: #3fb950; --red: #f85149; --yellow: #d29922; --purple: #bc8cff;
@@ -14,8 +14,17 @@
     --model-tag-bg: #1f6feb22; --model-tag-border: #1f6feb44;
     --btn-bg: #21262d; --btn-hover: #30363d;
   }
+  [data-theme="light"] {
+    --bg: #ffffff; --bg-card: #f6f8fa; --border: #d0d7de; --bg-bar: #e1e4e8;
+    --text: #1f2328; --text-muted: #656d76; --text-dim: #8b949e;
+    --accent: #0969da; --green: #1a7f37; --red: #cf222e; --yellow: #9a6700; --purple: #8250df;
+    --badge-decision-bg: #ddf4ff; --badge-error-bg: #ffebe9;
+    --badge-observation-bg: #dafbe1; --badge-conversation-bg: #fff8c5; --badge-code-bg: #fbefff;
+    --model-tag-bg: #ddf4ff; --model-tag-border: #54aeff44;
+    --btn-bg: #f3f4f6; --btn-hover: #e1e4e8;
+  }
   @media (prefers-color-scheme: light) {
-    :root {
+    [data-theme="system"] {
       --bg: #ffffff; --bg-card: #f6f8fa; --border: #d0d7de; --bg-bar: #e1e4e8;
       --text: #1f2328; --text-muted: #656d76; --text-dim: #8b949e;
       --accent: #0969da; --green: #1a7f37; --red: #cf222e; --yellow: #9a6700; --purple: #8250df;
@@ -25,6 +34,11 @@
       --btn-bg: #f3f4f6; --btn-hover: #e1e4e8;
     }
   }
+  .theme-toggle { display: inline-flex; gap: 2px; margin-left: 12px; }
+  .theme-toggle button { background: var(--btn-bg); border: 1px solid var(--border); color: var(--text-muted); padding: 2px 8px; font-size: 11px; cursor: pointer; border-radius: 0; }
+  .theme-toggle button:first-child { border-radius: 4px 0 0 4px; }
+  .theme-toggle button:last-child { border-radius: 0 4px 4px 0; }
+  .theme-toggle button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 20px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; max-width: 1400px; margin: 0 auto; }
@@ -62,11 +76,16 @@
 </head>
 <body>
 <header>
-  <h1>AI OS Dashboard <span style="font-size:12px;color:var(--text-muted);font-weight:normal;">v1.8.0</span></h1>
+  <h1>AI OS Dashboard <span style="font-size:12px;color:var(--text-muted);font-weight:normal;">v1.8.1</span></h1>
   <div class="meta">
     <span id="status-indicator"><span class="status-dot status-yellow"></span>Loading...</span>
     &nbsp;|&nbsp; <span id="live-indicator" style="color:var(--green);">Connecting...</span>
     &nbsp;|&nbsp; <span id="uptime"></span>
+    <span class="theme-toggle">
+      <button onclick="setTheme('light')" id="theme-light">Light</button>
+      <button onclick="setTheme('system')" id="theme-system">System</button>
+      <button onclick="setTheme('dark')" id="theme-dark">Dark</button>
+    </span>
   </div>
 </header>
 <div class="grid">
@@ -115,6 +134,19 @@
 <script>
 const API = 'http://localhost:3150';
 function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue('--' + name).trim(); }
+
+function setTheme(mode) {
+  document.documentElement.setAttribute('data-theme', mode);
+  localStorage.setItem('aios-theme', mode);
+  document.querySelectorAll('.theme-toggle button').forEach(function(b) { b.classList.remove('active'); });
+  var btn = document.getElementById('theme-' + mode);
+  if (btn) btn.classList.add('active');
+}
+// Restore saved theme or default to system
+(function() {
+  var saved = localStorage.getItem('aios-theme') || 'system';
+  setTheme(saved);
+})();
 
 async function fetchJson(path) {
   try {
