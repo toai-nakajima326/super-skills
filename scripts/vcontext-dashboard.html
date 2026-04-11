@@ -42,7 +42,7 @@
 </head>
 <body>
 <header>
-  <h1>AI OS Dashboard <span style="font-size:12px;color:#8b949e;font-weight:normal;">v1.4.0</span></h1>
+  <h1>AI OS Dashboard <span style="font-size:12px;color:#8b949e;font-weight:normal;">v1.5.0</span></h1>
   <div class="meta">
     <span id="status-indicator"><span class="status-dot status-yellow"></span>Loading...</span>
     &nbsp;|&nbsp; <span id="live-indicator" style="color:#3fb950;">Connecting...</span>
@@ -193,18 +193,35 @@ async function refresh() {
       '</div>';
   }
 
-  // Tiers
+  // Tiers + AI
   const tiers = await fetchJson('/tier/stats');
+  const ai = await fetchJson('/ai/status');
   if (tiers) {
     const maxEntries = Math.max(tiers.ram.entries, tiers.ssd.entries, 1);
-    document.getElementById('tiers-content').innerHTML =
+    var tiersHtml =
       '<div class="chart-bar"><span class="label">RAM (' + escapeHtml(tiers.ram.size) + ')</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (tiers.ram.entries / maxEntries * 100) + '%;background:#58a6ff"></div></div><span style="margin-left:8px;font-size:13px;">' + tiers.ram.entries + '</span></div>' +
       '<div class="chart-bar"><span class="label">SSD (' + escapeHtml(tiers.ssd.size) + ')</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (tiers.ssd.entries / maxEntries * 100) + '%;background:#3fb950"></div></div><span style="margin-left:8px;font-size:13px;">' + tiers.ssd.entries + '</span></div>' +
       '<div class="chart-bar"><span class="label">Cloud</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (tiers.cloud.entries > 0 ? tiers.cloud.entries / maxEntries * 100 : 0) + '%;background:#d29922"></div></div><span style="margin-left:8px;font-size:13px;">' + (tiers.cloud.configured ? tiers.cloud.entries : 'stub') + '</span></div>';
+
+    // Local AI status inline
+    if (ai) {
+      var embedCount = ai.embedding_count || 0;
+      var totalCount = tiers.ram.entries || 1;
+      var embedPct = Math.round(embedCount / totalCount * 100);
+      tiersHtml += '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #21262d;">';
+      tiersHtml += '<div style="font-size:12px;color:#8b949e;margin-bottom:6px;">LOCAL AI</div>';
+      tiersHtml += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:12px;">';
+      tiersHtml += '<div><span class="status-dot status-' + (ai.ollama_available ? 'green' : 'red') + '"></span>Ollama</div>';
+      tiersHtml += '<div>' + (ai.preferred ? escapeHtml(ai.preferred.embed || '') : '') + '</div>';
+      tiersHtml += '</div>';
+      tiersHtml += '<div class="chart-bar" style="margin-top:4px;"><span class="label">Embedding</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + embedPct + '%;background:#bc8cff"></div></div><span style="margin-left:8px;font-size:13px;">' + embedPct + '%</span></div>';
+      tiersHtml += '<div style="font-size:11px;color:#6e7681;margin-top:2px;">' + (ai.models || []).map(function(m){ return escapeHtml(m); }).join(', ') + '</div>';
+      tiersHtml += '</div>';
+    }
+    document.getElementById('tiers-content').innerHTML = tiersHtml;
   }
 
-  // AI
-  const ai = await fetchJson('/ai/status');
+  // AI (standalone card — kept for feature detail)
   if (ai) {
     document.getElementById('ai-content').innerHTML =
       '<div style="margin-bottom:8px;">' + (ai.ollama_available ? '<span class="status-dot status-green"></span>Available' : '<span class="status-dot status-red"></span>Not available') + '</div>' +

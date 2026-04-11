@@ -2536,10 +2536,17 @@ function ollamaEmbed(model, text) {
 
 // GET /ai/status — Show local AI status
 function handleAiStatus(req, res) {
+  let embeddingCount = 0;
+  try {
+    const rows = dbQuery("SELECT count(*) as c FROM entries WHERE embedding IS NOT NULL;");
+    embeddingCount = rows[0]?.c || 0;
+  } catch {}
+
   sendJson(res, 200, {
     ollama_available: ollamaAvailable,
     ollama_url: OLLAMA_URL,
     models: ollamaModels,
+    embedding_count: embeddingCount,
     preferred: {
       summarize: pickModel('summarize'),
       embed: pickModel('embed'),
