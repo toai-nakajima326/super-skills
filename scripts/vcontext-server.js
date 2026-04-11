@@ -2684,16 +2684,35 @@ async function handleSemanticSearch(req, res) {
   const auth = validateApiKey(req);
   if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
 
-  // Generate query embedding
+  // Generate query embedding — fallback to FTS if Ollama fails
   const model = pickModel('embed');
   let queryEmbed;
   try {
     queryEmbed = await ollamaEmbed(model, q);
   } catch (e) {
-    return sendJson(res, 500, { error: 'Failed to generate embedding: ' + e.message });
+    // Ollama timeout/error — fallback to FTS keyword search
+    const ftsResults = dbQuery(`SELECT id, type, content, tags, created_at, reasoning FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(q)} LIMIT ${limit});`);
+    parseTags(ftsResults);
+    return sendJson(res, 200, {
+      results: ftsResults,
+      count: ftsResults.length,
+      engine: 'fts-fallback',
+      model_used: null,
+      threshold,
+      _note: 'Ollama unavailable, fell back to FTS keyword search',
+    });
   }
   if (!queryEmbed || queryEmbed.length === 0) {
-    return sendJson(res, 500, { error: 'Failed to generate embedding' });
+    // Same fallback
+    const ftsResults = dbQuery(`SELECT id, type, content, tags, created_at, reasoning FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(q)} LIMIT ${limit});`);
+    parseTags(ftsResults);
+    return sendJson(res, 200, {
+      results: ftsResults,
+      count: ftsResults.length,
+      engine: 'fts-fallback',
+      model_used: null,
+      threshold,
+    });
   }
 
   const results = [];
