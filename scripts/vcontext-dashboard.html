@@ -112,39 +112,34 @@
     <div id="health-content">Loading...</div>
   </div>
 
-  <!-- Quick Actions -->
+  <!-- Storage + Actions (compact) -->
   <div class="card">
-    <h2>Quick Actions</h2>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;">
-      <button class="btn" onclick="confirmAction('Summarize Old', '24時間以上前のエントリをOllamaで1文に要約します。元データは消えません。', '/ai/summarize', 'POST')">Summarize Old</button>
-      <button class="btn" onclick="confirmAction('Tier Migrate', '古いエントリをRAM→SSD→Cloudに移動します。RAM上の古いデータが整理されます。', '/tier/migrate', 'POST')">Tier Migrate</button>
-      <button class="btn" onclick="confirmAction('Refresh', 'ダッシュボードの全データを最新に更新します。WebSocket接続中は自動更新されています。', '_refresh', '')">Refresh</button>
+    <h2>Storage</h2>
+    <div id="tiers-content">Loading...</div>
+    <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);display:flex;gap:4px;flex-wrap:wrap;">
+      <button class="btn" style="font-size:11px;padding:3px 8px;" onclick="confirmAction('Summarize', '24時間以上前のエントリをOllamaで要約', '/ai/summarize', 'POST')">Summarize</button>
+      <button class="btn" style="font-size:11px;padding:3px 8px;" onclick="confirmAction('Migrate', 'RAM→SSD→Cloudに移動', '/tier/migrate', 'POST')">Migrate</button>
+      <button class="btn" style="font-size:11px;padding:3px 8px;" onclick="confirmAction('Refresh', 'ダッシュボード更新', '_refresh', '')">Refresh</button>
     </div>
-    <div id="action-confirm" style="display:none;margin-top:8px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-bar);font-size:12px;">
-      <div id="action-confirm-title" style="font-weight:bold;margin-bottom:4px;"></div>
-      <div id="action-confirm-desc" style="color:var(--text-muted);margin-bottom:8px;"></div>
-      <button class="btn" id="action-confirm-ok" style="margin-right:4px;">Execute</button>
-      <button class="btn" onclick="document.getElementById('action-confirm').style.display='none'">Cancel</button>
+    <div id="action-confirm" style="display:none;margin-top:6px;padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg-bar);font-size:11px;">
+      <div id="action-confirm-title" style="font-weight:bold;margin-bottom:2px;"></div>
+      <div id="action-confirm-desc" style="color:var(--text-muted);margin-bottom:4px;"></div>
+      <button class="btn" id="action-confirm-ok" style="font-size:11px;padding:2px 8px;margin-right:4px;">OK</button>
+      <button class="btn" style="font-size:11px;padding:2px 8px;" onclick="document.getElementById('action-confirm').style.display='none'">Cancel</button>
     </div>
-    <div id="action-result" style="margin-top:8px;font-size:12px;color:var(--text-muted);"></div>
+    <div id="action-result" style="margin-top:4px;font-size:11px;color:var(--text-muted);"></div>
   </div>
 
-  <!-- Storage Tiers -->
+  <!-- Sessions (compact) -->
   <div class="card">
-    <h2>Storage Tiers</h2>
-    <div id="tiers-content">Loading...</div>
+    <h2>Sessions</h2>
+    <div id="analytics-content" style="max-height:200px;overflow-y:auto;">Loading...</div>
   </div>
 
   <!-- Recent Entries -->
   <div class="card wide">
     <h2>Recent Entries</h2>
-    <div id="recent-content">Loading...</div>
-  </div>
-
-  <!-- Sessions -->
-  <div class="card wide">
-    <h2>Sessions</h2>
-    <div id="analytics-content">Loading...</div>
+    <div id="recent-content" style="max-height:300px;overflow-y:auto;">Loading...</div>
   </div>
 </div>
 
