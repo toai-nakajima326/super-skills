@@ -42,7 +42,7 @@
 </head>
 <body>
 <header>
-  <h1>AI OS Dashboard</h1>
+  <h1>AI OS Dashboard <span style="font-size:12px;color:#8b949e;font-weight:normal;">v1.4.0</span></h1>
   <div class="meta">
     <span id="status-indicator"><span class="status-dot status-yellow"></span>Loading...</span>
     &nbsp;|&nbsp; <span id="live-indicator" style="color:#3fb950;">Connecting...</span>
@@ -113,7 +113,53 @@ async function doAction(path, method) {
 }
 
 function badgeClass(type) {
-  return 'badge badge-' + (type || 'observation');
+  var map = {
+    'tool-use': 'observation', 'pre-tool': 'observation',
+    'user-prompt': 'conversation', 'session-end': 'conversation',
+    'compact': 'conversation', 'pre-compact': 'conversation',
+    'subagent-start': 'code', 'subagent-stop': 'code',
+    'tool-error': 'error', 'notification': 'error',
+    'permission-request': 'decision', 'permission-denied': 'error',
+  };
+  return 'badge badge-' + (map[type] || type || 'observation');
+}
+
+function summarizeContent(type, raw) {
+  if (!raw) return '';
+  try {
+    var d = JSON.parse(raw);
+    var session = (d.session_id || '').slice(0, 8);
+    var tool = d.tool_name || '';
+    var desc = d.description || '';
+    var prompt = d.prompt || '';
+    var input = d.tool_input || {};
+    var output = d.tool_response || {};
+
+    if (type === 'user-prompt') {
+      return (prompt || d.content || d.message || raw).slice(0, 200);
+    }
+    if (type === 'tool-use' || type === 'pre-tool') {
+      var inputStr = typeof input === 'string' ? input : (input.command || input.file_path || input.pattern || input.query || JSON.stringify(input)).slice(0, 120);
+      var outputStr = '';
+      if (type === 'tool-use' && output) {
+        var o = typeof output === 'string' ? output : (output.stdout || output.content || '');
+        if (o) outputStr = ' \u2192 ' + String(o).slice(0, 60).replace(/\\n/g, ' ');
+      }
+      return (tool || '?') + ': ' + inputStr + outputStr;
+    }
+    if (type === 'subagent-start' || type === 'subagent-stop') {
+      return (d.subagent_type || d.agent_type || 'agent') + (desc ? ': ' + desc.slice(0, 100) : '');
+    }
+    if (type === 'session-end') return 'Session ended [' + session + ']';
+    if (type === 'compact' || type === 'pre-compact') return 'Context compaction';
+    if (type === 'tool-error') return (tool || 'Tool') + ' FAILED: ' + (typeof output === 'string' ? output : JSON.stringify(output)).slice(0, 120);
+    if (type === 'permission-request') return tool + ' permission requested';
+    if (type === 'permission-denied') return tool + ' permission denied';
+    // Fallback: show first meaningful field
+    return (tool || prompt || desc || JSON.stringify(d)).slice(0, 150);
+  } catch(e) {
+    return raw.slice(0, 150);
+  }
 }
 
 function toJST(utcStr) {
@@ -169,12 +215,17 @@ async function refresh() {
   }
 
   // Recent
-  const recent = await fetchJson('/recent?n=10');
+  const recent = await fetchJson('/recent?n=15');
   if (recent && recent.results) {
     document.getElementById('recent-content').innerHTML = recent.results.map(function(r) {
+      var summary = summarizeContent(r.type, r.content);
+      var session = '';
+      try { session = JSON.parse(r.content).session_id || ''; } catch {}
+      var sessionShort = session ? session.slice(0, 8) : '';
       return '<div class="entry">' +
         '<span class="' + badgeClass(r.type) + '">' + escapeHtml(r.type) + '</span>' +
-        '<span style="margin-left:8px;">' + escapeHtml((r.content || '').slice(0, 120)) + '</span>' +
+        (sessionShort ? '<span style="margin-left:6px;font-size:10px;color:#6e7681;font-family:monospace;">' + sessionShort + '</span>' : '') +
+        '<div style="margin-top:2px;">' + escapeHtml(summary) + '</div>' +
         '<div class="entry-time">' + toJST(r.created_at) + (r._tier ? ' | ' + escapeHtml(r._tier) : '') + '</div>' +
       '</div>';
     }).join('');
@@ -205,49 +256,64 @@ refresh();
 var ws = null;
 var wsReconnectTimer = null;
 var liveCount = 0;
+var wsRetryDelay = 1000;
+var wsConnected = false;
+
+function setStatus(dot, text) {
+  document.getElementById('status-indicator').innerHTML =
+    '<span class="status-dot status-' + dot + '"></span>' + text;
+}
 
 function connectWs() {
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+  setStatus('yellow', 'Connecting...');
   try {
     ws = new WebSocket('ws://localhost:3150/ws');
     ws.onopen = function() {
-      document.getElementById('status-indicator').innerHTML =
-        '<span class="status-dot status-green"></span>LIVE';
+      wsConnected = true;
+      wsRetryDelay = 1000;
+      setStatus('green', 'LIVE');
+      document.getElementById('live-indicator').textContent = 'Live: ' + liveCount + ' events';
+      document.getElementById('live-indicator').style.color = '#3fb950';
       ws.send(JSON.stringify({ action: 'subscribe' }));
+      startPolling();
+      refresh();
     };
     ws.onmessage = function(e) {
       try {
         var data = JSON.parse(e.data);
         if (data.event === 'new_entry' || data.event === 'conflict_detected' || data.event === 'consultation_updated') {
           liveCount++;
-          // Show live indicator
-          var indicator = document.getElementById('live-indicator');
-          if (indicator) {
-            indicator.textContent = 'Live: ' + liveCount + ' events';
-            indicator.style.color = '#3fb950';
-          }
-          // Refresh dashboard data
+          document.getElementById('live-indicator').textContent = 'Live: ' + liveCount + ' events';
           refresh();
         }
       } catch {}
     };
     ws.onclose = function() {
-      document.getElementById('status-indicator').innerHTML =
-        '<span class="status-dot status-yellow"></span>Reconnecting...';
-      wsReconnectTimer = setTimeout(connectWs, 3000);
+      wsConnected = false;
+      setStatus('yellow', 'Reconnecting (' + Math.round(wsRetryDelay/1000) + 's)...');
+      document.getElementById('live-indicator').textContent = 'WS disconnected';
+      document.getElementById('live-indicator').style.color = '#d29922';
+      startPolling();
+      wsReconnectTimer = setTimeout(connectWs, wsRetryDelay);
+      wsRetryDelay = Math.min(wsRetryDelay * 1.5, 15000);
     };
-    ws.onerror = function() {
-      if (ws) ws.close();
-    };
+    ws.onerror = function() { if (ws) ws.close(); };
   } catch {
-    // WebSocket not available, fall back to polling
-    wsReconnectTimer = setTimeout(connectWs, 5000);
+    wsReconnectTimer = setTimeout(connectWs, wsRetryDelay);
+    wsRetryDelay = Math.min(wsRetryDelay * 1.5, 15000);
   }
 }
 
 connectWs();
 
-// Fallback polling (slower, for when WS is down)
-setInterval(refresh, 30000);
+// Adaptive polling: fast when WS is down, slow when connected
+var pollTimer = null;
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(refresh, wsConnected ? 30000 : 5000);
+}
+startPolling();
 </script>
 </body>
 </html>

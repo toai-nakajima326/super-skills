@@ -48,7 +48,9 @@ const SCRIPT_DIR = new URL('.', import.meta.url).pathname;
 const BACKUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const WARN_SIZE_BYTES = 3 * 1024 * 1024 * 1024;     // 3 GB
 const MAX_SIZE_BYTES = 3.5 * 1024 * 1024 * 1024;     // 3.5 GB
-const VALID_TYPES = ['conversation', 'decision', 'observation', 'code', 'error'];
+// All hook event types + legacy types. Accept any non-empty string.
+const LEGACY_TYPES = ['conversation', 'decision', 'observation', 'code', 'error'];
+const isValidType = (t) => typeof t === 'string' && t.length > 0 && t.length < 100;
 const NAMESPACE_TAG_PREFIX = 'project:';
 const RAM_TO_SSD_DAYS = 7;
 const SSD_TO_CLOUD_DAYS = 30;
@@ -121,7 +123,7 @@ function getAccessibleGroups(auth) {
 function dbExec(sql, dbPath = DB_PATH) {
   try {
     execFileSync('sqlite3', [dbPath, sql], {
-      timeout: 10000,
+      timeout: 30000,
       maxBuffer: 50 * 1024 * 1024,
     });
   } catch (e) {
@@ -138,8 +140,8 @@ function dbExec(sql, dbPath = DB_PATH) {
 function dbQuery(sql, dbPath = DB_PATH) {
   try {
     const out = execFileSync('sqlite3', ['-json', dbPath, sql], {
-      timeout: 10000,
-      maxBuffer: 50 * 1024 * 1024,
+      timeout: 60000,
+      maxBuffer: 100 * 1024 * 1024,
       encoding: 'utf-8',
     });
     const trimmed = out.trim();
@@ -628,8 +630,8 @@ async function handleStore(req, res) {
   if (!type || !content) {
     return sendJson(res, 400, { error: 'Missing required fields: type, content' });
   }
-  if (!VALID_TYPES.includes(type)) {
-    return sendJson(res, 400, { error: `Invalid type. Must be one of: ${VALID_TYPES.join(', ')}` });
+  if (!isValidType(type)) {
+    return sendJson(res, 400, { error: 'Invalid type. Must be a non-empty string.' });
   }
 
   // Group permission check for non-owner: can only store to own groups
@@ -919,7 +921,7 @@ function handleRecall(req, res) {
  */
 function searchTier(dbPath, q, type, limit, namespace, userFilter, accessibleGroups) {
   if (!existsSync(dbPath)) return [];
-  const typeFilter = type && VALID_TYPES.includes(type) ? ` AND e.type = ${esc(type)}` : '';
+  const typeFilter = type && isValidType(type) ? ` AND e.type = ${esc(type)}` : '';
   const nsFilter = namespace ? ` AND e.tags LIKE ${esc('%project:' + namespace + '%')}` : '';
   const userFlt = userFilter ? ` AND e.tags LIKE ${esc('%user:' + userFilter + '%')}` : '';
   let groupFilter = '';
@@ -1023,7 +1025,7 @@ function handleRecent(req, res) {
  */
 function recentFromTier(dbPath, type, limit, namespace, accessibleGroups) {
   if (!existsSync(dbPath)) return [];
-  const typeFilter = type && VALID_TYPES.includes(type) ? ` AND type = ${esc(type)}` : '';
+  const typeFilter = type && isValidType(type) ? ` AND type = ${esc(type)}` : '';
   const nsFilter = namespace ? ` AND tags LIKE ${esc('%project:' + namespace + '%')}` : '';
   let groupFilter = '';
   if (accessibleGroups) {
@@ -2133,6 +2135,12 @@ function formatBytes(bytes) {
 // ── Periodic migration check (piggybacks on backup timer) ─────
 function doBackupAndMigrate() {
   doBackup();
+  // Sync any entries that write-through missed (RAM → SSD catch-up)
+  try {
+    syncRamToSsd();
+  } catch (e) {
+    console.error('[vcontext:auto] RAM→SSD sync failed:', e.message);
+  }
   // Recheck Ollama availability
   checkOllama();
   // Quick migration check
@@ -2148,6 +2156,26 @@ function doBackupAndMigrate() {
   } catch (e) {
     console.error('[vcontext:auto] Auto-migration SSD→Cloud failed:', e.message);
   }
+}
+
+// ── RAM → SSD catch-up sync (fills gaps from failed write-through) ─
+function syncRamToSsd() {
+  if (!existsSync(SSD_DB_PATH)) return;
+  const ssdMax = dbQuery("SELECT COALESCE(MAX(id),0) as max_id FROM entries;", SSD_DB_PATH);
+  const ssdMaxId = ssdMax[0]?.max_id || 0;
+  const ramMax = dbQuery("SELECT COALESCE(MAX(id),0) as max_id FROM entries;");
+  const ramMaxId = ramMax[0]?.max_id || 0;
+  const gap = ramMaxId - ssdMaxId;
+  if (gap <= 0) return;
+  // Use ATTACH to copy missing entries in one shot
+  dbExec(`
+    ATTACH '${SSD_DB_PATH}' AS ssd;
+    INSERT OR IGNORE INTO ssd.entries (id, type, content, tags, session, created_at, token_estimate, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status)
+      SELECT id, type, content, tags, session, created_at, token_estimate, last_accessed, access_count, 'ssd', reasoning, conditions, supersedes, confidence, status
+      FROM main.entries WHERE id > ${ssdMaxId};
+    DETACH ssd;
+  `);
+  console.log(`[vcontext:sync] Caught up ${gap} entries RAM→SSD (${ssdMaxId}→${ramMaxId})`);
 }
 
 // ── WebSocket (minimal, zero-dep) ─────────────────────────────
@@ -2413,7 +2441,7 @@ function ollamaGenerate(model, prompt, options = {}) {
     const req = httpRequest(parsed, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      timeout: 30000,
+      timeout: 300000, // 5 min — cold start + swap can be very slow
     }, (res) => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
@@ -2439,7 +2467,7 @@ function ollamaEmbed(model, text) {
     const req = httpRequest(parsed, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      timeout: 15000,
+      timeout: 300000, // 5 min — cold start + swap can be very slow
     }, (res) => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
@@ -2554,7 +2582,7 @@ async function handleSemanticSearch(req, res) {
     return sendJson(res, 500, { error: 'Failed to generate embedding' });
   }
 
-  // Load entries with embeddings
+  // Load all entries with embeddings for similarity comparison
   const rows = dbQuery("SELECT id, type, content, tags, created_at, embedding, reasoning FROM entries WHERE embedding IS NOT NULL;");
 
   // Calculate similarities
