@@ -54,20 +54,52 @@ const LOCAL_USER_ID = `${LOCAL_USER}@${LOCAL_HOST}`;
 const API_KEYS_PATH = join(BACKUP_DIR, 'vcontext-api-keys.json');
 function loadApiKeys() {
   try {
-    return JSON.parse(readFileSync(API_KEYS_PATH, 'utf-8'));
-  } catch { return { keys: {} }; }
+    const data = JSON.parse(readFileSync(API_KEYS_PATH, 'utf-8'));
+    // Ensure groups object exists (backward compat)
+    if (!data.groups) data.groups = {};
+    if (!data.keys) data.keys = {};
+    return data;
+  } catch { return { keys: {}, groups: {} }; }
+}
+function saveApiKeys(data) {
+  mkdirSync(BACKUP_DIR, { recursive: true });
+  writeFileSync(API_KEYS_PATH, JSON.stringify(data, null, 2), 'utf-8');
 }
 function validateApiKey(req) {
   const authHeader = req.headers['authorization'] || '';
   const key = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
   if (!key) {
-    // No key = local access, use local user identity
-    return { valid: true, userId: LOCAL_USER_ID, local: true };
+    // No key = local access, owner role with wildcard groups
+    return { valid: true, userId: LOCAL_USER_ID, local: true, role: 'owner', groups: ['*'] };
   }
   const keys = loadApiKeys();
   const entry = keys.keys[key];
-  if (!entry) return { valid: false, userId: null, local: false };
-  return { valid: true, userId: entry.userId, local: false };
+  if (!entry) return { valid: false, userId: null, local: false, role: null, groups: [] };
+  return {
+    valid: true,
+    userId: entry.userId,
+    local: false,
+    role: entry.role || 'member',
+    groups: entry.groups || [],
+  };
+}
+
+// ── RBAC helpers ──────────────────────────────────────────────
+const ROLES = ['viewer', 'member', 'admin', 'owner'];
+const ROLE_LEVEL = { viewer: 0, member: 1, admin: 2, owner: 3 };
+
+function hasRole(auth, minRole) {
+  return (ROLE_LEVEL[auth.role] || 0) >= (ROLE_LEVEL[minRole] || 0);
+}
+
+function canAccessGroup(auth, group) {
+  if (auth.groups.includes('*')) return true; // owner sees all
+  return auth.groups.includes(group);
+}
+
+function getAccessibleGroups(auth) {
+  if (auth.groups.includes('*')) return null; // null = no filter (sees all)
+  return auth.groups;
 }
 
 // ── SQLite helpers ─────────────────────────────────────────────
@@ -497,6 +529,11 @@ async function handleStore(req, res) {
   const auth = validateApiKey(req);
   if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
 
+  // Write permission: viewer cannot store
+  if (!hasRole(auth, 'member')) {
+    return sendJson(res, 403, { error: 'Viewers cannot store entries. Requires member role or above.' });
+  }
+
   const sizeCheck = checkDbSize();
   if (!sizeCheck.ok) {
     return sendJson(res, 507, { error: sizeCheck.msg });
@@ -512,6 +549,12 @@ async function handleStore(req, res) {
     return sendJson(res, 400, { error: `Invalid type. Must be one of: ${VALID_TYPES.join(', ')}` });
   }
 
+  // Group permission check for non-owner: can only store to own groups
+  const targetGroup = body.group || (auth.groups[0] !== '*' ? auth.groups[0] : null);
+  if (targetGroup && !hasRole(auth, 'owner') && !canAccessGroup(auth, targetGroup)) {
+    return sendJson(res, 403, { error: `Cannot store to group '${targetGroup}'. Not a member of this group.` });
+  }
+
   // Auto-inject namespace and user identity as tags
   const tagList = Array.isArray(tags) ? [...tags] : [];
   if (namespace) {
@@ -520,6 +563,11 @@ async function handleStore(req, res) {
   }
   const userTag = `user:${auth.userId}`;
   if (!tagList.includes(userTag)) tagList.push(userTag);
+  // Auto-inject group tag
+  if (targetGroup) {
+    const groupTag = `group:${targetGroup}`;
+    if (!tagList.includes(groupTag)) tagList.push(groupTag);
+  }
   const tagsJson = JSON.stringify(tagList);
   const tokenEst = estimateTokens(content);
 
@@ -565,11 +613,13 @@ function handleRecall(req, res) {
   const type = params.type;
   const namespace = params.namespace; // filter by project:xxx
   const userFilter = params.user || (params.my === 'true' ? auth.userId : null);
+  // Auto-filter by accessible groups (unless owner)
+  const accessibleGroups = getAccessibleGroups(auth);
   const allResults = [];
   const seenIds = new Map(); // created_at+content → true (for cross-tier dedup)
 
   // --- Tier 1: RAM ---
-  const ramResults = searchTier(DB_PATH, q, type, limit, namespace, userFilter);
+  const ramResults = searchTier(DB_PATH, q, type, limit, namespace, userFilter, accessibleGroups);
   for (const row of ramResults) {
     row._tier = 'ram';
     const key = `${row.created_at}||${row.type}||${String(row.content).slice(0, 100)}`;
@@ -582,7 +632,7 @@ function handleRecall(req, res) {
   // --- Tier 2: SSD (if still need more results) ---
   if (allResults.length < limit) {
     const ssdLimit = limit - allResults.length;
-    const ssdResults = searchTier(SSD_DB_PATH, q, type, ssdLimit, namespace, userFilter);
+    const ssdResults = searchTier(SSD_DB_PATH, q, type, ssdLimit, namespace, userFilter, accessibleGroups);
     const promoted = [];
     for (const row of ssdResults) {
       const key = `${row.created_at}||${row.type}||${String(row.content).slice(0, 100)}`;
@@ -625,17 +675,34 @@ function handleRecall(req, res) {
 
 /**
  * Search a single tier's database using FTS5, with LIKE fallback.
+ * @param {string} dbPath
+ * @param {string} q - search query
+ * @param {string} type - entry type filter
+ * @param {number} limit
+ * @param {string} namespace - project namespace filter
+ * @param {string} userFilter - user identity filter
+ * @param {string[]|null} accessibleGroups - null = no filter (owner), array = restrict to these groups
  */
-function searchTier(dbPath, q, type, limit, namespace, userFilter) {
+function searchTier(dbPath, q, type, limit, namespace, userFilter, accessibleGroups) {
   if (!existsSync(dbPath)) return [];
   const typeFilter = type && VALID_TYPES.includes(type) ? ` AND e.type = ${esc(type)}` : '';
   const nsFilter = namespace ? ` AND e.tags LIKE ${esc('%project:' + namespace + '%')}` : '';
   const userFlt = userFilter ? ` AND e.tags LIKE ${esc('%user:' + userFilter + '%')}` : '';
+  let groupFilter = '';
+  if (accessibleGroups) {
+    if (accessibleGroups.length === 0) {
+      // No groups at all — can only see entries without group tags
+      groupFilter = ` AND e.tags NOT LIKE '%group:%'`;
+    } else {
+      const groupConditions = accessibleGroups.map(g => `e.tags LIKE ${esc('%group:' + g + '%')}`).join(' OR ');
+      groupFilter = ` AND (e.tags NOT LIKE '%group:%' OR ${groupConditions})`;
+    }
+  }
 
   const ftsSql = `SELECT e.*, rank
     FROM entries_fts fts
     JOIN entries e ON e.id = fts.rowid
-    WHERE entries_fts MATCH ${esc(q)}${typeFilter}${nsFilter}${userFlt}
+    WHERE entries_fts MATCH ${esc(q)}${typeFilter}${nsFilter}${userFlt}${groupFilter}
     ORDER BY rank * 0.7 + (julianday(e.created_at) - julianday('2024-01-01')) * 0.3
     LIMIT ${limit};`;
 
@@ -643,7 +710,7 @@ function searchTier(dbPath, q, type, limit, namespace, userFilter) {
     return dbQuery(ftsSql, dbPath);
   } catch {
     // FTS query syntax error — fall back to LIKE search
-    const likeSql = `SELECT * FROM entries WHERE content LIKE ${esc('%' + q + '%')}${typeFilter}${nsFilter}${userFlt} ORDER BY created_at DESC LIMIT ${limit};`;
+    const likeSql = `SELECT * FROM entries WHERE content LIKE ${esc('%' + q + '%')}${typeFilter}${nsFilter}${userFlt}${groupFilter.replace(/e\./g, '')} ORDER BY created_at DESC LIMIT ${limit};`;
     try {
       return dbQuery(likeSql, dbPath);
     } catch {
@@ -657,15 +724,20 @@ function searchTier(dbPath, q, type, limit, namespace, userFilter) {
  * Cascading across tiers.
  */
 function handleRecent(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
   const params = parseQuery(req.url);
   const n = Math.min(parseInt(params.n) || 20, 200);
   const type = params.type;
   const namespace = params.namespace;
+  // Auto-filter by accessible groups (unless owner)
+  const accessibleGroups = getAccessibleGroups(auth);
   const allResults = [];
   const seenIds = new Map();
 
   // --- Tier 1: RAM ---
-  const ramRows = recentFromTier(DB_PATH, type, n, namespace);
+  const ramRows = recentFromTier(DB_PATH, type, n, namespace, accessibleGroups);
   for (const row of ramRows) {
     row._tier = 'ram';
     const key = `${row.created_at}||${row.type}||${String(row.content).slice(0, 100)}`;
@@ -677,7 +749,7 @@ function handleRecent(req, res) {
   // --- Tier 2: SSD ---
   if (allResults.length < n) {
     const ssdLimit = n - allResults.length;
-    const ssdRows = recentFromTier(SSD_DB_PATH, type, ssdLimit, namespace);
+    const ssdRows = recentFromTier(SSD_DB_PATH, type, ssdLimit, namespace, accessibleGroups);
     const promoted = [];
     for (const row of ssdRows) {
       const key = `${row.created_at}||${row.type}||${String(row.content).slice(0, 100)}`;
@@ -709,12 +781,26 @@ function handleRecent(req, res) {
 
 /**
  * Query recent entries from a specific tier DB.
+ * @param {string} dbPath
+ * @param {string} type
+ * @param {number} limit
+ * @param {string} namespace
+ * @param {string[]|null} accessibleGroups - null = no filter (owner), array = restrict to these groups
  */
-function recentFromTier(dbPath, type, limit, namespace) {
+function recentFromTier(dbPath, type, limit, namespace, accessibleGroups) {
   if (!existsSync(dbPath)) return [];
   const typeFilter = type && VALID_TYPES.includes(type) ? ` AND type = ${esc(type)}` : '';
   const nsFilter = namespace ? ` AND tags LIKE ${esc('%project:' + namespace + '%')}` : '';
-  const where = (typeFilter || nsFilter) ? ` WHERE 1=1${typeFilter}${nsFilter}` : '';
+  let groupFilter = '';
+  if (accessibleGroups) {
+    if (accessibleGroups.length === 0) {
+      groupFilter = ` AND tags NOT LIKE '%group:%'`;
+    } else {
+      const groupConditions = accessibleGroups.map(g => `tags LIKE ${esc('%group:' + g + '%')}`).join(' OR ');
+      groupFilter = ` AND (tags NOT LIKE '%group:%' OR ${groupConditions})`;
+    }
+  }
+  const where = ` WHERE 1=1${typeFilter}${nsFilter}${groupFilter}`;
   const sql = `SELECT * FROM entries${where} ORDER BY created_at DESC LIMIT ${limit};`;
   try {
     return dbQuery(sql, dbPath);
@@ -1019,14 +1105,21 @@ import { randomBytes } from 'node:crypto';
 
 /**
  * POST /auth/create-key — Create a new API key for a user.
- * Body: { userId: "tanaka@remote-pc", name: "Tanaka Remote" }
- * Returns: { apiKey: "vctx_...", userId, name }
+ * Body: { userId, name, role?, groups? }
+ * Returns: { apiKey: "vctx_...", userId, name, role, groups }
+ *
+ * Permissions:
+ *   owner  — can create any role, assign any group
+ *   admin  — can create member/viewer in their own groups only
+ *   member/viewer — cannot create keys (403)
  */
 async function handleCreateKey(req, res) {
-  // Only local users can create keys
   const auth = validateApiKey(req);
-  if (!auth.local) {
-    return sendJson(res, 403, { error: 'Only local access can create API keys' });
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  // Require at least admin role
+  if (!hasRole(auth, 'admin')) {
+    return sendJson(res, 403, { error: 'Requires admin role or above to create API keys' });
   }
 
   const body = await readBody(req);
@@ -1035,28 +1128,53 @@ async function handleCreateKey(req, res) {
     return sendJson(res, 400, { error: 'Required: userId, name' });
   }
 
+  const role = body.role || 'member';
+  const groups = Array.isArray(body.groups) ? body.groups : [];
+
+  // Validate role
+  if (!ROLES.includes(role)) {
+    return sendJson(res, 400, { error: `Invalid role. Must be one of: ${ROLES.join(', ')}` });
+  }
+
+  // Admin cannot assign admin/owner role
+  if (!hasRole(auth, 'owner') && ROLE_LEVEL[role] >= ROLE_LEVEL['admin']) {
+    return sendJson(res, 403, { error: 'Admin cannot assign admin or owner role. Requires owner.' });
+  }
+
+  // Admin cannot assign groups they don't belong to
+  if (!hasRole(auth, 'owner')) {
+    for (const g of groups) {
+      if (!canAccessGroup(auth, g)) {
+        return sendJson(res, 403, { error: `Cannot assign group '${g}'. You are not a member of this group.` });
+      }
+    }
+  }
+
   const apiKey = 'vctx_' + randomBytes(32).toString('hex');
   const keys = loadApiKeys();
   keys.keys[apiKey] = {
     userId,
     name,
+    role,
+    groups,
     createdAt: new Date().toISOString(),
-    createdBy: LOCAL_USER_ID,
+    createdBy: auth.userId,
   };
 
-  mkdirSync(BACKUP_DIR, { recursive: true });
-  writeFileSync(API_KEYS_PATH, JSON.stringify(keys, null, 2), 'utf-8');
+  saveApiKeys(keys);
 
   sendJson(res, 201, {
     apiKey,
     userId,
     name,
+    role,
+    groups,
     _setup: `On the remote PC, set:\n  export VCONTEXT_API_KEY="${apiKey}"\n  export VCONTEXT_URL="http://<this-pc-ip>:${PORT}"\nThen curl with: -H "Authorization: Bearer ${apiKey}"`,
   });
 }
 
 /**
- * GET /auth/whoami — Show current user identity.
+ * GET /auth/whoami — Show current user identity, role, and groups.
  */
 function handleWhoami(req, res) {
   const auth = validateApiKey(req);
@@ -1064,8 +1182,188 @@ function handleWhoami(req, res) {
   sendJson(res, 200, {
     userId: auth.userId,
     local: auth.local,
+    role: auth.role,
+    groups: auth.groups,
     host: LOCAL_HOST,
   });
+}
+
+/**
+ * POST /auth/create-group — Create a new group. Owner only.
+ * Body: { groupId: "dev-team/chatai", name: "開発チーム / chatai" }
+ */
+async function handleCreateGroup(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  if (!hasRole(auth, 'owner')) {
+    return sendJson(res, 403, { error: 'Only owner can create groups' });
+  }
+
+  const body = await readBody(req);
+  const { groupId, name } = body;
+  if (!groupId || !name) {
+    return sendJson(res, 400, { error: 'Required: groupId, name' });
+  }
+
+  // Validate groupId format (alphanumeric, hyphens, slashes)
+  if (!/^[a-zA-Z0-9/_-]+$/.test(groupId)) {
+    return sendJson(res, 400, { error: 'groupId must contain only alphanumeric, hyphens, underscores, and slashes' });
+  }
+
+  const keys = loadApiKeys();
+  if (keys.groups[groupId]) {
+    return sendJson(res, 409, { error: `Group '${groupId}' already exists` });
+  }
+
+  keys.groups[groupId] = {
+    name,
+    createdAt: new Date().toISOString(),
+    createdBy: auth.userId,
+  };
+
+  saveApiKeys(keys);
+
+  sendJson(res, 201, { groupId, name, created: true });
+}
+
+/**
+ * GET /auth/groups — List groups.
+ * Owner sees all, admin/member sees their own groups.
+ */
+function handleListGroups(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  const keys = loadApiKeys();
+  const allGroups = keys.groups || {};
+
+  if (hasRole(auth, 'owner') || auth.groups.includes('*')) {
+    // Owner sees all groups
+    sendJson(res, 200, { groups: allGroups });
+  } else {
+    // Non-owner sees only their own groups
+    const filtered = {};
+    for (const gid of (auth.groups || [])) {
+      if (allGroups[gid]) filtered[gid] = allGroups[gid];
+    }
+    sendJson(res, 200, { groups: filtered });
+  }
+}
+
+/**
+ * POST /auth/update-key — Update a key's role or groups.
+ * Body: { apiKey: "vctx_...", role?: "admin", groups?: ["dev-team/chatai"] }
+ *
+ * Permissions:
+ *   owner — can update any key
+ *   admin — can update keys within their own groups (cannot escalate to admin/owner)
+ *   member/viewer — cannot update keys (403)
+ */
+async function handleUpdateKey(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  if (!hasRole(auth, 'admin')) {
+    return sendJson(res, 403, { error: 'Requires admin role or above to update keys' });
+  }
+
+  const body = await readBody(req);
+  const { apiKey } = body;
+  if (!apiKey) {
+    return sendJson(res, 400, { error: 'Required: apiKey' });
+  }
+
+  const keys = loadApiKeys();
+  const entry = keys.keys[apiKey];
+  if (!entry) {
+    return sendJson(res, 404, { error: 'API key not found' });
+  }
+
+  // Admin: check target key is within their groups
+  if (!hasRole(auth, 'owner')) {
+    const targetGroups = entry.groups || [];
+    const hasOverlap = targetGroups.some(g => canAccessGroup(auth, g));
+    if (!hasOverlap && targetGroups.length > 0) {
+      return sendJson(res, 403, { error: 'Cannot update keys outside your groups' });
+    }
+  }
+
+  // Update role if provided
+  if (body.role !== undefined) {
+    if (!ROLES.includes(body.role)) {
+      return sendJson(res, 400, { error: `Invalid role. Must be one of: ${ROLES.join(', ')}` });
+    }
+    // Admin cannot escalate to admin/owner
+    if (!hasRole(auth, 'owner') && ROLE_LEVEL[body.role] >= ROLE_LEVEL['admin']) {
+      return sendJson(res, 403, { error: 'Admin cannot assign admin or owner role. Requires owner.' });
+    }
+    entry.role = body.role;
+  }
+
+  // Update groups if provided
+  if (Array.isArray(body.groups)) {
+    // Admin cannot assign groups they don't belong to
+    if (!hasRole(auth, 'owner')) {
+      for (const g of body.groups) {
+        if (!canAccessGroup(auth, g)) {
+          return sendJson(res, 403, { error: `Cannot assign group '${g}'. You are not a member of this group.` });
+        }
+      }
+    }
+    entry.groups = body.groups;
+  }
+
+  entry.updatedAt = new Date().toISOString();
+  entry.updatedBy = auth.userId;
+  keys.keys[apiKey] = entry;
+  saveApiKeys(keys);
+
+  sendJson(res, 200, {
+    apiKey: apiKey.slice(0, 10) + '...',
+    userId: entry.userId,
+    name: entry.name,
+    role: entry.role,
+    groups: entry.groups,
+    updated: true,
+  });
+}
+
+/**
+ * GET /auth/keys — List all API keys.
+ * Owner sees all, admin sees keys in their groups.
+ * member/viewer cannot list keys (403).
+ */
+function handleListKeys(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  if (!hasRole(auth, 'admin')) {
+    return sendJson(res, 403, { error: 'Requires admin role or above to list keys' });
+  }
+
+  const keys = loadApiKeys();
+  const result = [];
+
+  for (const [key, entry] of Object.entries(keys.keys)) {
+    // Admin: only show keys in their groups
+    if (!hasRole(auth, 'owner')) {
+      const entryGroups = entry.groups || [];
+      const hasOverlap = entryGroups.some(g => canAccessGroup(auth, g));
+      if (!hasOverlap && entryGroups.length > 0) continue;
+    }
+    result.push({
+      apiKey: key.slice(0, 10) + '...',
+      userId: entry.userId,
+      name: entry.name,
+      role: entry.role || 'member',
+      groups: entry.groups || [],
+      createdAt: entry.createdAt,
+      createdBy: entry.createdBy,
+    });
+  }
+
+  sendJson(res, 200, { keys: result, count: result.length });
 }
 
 // ── Utilities ──────────────────────────────────────────────────
@@ -1096,19 +1394,23 @@ function doBackupAndMigrate() {
 
 // ── Request router ─────────────────────────────────────────────
 const ENDPOINTS_LIST = [
-  'POST   /store           — store context entry (body: {type,content,tags?,session?,namespace?})',
-  'GET    /recall?q=       — full-text search (cascading tiers, &namespace=project-name)',
-  'GET    /recent?n=       �� recent entries (cascading tiers, &namespace=project-name)',
-  'GET    /session/:id     — session entries',
-  'POST   /summarize       — compact old entries',
-  'GET    /stats           — database statistics',
-  'DELETE /prune           — remove old entries',
-  'GET    /health          — health check',
-  'POST   /tier/migrate    — trigger tier migration',
-  'GET    /tier/stats      — per-tier statistics',
-  'POST   /tier/config     — configure cloud provider',
-  'POST   /auth/create-key — create API key {userId, name}',
-  'GET    /auth/whoami     — show current user identity',
+  'POST   /store             — store context entry (body: {type,content,tags?,session?,namespace?,group?})',
+  'GET    /recall?q=         — full-text search (cascading tiers, &namespace=project-name)',
+  'GET    /recent?n=         — recent entries (cascading tiers, &namespace=project-name)',
+  'GET    /session/:id       — session entries',
+  'POST   /summarize         — compact old entries',
+  'GET    /stats             — database statistics',
+  'DELETE /prune             — remove old entries',
+  'GET    /health            — health check',
+  'POST   /tier/migrate      — trigger tier migration',
+  'GET    /tier/stats        — per-tier statistics',
+  'POST   /tier/config       — configure cloud provider',
+  'POST   /auth/create-key   — create API key {userId, name, role?, groups?}',
+  'GET    /auth/whoami       — show current user identity, role, groups',
+  'POST   /auth/create-group — create group (owner only) {groupId, name}',
+  'GET    /auth/groups       — list groups (owner=all, others=own)',
+  'POST   /auth/update-key   — update key role/groups {apiKey, role?, groups?}',
+  'GET    /auth/keys         — list API keys (admin+ only)',
 ];
 
 const server = createServer(async (req, res) => {
@@ -1118,7 +1420,7 @@ const server = createServer(async (req, res) => {
   // CORS (for any local tooling)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (method === 'OPTIONS') {
     res.writeHead(204);
@@ -1153,6 +1455,14 @@ const server = createServer(async (req, res) => {
       await handleCreateKey(req, res);
     } else if (method === 'GET' && path === '/auth/whoami') {
       handleWhoami(req, res);
+    } else if (method === 'POST' && path === '/auth/create-group') {
+      await handleCreateGroup(req, res);
+    } else if (method === 'GET' && path === '/auth/groups') {
+      handleListGroups(req, res);
+    } else if (method === 'POST' && path === '/auth/update-key') {
+      await handleUpdateKey(req, res);
+    } else if (method === 'GET' && path === '/auth/keys') {
+      handleListKeys(req, res);
     } else {
       sendJson(res, 404, {
         error: 'Not found',
