@@ -2134,6 +2134,28 @@ function formatBytes(bytes) {
   return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i];
 }
 
+// ── Batch embed (fills backlog, runs N entries per cycle) ─────
+async function batchEmbed(limit = 5) {
+  const model = pickModel('embed');
+  if (!model) return;
+  const rows = dbQuery(`SELECT id, content FROM entries WHERE embedding IS NULL ORDER BY id DESC LIMIT ${limit};`);
+  if (rows.length === 0) return;
+  let done = 0;
+  for (const row of rows) {
+    try {
+      const embedding = await ollamaEmbed(model, String(row.content).slice(0, 1000));
+      if (embedding && embedding.length > 0) {
+        dbExec(`UPDATE entries SET embedding = ${esc(JSON.stringify(embedding))} WHERE id = ${row.id};`);
+        vecUpsert(row.id, embedding);
+        done++;
+      }
+    } catch {
+      break; // Ollama likely overloaded, stop this cycle
+    }
+  }
+  if (done > 0) console.log(`[vcontext:embed] Batch: ${done}/${rows.length} entries embedded`);
+}
+
 // ── Periodic migration check (piggybacks on backup timer) ─────
 function doBackupAndMigrate() {
   doBackup();
@@ -2149,6 +2171,10 @@ function doBackupAndMigrate() {
   } catch {}
   // Recheck Ollama availability
   checkOllama();
+  // Batch embed: generate missing embeddings (up to 5 per cycle)
+  if (ollamaAvailable) {
+    batchEmbed(5).catch(() => {});
+  }
   // Quick migration check
   try {
     const moved = migrateRamToSsd();

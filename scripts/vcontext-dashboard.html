@@ -76,7 +76,7 @@
 </head>
 <body>
 <header>
-  <h1>AI OS Dashboard <span style="font-size:12px;color:var(--text-muted);font-weight:normal;">v1.8.2</span></h1>
+  <h1>AI OS Dashboard <span style="font-size:12px;color:var(--text-muted);font-weight:normal;">v1.9.0</span></h1>
   <div class="meta">
     <span id="status-indicator"><span class="status-dot status-yellow"></span>Loading...</span>
     &nbsp;|&nbsp; <span id="live-indicator" style="color:var(--green);">Connecting...</span>
@@ -89,6 +89,17 @@
   </div>
 </header>
 <div class="grid">
+  <!-- Search -->
+  <div class="card wide">
+    <h2>Search Context</h2>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <input id="search-input" type="text" placeholder="Search past context..." style="flex:1;padding:6px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px;" onkeydown="if(event.key==='Enter')doSearch()">
+      <button class="btn" onclick="doSearch()">FTS</button>
+      <button class="btn" onclick="doSearch('semantic')">Semantic</button>
+    </div>
+    <div id="search-results" style="margin-top:8px;font-size:12px;max-height:300px;overflow-y:auto;"></div>
+  </div>
+
   <!-- Health -->
   <div class="card">
     <h2>System Health</h2>
@@ -159,6 +170,47 @@ async function fetchJson(path) {
     const r = await fetch(API + path);
     return await r.json();
   } catch { return null; }
+}
+
+async function doSearch(mode) {
+  var q = document.getElementById('search-input').value.trim();
+  if (!q) return;
+  var el = document.getElementById('search-results');
+  el.innerHTML = '<div style="color:var(--text-muted);">Searching...</div>';
+
+  var url = mode === 'semantic'
+    ? API + '/search/semantic?q=' + encodeURIComponent(q) + '&limit=10&threshold=0.01'
+    : API + '/recall?q=' + encodeURIComponent(q) + '&limit=10';
+
+  try {
+    var r = await fetch(url);
+    var d = await r.json();
+    var results = d.results || [];
+    var engine = d.engine || (mode === 'semantic' ? 'semantic' : 'FTS');
+
+    if (results.length === 0) {
+      el.innerHTML = '<div style="color:var(--text-muted);">No results for "' + escapeHtml(q) + '" (' + engine + ')</div>';
+      return;
+    }
+
+    el.innerHTML = '<div style="color:var(--text-dim);margin-bottom:6px;">' + results.length + ' results via ' + engine + '</div>' +
+      results.map(function(r) {
+        var summary = summarizeContent(r.type, r.content);
+        var sim = r.similarity !== undefined ? ' sim=' + r.similarity : '';
+        var session = '';
+        try { session = JSON.parse(r.content).session_id || ''; } catch {}
+        var sessionShort = session ? session.slice(0, 8) : '';
+        return '<div class="entry">' +
+          '<span class="' + badgeClass(r.type) + '">' + escapeHtml(r.type) + '</span>' +
+          (sessionShort ? '<span style="margin-left:6px;font-size:10px;color:var(--text-dim);font-family:monospace;">' + sessionShort + '</span>' : '') +
+          (sim ? '<span style="margin-left:4px;font-size:10px;color:var(--purple);">' + sim + '</span>' : '') +
+          '<div style="margin-top:2px;">' + escapeHtml(summary) + '</div>' +
+          '<div class="entry-time">' + toJST(r.created_at) + '</div>' +
+        '</div>';
+      }).join('');
+  } catch(e) {
+    el.innerHTML = '<div style="color:var(--red);">Error: ' + escapeHtml(e.message) + '</div>';
+  }
 }
 
 function confirmAction(title, desc, path, method) {
