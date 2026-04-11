@@ -9,7 +9,6 @@
  */
 
 import { request } from 'node:http';
-import { readFileSync, writeFileSync } from 'node:fs';
 
 const VCONTEXT_PORT = process.env.VCONTEXT_PORT || '3150';
 const VCONTEXT_URL = `http://127.0.0.1:${VCONTEXT_PORT}`;
@@ -100,6 +99,30 @@ async function recordEvent(eventName) {
   });
 }
 
+// ── Summarize entry for recall display ───────────────────────────
+function summarize(entry) {
+  const raw = entry.content || '';
+  try {
+    const d = JSON.parse(raw);
+    const tool = d.tool_name || '';
+    const input = d.tool_input || {};
+    const prompt = d.prompt || d.content || d.message || '';
+    if (entry.type === 'user-prompt') return prompt.slice(0, 200);
+    if (entry.type === 'tool-use' || entry.type === 'pre-tool') {
+      const cmd = typeof input === 'string' ? input : (input.command || input.file_path || input.pattern || JSON.stringify(input));
+      return `${tool}: ${String(cmd).slice(0, 150)}`;
+    }
+    if (entry.type === 'subagent-start' || entry.type === 'subagent-stop') {
+      return `${d.subagent_type || 'agent'}: ${(d.description || '').slice(0, 100)}`;
+    }
+    if (entry.type === 'session-end') return 'Session ended';
+    if (entry.type === 'compact') return 'Context compacted';
+    return (tool || prompt || JSON.stringify(d)).slice(0, 150);
+  } catch {
+    return raw.slice(0, 150);
+  }
+}
+
 // ── Session recall ───────────────────────────────────────────────
 // Reads stdin to get session_id, then:
 //   1. Own session context (primary)
@@ -125,10 +148,7 @@ async function handleSessionRecall() {
   if (own.results && own.results.length > 0) {
     lines.push('### This Session');
     for (const r of own.results) {
-      const preview = r.content && r.content.length > 200
-        ? r.content.slice(0, 200) + '...'
-        : (r.content || '');
-      lines.push(`- [${r.type}] ${preview}`);
+      lines.push(`- [${r.type}] ${summarize(r)}`);
     }
     lines.push('');
   }
@@ -139,10 +159,8 @@ async function handleSessionRecall() {
     if (others.length > 0) {
       lines.push('### Other Sessions (recent)');
       for (const r of others.slice(0, 5)) {
-        const preview = r.content && r.content.length > 150
-          ? r.content.slice(0, 150) + '...'
-          : (r.content || '');
-        lines.push(`- [${r.type}] (${r.session || '?'}) ${preview}`);
+        const sid = (r.session || '?').slice(0, 8);
+        lines.push(`- [${r.type}] (${sid}) ${summarize(r)}`);
       }
       lines.push('');
     }

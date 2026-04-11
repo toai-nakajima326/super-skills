@@ -7,6 +7,11 @@ HOOKS="/Users/mitsuru_nakajima/skills/scripts/vcontext-hooks.js"
 LOG="/tmp/vcontext-hook-debug.log"
 CMD="${1:-tool-use}"
 
+# Rotate log if > 5MB
+if [ -f "$LOG" ] && [ "$(stat -f%z "$LOG" 2>/dev/null || echo 0)" -gt 5242880 ]; then
+  mv "$LOG" "${LOG}.old" 2>/dev/null
+fi
+
 # Read all of stdin (non-blocking: if no stdin, skip)
 STDIN_DATA=""
 if [ ! -t 0 ]; then
