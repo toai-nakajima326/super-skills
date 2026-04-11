@@ -40,6 +40,7 @@ const BACKUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const WARN_SIZE_BYTES = 3 * 1024 * 1024 * 1024;     // 3 GB
 const MAX_SIZE_BYTES = 3.5 * 1024 * 1024 * 1024;     // 3.5 GB
 const VALID_TYPES = ['conversation', 'decision', 'observation', 'code', 'error'];
+const NAMESPACE_TAG_PREFIX = 'project:';
 const RAM_TO_SSD_DAYS = 7;
 const SSD_TO_CLOUD_DAYS = 30;
 
@@ -472,7 +473,7 @@ async function handleStore(req, res) {
   }
 
   const body = await readBody(req);
-  const { type, content, tags, session } = body;
+  const { type, content, tags, session, namespace } = body;
 
   if (!type || !content) {
     return sendJson(res, 400, { error: 'Missing required fields: type, content' });
@@ -481,7 +482,13 @@ async function handleStore(req, res) {
     return sendJson(res, 400, { error: `Invalid type. Must be one of: ${VALID_TYPES.join(', ')}` });
   }
 
-  const tagsJson = JSON.stringify(tags || []);
+  // Auto-inject namespace as a tag (project:xxx)
+  const tagList = Array.isArray(tags) ? [...tags] : [];
+  if (namespace) {
+    const nsTag = NAMESPACE_TAG_PREFIX + namespace;
+    if (!tagList.includes(nsTag)) tagList.push(nsTag);
+  }
+  const tagsJson = JSON.stringify(tagList);
   const tokenEst = estimateTokens(content);
 
   const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
@@ -521,11 +528,12 @@ function handleRecall(req, res) {
 
   const limit = Math.min(parseInt(params.limit) || 10, 100);
   const type = params.type;
+  const namespace = params.namespace; // filter by project:xxx
   const allResults = [];
   const seenIds = new Map(); // created_at+content → true (for cross-tier dedup)
 
   // --- Tier 1: RAM ---
-  const ramResults = searchTier(DB_PATH, q, type, limit);
+  const ramResults = searchTier(DB_PATH, q, type, limit, namespace);
   for (const row of ramResults) {
     row._tier = 'ram';
     const key = `${row.created_at}||${row.type}||${String(row.content).slice(0, 100)}`;
@@ -538,7 +546,7 @@ function handleRecall(req, res) {
   // --- Tier 2: SSD (if still need more results) ---
   if (allResults.length < limit) {
     const ssdLimit = limit - allResults.length;
-    const ssdResults = searchTier(SSD_DB_PATH, q, type, ssdLimit);
+    const ssdResults = searchTier(SSD_DB_PATH, q, type, ssdLimit, namespace);
     const promoted = [];
     for (const row of ssdResults) {
       const key = `${row.created_at}||${row.type}||${String(row.content).slice(0, 100)}`;
@@ -582,33 +590,23 @@ function handleRecall(req, res) {
 /**
  * Search a single tier's database using FTS5, with LIKE fallback.
  */
-function searchTier(dbPath, q, type, limit) {
+function searchTier(dbPath, q, type, limit, namespace) {
   if (!existsSync(dbPath)) return [];
-  let sql;
-  if (type && VALID_TYPES.includes(type)) {
-    sql = `SELECT e.*, rank
-      FROM entries_fts fts
-      JOIN entries e ON e.id = fts.rowid
-      WHERE entries_fts MATCH ${esc(q)}
-        AND e.type = ${esc(type)}
-      ORDER BY rank * 0.7 + (julianday(e.created_at) - julianday('2024-01-01')) * 0.3
-      LIMIT ${limit};`;
-  } else {
-    sql = `SELECT e.*, rank
-      FROM entries_fts fts
-      JOIN entries e ON e.id = fts.rowid
-      WHERE entries_fts MATCH ${esc(q)}
-      ORDER BY rank * 0.7 + (julianday(e.created_at) - julianday('2024-01-01')) * 0.3
-      LIMIT ${limit};`;
-  }
+  const typeFilter = type && VALID_TYPES.includes(type) ? ` AND e.type = ${esc(type)}` : '';
+  const nsFilter = namespace ? ` AND e.tags LIKE ${esc('%project:' + namespace + '%')}` : '';
+
+  const ftsSql = `SELECT e.*, rank
+    FROM entries_fts fts
+    JOIN entries e ON e.id = fts.rowid
+    WHERE entries_fts MATCH ${esc(q)}${typeFilter}${nsFilter}
+    ORDER BY rank * 0.7 + (julianday(e.created_at) - julianday('2024-01-01')) * 0.3
+    LIMIT ${limit};`;
 
   try {
-    return dbQuery(sql, dbPath);
+    return dbQuery(ftsSql, dbPath);
   } catch {
     // FTS query syntax error — fall back to LIKE search
-    const likeSql = type
-      ? `SELECT * FROM entries WHERE content LIKE ${esc('%' + q + '%')} AND type = ${esc(type)} ORDER BY created_at DESC LIMIT ${limit};`
-      : `SELECT * FROM entries WHERE content LIKE ${esc('%' + q + '%')} ORDER BY created_at DESC LIMIT ${limit};`;
+    const likeSql = `SELECT * FROM entries WHERE content LIKE ${esc('%' + q + '%')}${typeFilter}${nsFilter} ORDER BY created_at DESC LIMIT ${limit};`;
     try {
       return dbQuery(likeSql, dbPath);
     } catch {
@@ -625,11 +623,12 @@ function handleRecent(req, res) {
   const params = parseQuery(req.url);
   const n = Math.min(parseInt(params.n) || 20, 200);
   const type = params.type;
+  const namespace = params.namespace;
   const allResults = [];
   const seenIds = new Map();
 
   // --- Tier 1: RAM ---
-  const ramRows = recentFromTier(DB_PATH, type, n);
+  const ramRows = recentFromTier(DB_PATH, type, n, namespace);
   for (const row of ramRows) {
     row._tier = 'ram';
     const key = `${row.created_at}||${row.type}||${String(row.content).slice(0, 100)}`;
@@ -641,7 +640,7 @@ function handleRecent(req, res) {
   // --- Tier 2: SSD ---
   if (allResults.length < n) {
     const ssdLimit = n - allResults.length;
-    const ssdRows = recentFromTier(SSD_DB_PATH, type, ssdLimit);
+    const ssdRows = recentFromTier(SSD_DB_PATH, type, ssdLimit, namespace);
     const promoted = [];
     for (const row of ssdRows) {
       const key = `${row.created_at}||${row.type}||${String(row.content).slice(0, 100)}`;
@@ -674,14 +673,12 @@ function handleRecent(req, res) {
 /**
  * Query recent entries from a specific tier DB.
  */
-function recentFromTier(dbPath, type, limit) {
+function recentFromTier(dbPath, type, limit, namespace) {
   if (!existsSync(dbPath)) return [];
-  let sql;
-  if (type && VALID_TYPES.includes(type)) {
-    sql = `SELECT * FROM entries WHERE type = ${esc(type)} ORDER BY created_at DESC LIMIT ${limit};`;
-  } else {
-    sql = `SELECT * FROM entries ORDER BY created_at DESC LIMIT ${limit};`;
-  }
+  const typeFilter = type && VALID_TYPES.includes(type) ? ` AND type = ${esc(type)}` : '';
+  const nsFilter = namespace ? ` AND tags LIKE ${esc('%project:' + namespace + '%')}` : '';
+  const where = (typeFilter || nsFilter) ? ` WHERE 1=1${typeFilter}${nsFilter}` : '';
+  const sql = `SELECT * FROM entries${where} ORDER BY created_at DESC LIMIT ${limit};`;
   try {
     return dbQuery(sql, dbPath);
   } catch {
@@ -1007,9 +1004,9 @@ function doBackupAndMigrate() {
 
 // ── Request router ─────────────────────────────────────────────
 const ENDPOINTS_LIST = [
-  'POST   /store           — store context entry',
-  'GET    /recall?q=       — full-text search (cascading tiers)',
-  'GET    /recent?n=       — recent entries (cascading tiers)',
+  'POST   /store           — store context entry (body: {type,content,tags?,session?,namespace?})',
+  'GET    /recall?q=       — full-text search (cascading tiers, &namespace=project-name)',
+  'GET    /recent?n=       �� recent entries (cascading tiers, &namespace=project-name)',
   'GET    /session/:id     — session entries',
   'POST   /summarize       — compact old entries',
   'GET    /stats           — database statistics',
