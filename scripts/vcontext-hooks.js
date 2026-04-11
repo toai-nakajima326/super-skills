@@ -188,6 +188,106 @@ function readStdin() {
   });
 }
 
+// ── Session recall (inject past context at session start) ─────
+
+function get(path) {
+  return new Promise((resolve) => {
+    const req = request(
+      `${VCONTEXT_URL}${path}`,
+      { method: 'GET', timeout: 5000 },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(Buffer.concat(chunks).toString()));
+          } catch {
+            resolve({ results: [] });
+          }
+        });
+      }
+    );
+    req.on('error', () => resolve({ results: [] }));
+    req.on('timeout', () => { req.destroy(); resolve({ results: [] }); });
+    req.end();
+  });
+}
+
+/**
+ * Session start: recall recent context and output as text for Claude to read.
+ * Called by PreToolUse hook on first tool use, or manually.
+ * Outputs markdown to stdout — Claude Code injects this into the conversation.
+ */
+async function handleSessionRecall() {
+  const namespace = process.env.VCONTEXT_NAMESPACE || '';
+  const nsParam = namespace ? `&namespace=${namespace}` : '';
+
+  // Get recent entries (all types)
+  const recent = await get(`/recent?n=15${nsParam}`);
+  // Get recent decisions specifically
+  const decisions = await get(`/recent?n=10&type=decision${nsParam}`);
+  // Get recent errors
+  const errors = await get(`/recent?n=5&type=error${nsParam}`);
+
+  const lines = [];
+  lines.push('## Virtual Context — Session Recall');
+  lines.push('');
+
+  if (decisions.results && decisions.results.length > 0) {
+    lines.push('### Recent Decisions');
+    for (const d of decisions.results) {
+      const tags = Array.isArray(d.tags) ? d.tags.join(', ') : '';
+      lines.push(`- [${d.created_at}] ${d.content}${tags ? ` (${tags})` : ''}`);
+    }
+    lines.push('');
+  }
+
+  if (errors.results && errors.results.length > 0) {
+    lines.push('### Recent Errors');
+    for (const e of errors.results) {
+      lines.push(`- [${e.created_at}] ${e.content}`);
+    }
+    lines.push('');
+  }
+
+  if (recent.results && recent.results.length > 0) {
+    lines.push('### Recent Activity');
+    for (const r of recent.results) {
+      const preview = r.content.length > 120 ? r.content.slice(0, 120) + '...' : r.content;
+      lines.push(`- [${r.type}] ${preview}`);
+    }
+    lines.push('');
+  }
+
+  const stats = await get('/tier/stats');
+  if (stats.ram) {
+    lines.push(`### Memory: RAM ${stats.ram.entries} entries (${stats.ram.size}) | SSD ${stats.ssd?.entries || 0} entries (${stats.ssd?.size || '0'}) | Cloud ${stats.cloud?.configured ? 'connected' : 'not configured'}`);
+  }
+
+  const output = lines.join('\n');
+  if (output.trim().length > 50) {
+    process.stdout.write(output);
+  }
+}
+
+/**
+ * Store a session summary when session ends.
+ * Usage: node vcontext-hooks.js session-end "summary text"
+ */
+async function handleSessionEnd(summary) {
+  const content = summary || `Session ${SESSION_ID} ended`;
+  const result = await store('conversation', content, ['session-end', 'auto']);
+  if (!summary) {
+    // Auto-generate summary from recent activity
+    const recent = await get(`/recent?n=5&session=${SESSION_ID}`);
+    if (recent.results && recent.results.length > 0) {
+      const types = recent.results.map(r => r.type);
+      const autoSummary = `Session had ${recent.results.length} entries: ${[...new Set(types)].join(', ')}`;
+      await store('conversation', autoSummary, ['session-summary', 'auto']);
+    }
+  }
+}
+
 // ── Main ───────────────────────────────────────────────────────
 const [command, ...args] = process.argv.slice(2);
 
@@ -197,6 +297,12 @@ switch (command) {
     break;
   case 'notification':
     handleNotification().catch(() => process.exit(0));
+    break;
+  case 'session-recall':
+    handleSessionRecall().catch(() => process.exit(0));
+    break;
+  case 'session-end':
+    handleSessionEnd(args[0]).catch(() => process.exit(0));
     break;
   case 'store-conversation':
     handleStoreConversation(args[0]).catch(() => process.exit(0));
