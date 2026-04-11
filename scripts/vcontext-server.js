@@ -21,6 +21,10 @@
  *   POST   /tier/migrate    — manually trigger tier migration
  *   GET    /tier/stats      — per-tier statistics
  *   POST   /tier/config     — configure cloud provider
+ *   POST   /resolve         — resolve conflicting decisions
+ *   POST   /consult         — create multi-model consultation
+ *   POST   /consult/:id/response — submit model response
+ *   GET    /consult/:id     — check consultation status
  */
 
 import { createServer } from 'node:http';
@@ -202,6 +206,28 @@ function migrateRamSchema() {
       console.log('[vcontext] Added tier column to RAM DB');
     }
 
+    // Decision resolution metadata columns
+    if (!colNames.includes('reasoning')) {
+      dbExec("ALTER TABLE entries ADD COLUMN reasoning TEXT;");
+      console.log('[vcontext] Added reasoning column to RAM DB');
+    }
+    if (!colNames.includes('conditions')) {
+      dbExec("ALTER TABLE entries ADD COLUMN conditions TEXT;");
+      console.log('[vcontext] Added conditions column to RAM DB');
+    }
+    if (!colNames.includes('supersedes')) {
+      dbExec("ALTER TABLE entries ADD COLUMN supersedes INTEGER;");
+      console.log('[vcontext] Added supersedes column to RAM DB');
+    }
+    if (!colNames.includes('confidence')) {
+      dbExec("ALTER TABLE entries ADD COLUMN confidence TEXT DEFAULT 'medium';");
+      console.log('[vcontext] Added confidence column to RAM DB');
+    }
+    if (!colNames.includes('status')) {
+      dbExec("ALTER TABLE entries ADD COLUMN status TEXT DEFAULT 'active';");
+      console.log('[vcontext] Added status column to RAM DB');
+    }
+
     // Back-fill last_accessed for existing rows that have NULL
     dbExec("UPDATE entries SET last_accessed = created_at WHERE last_accessed IS NULL;");
   } catch (e) {
@@ -226,7 +252,12 @@ CREATE TABLE IF NOT EXISTS entries (
   created_at TEXT DEFAULT (datetime('now')),
   last_accessed TEXT DEFAULT (datetime('now')),
   access_count INTEGER DEFAULT 0,
-  tier TEXT DEFAULT 'ssd'
+  tier TEXT DEFAULT 'ssd',
+  reasoning TEXT,
+  conditions TEXT,
+  supersedes INTEGER,
+  confidence TEXT DEFAULT 'medium',
+  status TEXT DEFAULT 'active'
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
   content,
@@ -260,6 +291,22 @@ END;
       }
       if (!colNames.includes('tier')) {
         dbExec("ALTER TABLE entries ADD COLUMN tier TEXT DEFAULT 'ssd';", SSD_DB_PATH);
+      }
+      // Decision resolution metadata columns
+      if (!colNames.includes('reasoning')) {
+        dbExec("ALTER TABLE entries ADD COLUMN reasoning TEXT;", SSD_DB_PATH);
+      }
+      if (!colNames.includes('conditions')) {
+        dbExec("ALTER TABLE entries ADD COLUMN conditions TEXT;", SSD_DB_PATH);
+      }
+      if (!colNames.includes('supersedes')) {
+        dbExec("ALTER TABLE entries ADD COLUMN supersedes INTEGER;", SSD_DB_PATH);
+      }
+      if (!colNames.includes('confidence')) {
+        dbExec("ALTER TABLE entries ADD COLUMN confidence TEXT DEFAULT 'medium';", SSD_DB_PATH);
+      }
+      if (!colNames.includes('status')) {
+        dbExec("ALTER TABLE entries ADD COLUMN status TEXT DEFAULT 'active';", SSD_DB_PATH);
       }
     } catch (e) {
       console.error('[vcontext] SSD schema migration failed:', e.message);
@@ -389,9 +436,10 @@ function migrateRamToSsd() {
     for (const row of staleRows) {
       // Insert into SSD DB
       dbExec(
-        `INSERT INTO entries (type, content, tags, session, token_estimate, created_at, last_accessed, access_count, tier)
+        `INSERT INTO entries (type, content, tags, session, token_estimate, created_at, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status)
          VALUES (${esc(row.type)}, ${esc(row.content)}, ${esc(row.tags)}, ${esc(row.session)}, ${row.token_estimate || 0},
-                 ${esc(row.created_at)}, ${esc(row.last_accessed)}, ${row.access_count || 0}, 'ssd');`,
+                 ${esc(row.created_at)}, ${esc(row.last_accessed)}, ${row.access_count || 0}, 'ssd',
+                 ${esc(row.reasoning || null)}, ${esc(row.conditions || null)}, ${row.supersedes != null ? row.supersedes : 'NULL'}, ${esc(row.confidence || 'medium')}, ${esc(row.status || 'active')});`,
         SSD_DB_PATH,
       );
     }
@@ -455,9 +503,10 @@ function promoteToRam(rows, sourceTier) {
       if (existing.length > 0) continue;
 
       dbExec(
-        `INSERT INTO entries (type, content, tags, session, token_estimate, created_at, last_accessed, access_count, tier)
+        `INSERT INTO entries (type, content, tags, session, token_estimate, created_at, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status)
          VALUES (${esc(row.type)}, ${esc(row.content)}, ${esc(row.tags)}, ${esc(row.session)}, ${row.token_estimate || 0},
-                 ${esc(row.created_at)}, datetime('now'), ${(row.access_count || 0) + 1}, 'ram');`,
+                 ${esc(row.created_at)}, datetime('now'), ${(row.access_count || 0) + 1}, 'ram',
+                 ${esc(row.reasoning || null)}, ${esc(row.conditions || null)}, ${row.supersedes != null ? row.supersedes : 'NULL'}, ${esc(row.confidence || 'medium')}, ${esc(row.status || 'active')});`,
       );
     }
     console.log(`[vcontext:tier] Promoted ${rows.length} entries from ${sourceTier} → RAM`);
@@ -522,7 +571,7 @@ function parseTags(rows) {
 
 /**
  * POST /store
- * Body: { type, content, tags?, session? }
+ * Body: { type, content, tags?, session?, reasoning?, conditions?, supersedes?, confidence?, status? }
  */
 async function handleStore(req, res) {
   // Auth check
@@ -541,6 +590,12 @@ async function handleStore(req, res) {
 
   const body = await readBody(req);
   const { type, content, tags, session, namespace } = body;
+  // Decision resolution metadata (all optional)
+  const reasoning = body.reasoning || null;
+  const conditions = body.conditions || null;
+  const supersedes = (body.supersedes != null && Number.isFinite(Number(body.supersedes))) ? Number(body.supersedes) : null;
+  const confidence = ['high', 'medium', 'low'].includes(body.confidence) ? body.confidence : 'medium';
+  const status = ['active', 'deprecated', 'temporary', 'experimental'].includes(body.status) ? body.status : 'active';
 
   if (!type || !content) {
     return sendJson(res, 400, { error: 'Missing required fields: type, content' });
@@ -572,7 +627,7 @@ async function handleStore(req, res) {
   const tokenEst = estimateTokens(content);
 
   const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  const sql = `INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES (${esc(type)}, ${esc(content)}, ${esc(tagsJson)}, ${esc(session || null)}, ${tokenEst}, datetime('now'), 0, 'ram');`;
+  const sql = `INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status) VALUES (${esc(type)}, ${esc(content)}, ${esc(tagsJson)}, ${esc(session || null)}, ${tokenEst}, datetime('now'), 0, 'ram', ${esc(reasoning)}, ${esc(conditions)}, ${supersedes === null ? 'NULL' : supersedes}, ${esc(confidence)}, ${esc(status)});`;
   dbExec(sql);
 
   // Get the inserted row
@@ -581,7 +636,7 @@ async function handleStore(req, res) {
 
   // Write-through: immediately sync to SSD for crash safety
   try {
-    const ssdSql = `INSERT OR REPLACE INTO entries (type, content, tags, session, token_estimate, created_at, last_accessed, access_count, tier) VALUES (${esc(type)}, ${esc(content)}, ${esc(tagsJson)}, ${esc(session || null)}, ${tokenEst}, ${esc(entry.created_at || now)}, ${esc(entry.created_at || now)}, 0, 'ssd');`;
+    const ssdSql = `INSERT OR REPLACE INTO entries (type, content, tags, session, token_estimate, created_at, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status) VALUES (${esc(type)}, ${esc(content)}, ${esc(tagsJson)}, ${esc(session || null)}, ${tokenEst}, ${esc(entry.created_at || now)}, ${esc(entry.created_at || now)}, 0, 'ssd', ${esc(reasoning)}, ${esc(conditions)}, ${supersedes === null ? 'NULL' : supersedes}, ${esc(confidence)}, ${esc(status)});`;
     dbExec(ssdSql, SSD_DB_PATH);
   } catch (e) {
     // SSD write failure is non-fatal, log but don't block
@@ -1366,6 +1421,356 @@ function handleListKeys(req, res) {
   sendJson(res, 200, { keys: result, count: result.length });
 }
 
+// ── Consultations storage (in-memory, does not persist across restarts) ──
+const consultations = new Map();
+
+// ── Decision Resolution handlers ─────────────────────────────
+
+/**
+ * POST /resolve
+ * Body: { query, context, candidates? }
+ * Evaluates conflicting decisions and provides resolution prompts + heuristic suggestions.
+ */
+async function handleResolve(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  const body = await readBody(req);
+  const { query, context } = body;
+  if (!query) {
+    return sendJson(res, 400, { error: 'Missing required field: query' });
+  }
+
+  let candidates = [];
+
+  if (Array.isArray(body.candidates) && body.candidates.length > 0) {
+    // Fetch specific entries by ID from RAM, then SSD
+    for (const id of body.candidates) {
+      const numId = Number(id);
+      if (!Number.isFinite(numId)) continue;
+      let rows = dbQuery(`SELECT * FROM entries WHERE id = ${numId};`);
+      if (rows.length > 0) {
+        rows[0]._tier = 'ram';
+        candidates.push(rows[0]);
+        continue;
+      }
+      // Try SSD
+      if (existsSync(SSD_DB_PATH)) {
+        try {
+          rows = dbQuery(`SELECT * FROM entries WHERE id = ${numId};`, SSD_DB_PATH);
+          if (rows.length > 0) {
+            rows[0]._tier = 'ssd';
+            candidates.push(rows[0]);
+          }
+        } catch { /* ignore */ }
+      }
+    }
+  } else {
+    // Search by query (recall-style) to find potential matches
+    const accessibleGroups = getAccessibleGroups(auth);
+    const ramResults = searchTier(DB_PATH, query, 'decision', 20, null, null, accessibleGroups);
+    for (const r of ramResults) r._tier = 'ram';
+    candidates.push(...ramResults);
+
+    if (candidates.length < 20 && existsSync(SSD_DB_PATH)) {
+      const ssdResults = searchTier(SSD_DB_PATH, query, 'decision', 20 - candidates.length, null, null, accessibleGroups);
+      for (const r of ssdResults) r._tier = 'ssd';
+      candidates.push(...ssdResults);
+    }
+  }
+
+  // Filter to only "decision" type entries
+  candidates = candidates.filter(c => c.type === 'decision');
+  parseTags(candidates);
+
+  // 0-1 results: no conflict
+  if (candidates.length <= 1) {
+    return sendJson(res, 200, {
+      conflict: false,
+      candidates,
+      resolution_prompt: null,
+      suggestion: null,
+      note: candidates.length === 0 ? 'No decision entries found' : 'Single decision, no conflict',
+    });
+  }
+
+  // 2+ results: build resolution prompt
+  const prompt = `Given these conflicting decisions and the current context, determine which one applies.
+
+Current context: ${context || 'not provided'}
+Question: ${query}
+
+Decisions:
+${candidates.map((c, i) => `
+[${i + 1}] (${c.created_at}, ${c.status || 'active'}, confidence: ${c.confidence || 'medium'})
+Content: ${c.content}
+Reasoning: ${c.reasoning || 'not recorded'}
+Conditions: ${c.conditions || 'not recorded'}
+Supersedes: ${c.supersedes ? 'entry #' + c.supersedes : 'none'}
+`).join('\n')}
+
+Respond in JSON:
+{
+  "chosen": <number 1-N>,
+  "reasoning": "<why this one applies to the current context>",
+  "confidence": "high|medium|low",
+  "note": "<any caveats or conditions>"
+}`;
+
+  // Build heuristic suggestions
+  const suggestion = {};
+
+  // By recency
+  const byRecency = [...candidates].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+  suggestion.by_recency = { id: byRecency[0].id, reason: 'most recent' };
+
+  // By confidence
+  const confOrder = { high: 3, medium: 2, low: 1 };
+  const byConf = [...candidates].sort((a, b) => (confOrder[b.confidence] || 2) - (confOrder[a.confidence] || 2));
+  suggestion.by_confidence = { id: byConf[0].id, reason: byConf[0].confidence === byConf[1]?.confidence ? 'tied confidence' : 'higher confidence' };
+
+  // By status (active > experimental > temporary > deprecated)
+  const statusOrder = { active: 4, experimental: 3, temporary: 2, deprecated: 1 };
+  const byStatus = [...candidates].sort((a, b) => (statusOrder[b.status] || 4) - (statusOrder[a.status] || 4));
+  suggestion.by_status = { id: byStatus[0].id, reason: `${byStatus[0].status || 'active'} vs ${byStatus[byStatus.length - 1].status || 'active'}` };
+
+  // By supersedes chain
+  const superseders = candidates.filter(c => c.supersedes != null);
+  if (superseders.length > 0) {
+    const latest = superseders[superseders.length - 1];
+    suggestion.by_supersedes = { id: latest.id, reason: `explicitly supersedes #${latest.supersedes}` };
+  } else {
+    suggestion.by_supersedes = { id: null, reason: 'no supersedes relationships found' };
+  }
+
+  sendJson(res, 200, {
+    conflict: true,
+    candidates,
+    resolution_prompt: prompt,
+    suggestion,
+  });
+}
+
+/**
+ * POST /consult
+ * Body: { query, context, models, candidates? }
+ * Creates a consultation package for multiple AI models to evaluate conflicting decisions.
+ */
+async function handleConsult(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  const body = await readBody(req);
+  const { query, context, models } = body;
+  if (!query) {
+    return sendJson(res, 400, { error: 'Missing required field: query' });
+  }
+  if (!Array.isArray(models) || models.length === 0) {
+    return sendJson(res, 400, { error: 'Missing required field: models (array of model names)' });
+  }
+
+  // Gather candidates (same logic as /resolve)
+  let candidates = [];
+
+  if (Array.isArray(body.candidates) && body.candidates.length > 0) {
+    for (const id of body.candidates) {
+      const numId = Number(id);
+      if (!Number.isFinite(numId)) continue;
+      let rows = dbQuery(`SELECT * FROM entries WHERE id = ${numId};`);
+      if (rows.length > 0) {
+        rows[0]._tier = 'ram';
+        candidates.push(rows[0]);
+        continue;
+      }
+      if (existsSync(SSD_DB_PATH)) {
+        try {
+          rows = dbQuery(`SELECT * FROM entries WHERE id = ${numId};`, SSD_DB_PATH);
+          if (rows.length > 0) {
+            rows[0]._tier = 'ssd';
+            candidates.push(rows[0]);
+          }
+        } catch { /* ignore */ }
+      }
+    }
+  } else {
+    const accessibleGroups = getAccessibleGroups(auth);
+    const ramResults = searchTier(DB_PATH, query, 'decision', 20, null, null, accessibleGroups);
+    for (const r of ramResults) r._tier = 'ram';
+    candidates.push(...ramResults);
+
+    if (candidates.length < 20 && existsSync(SSD_DB_PATH)) {
+      const ssdResults = searchTier(SSD_DB_PATH, query, 'decision', 20 - candidates.length, null, null, accessibleGroups);
+      for (const r of ssdResults) r._tier = 'ssd';
+      candidates.push(...ssdResults);
+    }
+  }
+
+  candidates = candidates.filter(c => c.type === 'decision');
+  parseTags(candidates);
+
+  const consultationId = `consult_${Date.now()}`;
+
+  // Build model-specific prompt packages
+  const candidateBlock = candidates.map((c, i) => `
+[${i + 1}] (ID: ${c.id}, ${c.created_at}, ${c.status || 'active'}, confidence: ${c.confidence || 'medium'})
+Content: ${c.content}
+Reasoning: ${c.reasoning || 'not recorded'}
+Conditions: ${c.conditions || 'not recorded'}
+Supersedes: ${c.supersedes ? 'entry #' + c.supersedes : 'none'}
+`).join('\n');
+
+  const packages = {};
+  for (const model of models) {
+    const modelName = String(model).toLowerCase();
+    const prompt = `You are evaluating conflicting decisions stored in a virtual context system.
+
+Context: ${context || 'not provided'}
+Question: ${query}
+
+Candidate decisions:
+${candidateBlock}
+
+Analyze each candidate and determine which best applies to the current context. Consider recency, confidence level, active/deprecated status, and supersedes chains.
+
+Respond in JSON:
+{
+  "chosen": <number 1-N corresponding to candidate index>,
+  "reasoning": "<your analysis of why this decision best applies>",
+  "confidence": "high|medium|low"
+}`;
+
+    packages[modelName] = {
+      url: `Use via ${modelName === 'claude' ? 'Claude Code session' : modelName === 'codex' ? 'Codex session' : modelName + ' session'}`,
+      prompt,
+      instructions: `Run this prompt in a ${modelName} session and POST the result back to /consult/${consultationId}/response with body: { "model": "${modelName}", "chosen": <N>, "reasoning": "...", "confidence": "high|medium|low" }`,
+    };
+  }
+
+  // Store consultation
+  consultations.set(consultationId, {
+    consultationId,
+    query,
+    context: context || null,
+    models,
+    candidates,
+    packages,
+    responses: {},
+    consensus: null,
+    status: 'pending_responses',
+    createdAt: new Date().toISOString(),
+    createdBy: auth.userId,
+  });
+
+  sendJson(res, 201, {
+    consultation_id: consultationId,
+    packages,
+    candidates,
+    status: 'pending_responses',
+  });
+}
+
+/**
+ * POST /consult/:id/response
+ * Body: { model, chosen, reasoning, confidence }
+ * Collect a model's response to a consultation.
+ */
+async function handleConsultResponse(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  const path = parsePath(req.url);
+  // Extract consultation ID: /consult/<id>/response
+  const parts = path.split('/');
+  // parts: ['', 'consult', '<id>', 'response']
+  const consultId = parts[2];
+
+  if (!consultId || !consultations.has(consultId)) {
+    return sendJson(res, 404, { error: 'Consultation not found' });
+  }
+
+  const body = await readBody(req);
+  const { model, chosen, reasoning, confidence } = body;
+  if (!model || chosen == null) {
+    return sendJson(res, 400, { error: 'Missing required fields: model, chosen' });
+  }
+
+  const consultation = consultations.get(consultId);
+  consultation.responses[String(model).toLowerCase()] = {
+    chosen: Number(chosen),
+    reasoning: reasoning || null,
+    confidence: confidence || 'medium',
+    respondedAt: new Date().toISOString(),
+    respondedBy: auth.userId,
+  };
+
+  // Calculate consensus and status
+  const responseCount = Object.keys(consultation.responses).length;
+  const totalModels = consultation.models.length;
+
+  if (responseCount >= totalModels) {
+    consultation.status = 'complete';
+  } else {
+    consultation.status = 'partial';
+  }
+
+  // Check for consensus (majority agreement on chosen)
+  const votes = {};
+  for (const resp of Object.values(consultation.responses)) {
+    const key = String(resp.chosen);
+    votes[key] = (votes[key] || 0) + 1;
+  }
+  const maxVoteEntry = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
+  if (maxVoteEntry && maxVoteEntry[1] > responseCount / 2) {
+    consultation.consensus = {
+      chosen: Number(maxVoteEntry[0]),
+      agreement: `${maxVoteEntry[1]}/${responseCount}`,
+    };
+  } else {
+    consultation.consensus = null;
+  }
+
+  consultations.set(consultId, consultation);
+
+  sendJson(res, 200, {
+    consultation_id: consultId,
+    model: String(model).toLowerCase(),
+    accepted: true,
+    status: consultation.status,
+    consensus: consultation.consensus,
+  });
+}
+
+/**
+ * GET /consult/:id
+ * Check consultation status and aggregated results.
+ */
+function handleConsultStatus(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  const path = parsePath(req.url);
+  // /consult/<id>
+  const parts = path.split('/');
+  const consultId = parts[2];
+
+  if (!consultId || !consultations.has(consultId)) {
+    return sendJson(res, 404, { error: 'Consultation not found' });
+  }
+
+  const consultation = consultations.get(consultId);
+
+  sendJson(res, 200, {
+    consultation_id: consultation.consultationId,
+    query: consultation.query,
+    context: consultation.context,
+    candidates: consultation.candidates,
+    responses: consultation.responses,
+    consensus: consultation.consensus,
+    status: consultation.status,
+    createdAt: consultation.createdAt,
+  });
+}
+
 // ── Utilities ──────────────────────────────────────────────────
 function formatBytes(bytes) {
   if (bytes === 0) return '0 B';
@@ -1394,7 +1799,7 @@ function doBackupAndMigrate() {
 
 // ── Request router ─────────────────────────────────────────────
 const ENDPOINTS_LIST = [
-  'POST   /store             — store context entry (body: {type,content,tags?,session?,namespace?,group?})',
+  'POST   /store             — store context entry (body: {type,content,tags?,session?,namespace?,group?,reasoning?,conditions?,supersedes?,confidence?,status?})',
   'GET    /recall?q=         — full-text search (cascading tiers, &namespace=project-name)',
   'GET    /recent?n=         — recent entries (cascading tiers, &namespace=project-name)',
   'GET    /session/:id       — session entries',
@@ -1411,6 +1816,10 @@ const ENDPOINTS_LIST = [
   'GET    /auth/groups       — list groups (owner=all, others=own)',
   'POST   /auth/update-key   — update key role/groups {apiKey, role?, groups?}',
   'GET    /auth/keys         — list API keys (admin+ only)',
+  'POST   /resolve           — resolve conflicting decisions {query, context?, candidates?}',
+  'POST   /consult           — create multi-model consultation {query, context?, models, candidates?}',
+  'POST   /consult/:id/response — submit model response to consultation {model, chosen, reasoning?, confidence?}',
+  'GET    /consult/:id       — check consultation status and aggregated results',
 ];
 
 const server = createServer(async (req, res) => {
@@ -1463,6 +1872,14 @@ const server = createServer(async (req, res) => {
       await handleUpdateKey(req, res);
     } else if (method === 'GET' && path === '/auth/keys') {
       handleListKeys(req, res);
+    } else if (method === 'POST' && path === '/resolve') {
+      await handleResolve(req, res);
+    } else if (method === 'POST' && path === '/consult') {
+      await handleConsult(req, res);
+    } else if (method === 'POST' && path.match(/^\/consult\/[^/]+\/response$/)) {
+      await handleConsultResponse(req, res);
+    } else if (method === 'GET' && path.match(/^\/consult\/[^/]+$/) && !path.endsWith('/response')) {
+      handleConsultStatus(req, res);
     } else {
       sendJson(res, 404, {
         error: 'Not found',
