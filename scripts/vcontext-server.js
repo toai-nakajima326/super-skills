@@ -25,6 +25,9 @@
  *   POST   /consult         — create multi-model consultation
  *   POST   /consult/:id/response — submit model response
  *   GET    /consult/:id     — check consultation status
+ *   GET    /search/semantic — semantic similarity search (?q=text&limit=10&threshold=0.5)
+ *   POST   /analytics/track — track usage event
+ *   GET    /analytics/report — usage analytics report (?days=30)
  *   WS     /ws              — WebSocket real-time push notifications
  */
 
@@ -41,6 +44,7 @@ const BACKUP_DIR = join(process.env.HOME, 'skills', 'data');
 const BACKUP_PATH = join(BACKUP_DIR, 'vcontext-backup.sqlite');
 const SSD_DB_PATH = join(BACKUP_DIR, 'vcontext-ssd.db');
 const CLOUD_CONFIG_PATH = join(BACKUP_DIR, 'vcontext-cloud.json');
+const SCRIPT_DIR = new URL('.', import.meta.url).pathname;
 const BACKUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const WARN_SIZE_BYTES = 3 * 1024 * 1024 * 1024;     // 3 GB
 const MAX_SIZE_BYTES = 3.5 * 1024 * 1024 * 1024;     // 3.5 GB
@@ -238,6 +242,21 @@ function migrateRamSchema() {
   } catch (e) {
     console.error('[vcontext] Schema migration for RAM DB failed:', e.message);
   }
+
+  // Analytics table for usage tracking
+  try {
+    dbExec(`CREATE TABLE IF NOT EXISTS analytics (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_type TEXT NOT NULL,
+      skill_name TEXT,
+      session TEXT,
+      user_id TEXT,
+      metadata TEXT DEFAULT '{}',
+      created_at TEXT DEFAULT (datetime('now'))
+    );`);
+    dbExec(`CREATE INDEX IF NOT EXISTS idx_analytics_skill ON analytics(skill_name);`);
+    dbExec(`CREATE INDEX IF NOT EXISTS idx_analytics_event ON analytics(event_type);`);
+  } catch {}
 }
 
 // ── SSD database initialisation ───────────────────────────────
@@ -1217,6 +1236,10 @@ function handleHealth(req, res) {
     local_ai_model: ollamaPreferredModel,
     ws_clients: wsClients.size,
     uptime_seconds: Math.floor(process.uptime()),
+    features: {
+      semantic_search: ollamaAvailable,
+      usage_analytics: true,
+    },
   });
 }
 
@@ -2452,7 +2475,7 @@ function handleAiStatus(req, res) {
       auto_summarize: ollamaAvailable,
       auto_embed: ollamaAvailable,
       auto_conflict_resolve: ollamaAvailable,
-      semantic_search: false, // Future: when embeddings are used for search
+      semantic_search: ollamaAvailable,
     },
   });
 }
@@ -2492,6 +2515,199 @@ async function handleAiSummarize(req, res) {
   sendJson(res, 200, { summarized: count, model });
 }
 
+// ── Cosine similarity for semantic search ─────────────────────
+function cosineSimilarity(a, b) {
+  if (!a || !b || a.length !== b.length) return 0;
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+// GET /search/semantic — Semantic similarity search using embeddings
+async function handleSemanticSearch(req, res) {
+  if (!ollamaAvailable) {
+    return sendJson(res, 503, { error: 'Semantic search requires Ollama. Install: brew install ollama' });
+  }
+
+  const params = parseQuery(req.url);
+  const q = params.q;
+  if (!q) return sendJson(res, 400, { error: 'Missing query parameter: q' });
+
+  const limit = Math.min(parseInt(params.limit) || 10, 50);
+  const threshold = parseFloat(params.threshold) || 0.5;
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  // Generate query embedding
+  const model = pickModel('embed');
+  let queryEmbed;
+  try {
+    queryEmbed = await ollamaEmbed(model, q);
+  } catch (e) {
+    return sendJson(res, 500, { error: 'Failed to generate embedding: ' + e.message });
+  }
+  if (!queryEmbed || queryEmbed.length === 0) {
+    return sendJson(res, 500, { error: 'Failed to generate embedding' });
+  }
+
+  // Load entries with embeddings
+  const rows = dbQuery("SELECT id, type, content, tags, created_at, embedding, reasoning FROM entries WHERE embedding IS NOT NULL;");
+
+  // Calculate similarities
+  const results = [];
+  for (const row of rows) {
+    try {
+      const entryEmbed = JSON.parse(row.embedding);
+      const sim = cosineSimilarity(queryEmbed, entryEmbed);
+      if (sim >= threshold) {
+        results.push({
+          id: row.id,
+          type: row.type,
+          content: row.content,
+          tags: row.tags,
+          created_at: row.created_at,
+          reasoning: row.reasoning,
+          similarity: Math.round(sim * 1000) / 1000,
+        });
+      }
+    } catch {}
+  }
+
+  // Sort by similarity descending
+  results.sort((a, b) => b.similarity - a.similarity);
+
+  // Apply group access filter
+  const accessibleGroups = getAccessibleGroups(auth);
+  const filtered = accessibleGroups ? results.filter(r => {
+    const tags = r.tags || '';
+    if (!tags.includes('group:')) return true;
+    return accessibleGroups.some(g => tags.includes(`group:${g}`));
+  }) : results;
+
+  parseTags(filtered.slice(0, limit));
+
+  sendJson(res, 200, {
+    results: filtered.slice(0, limit),
+    count: Math.min(filtered.length, limit),
+    total_with_embeddings: rows.length,
+    model_used: model,
+    threshold,
+  });
+}
+
+// ── Usage analytics ───────────────────────────────────────────
+
+// POST /analytics/track — Track a usage event
+async function handleAnalyticsTrack(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  const body = await readBody(req);
+  const { event_type, skill_name, session, metadata } = body;
+
+  if (!event_type) {
+    return sendJson(res, 400, { error: 'Missing required field: event_type' });
+  }
+
+  const metaStr = metadata ? JSON.stringify(metadata) : '{}';
+  const userId = auth.userId || null;
+
+  dbExec(
+    `INSERT INTO analytics (event_type, skill_name, session, user_id, metadata)
+     VALUES (${esc(event_type)}, ${esc(skill_name || null)}, ${esc(session || null)}, ${esc(userId)}, ${esc(metaStr)});`
+  );
+
+  sendJson(res, 201, { tracked: true, event_type, skill_name: skill_name || null });
+}
+
+// GET /analytics/report — Usage analytics report
+function handleAnalyticsReport(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  const params = parseQuery(req.url);
+  const days = parseInt(params.days) || 30;
+  const since = `datetime('now', '-${days} days')`;
+
+  // Total events in period
+  const totalRows = dbQuery(`SELECT COUNT(*) as count FROM analytics WHERE created_at >= ${since};`);
+  const totalEvents = totalRows[0]?.count || 0;
+
+  // Skill usage breakdown
+  const skillRows = dbQuery(
+    `SELECT skill_name, COUNT(*) as count, MAX(created_at) as last_used
+     FROM analytics
+     WHERE skill_name IS NOT NULL AND created_at >= ${since}
+     GROUP BY skill_name
+     ORDER BY count DESC;`
+  );
+  const skillUsage = skillRows.map(r => ({
+    skill: r.skill_name,
+    count: r.count,
+    last_used: r.last_used,
+  }));
+
+  // Find skills that were never used (compare against known skills from entries tags)
+  const knownSkillRows = dbQuery(
+    `SELECT DISTINCT skill_name FROM analytics WHERE skill_name IS NOT NULL;`
+  );
+  const usedSkills = new Set(knownSkillRows.map(r => r.skill_name));
+  // Try to discover skill names from entry tags
+  const tagRows = dbQuery(
+    `SELECT DISTINCT tags FROM entries WHERE tags LIKE '%skill:%';`
+  );
+  const allSkills = new Set();
+  for (const r of tagRows) {
+    try {
+      const tags = JSON.parse(r.tags);
+      for (const t of tags) {
+        if (t.startsWith('skill:')) allSkills.add(t.slice(6));
+      }
+    } catch {}
+  }
+  const neverUsed = [...allSkills].filter(s => !usedSkills.has(s));
+
+  // Daily activity
+  const dailyRows = dbQuery(
+    `SELECT DATE(created_at) as date, COUNT(*) as events
+     FROM analytics
+     WHERE created_at >= ${since}
+     GROUP BY DATE(created_at)
+     ORDER BY date DESC;`
+  );
+  const dailyActivity = dailyRows.map(r => ({
+    date: r.date,
+    events: r.events,
+  }));
+
+  // Top users
+  const userRows = dbQuery(
+    `SELECT user_id, COUNT(*) as events
+     FROM analytics
+     WHERE user_id IS NOT NULL AND created_at >= ${since}
+     GROUP BY user_id
+     ORDER BY events DESC
+     LIMIT 20;`
+  );
+  const topUsers = userRows.map(r => ({
+    user: r.user_id,
+    events: r.events,
+  }));
+
+  sendJson(res, 200, {
+    period: `${days} days`,
+    total_events: totalEvents,
+    skill_usage: skillUsage,
+    never_used: neverUsed,
+    daily_activity: dailyActivity,
+    top_users: topUsers,
+  });
+}
+
 // ── Request router ─────────────────────────────────────────────
 const ENDPOINTS_LIST = [
   'POST   /store             — store context entry (body: {type,content,tags?,session?,namespace?,group?,reasoning?,conditions?,supersedes?,confidence?,status?})',
@@ -2520,8 +2736,12 @@ const ENDPOINTS_LIST = [
   'POST   /consult/auto-respond — batch respond to pending consultations {model, responses[]}',
   'GET    /ai/status         — local AI (Ollama) status and capabilities',
   'POST   /ai/summarize      — summarize entries using local AI {ids?:[]}',
+  'GET    /search/semantic?q= — semantic similarity search (&limit=10&threshold=0.5)',
+  'POST   /analytics/track   — track usage event {event_type, skill_name?, session?, metadata?}',
+  'GET    /analytics/report?days= — usage analytics report (default 30 days)',
   'WS     /ws                — WebSocket real-time push notifications (upgrade)',
   'WS     /ws?key=<apikey>   — WebSocket with API key auth',
+  'GET    /dashboard         — browser dashboard UI',
 ];
 
 const server = createServer(async (req, res) => {
@@ -2592,6 +2812,16 @@ const server = createServer(async (req, res) => {
       handleAiStatus(req, res);
     } else if (method === 'POST' && path === '/ai/summarize') {
       await handleAiSummarize(req, res);
+    } else if (method === 'GET' && path === '/search/semantic') {
+      await handleSemanticSearch(req, res);
+    } else if (method === 'POST' && path === '/analytics/track') {
+      await handleAnalyticsTrack(req, res);
+    } else if (method === 'GET' && path === '/analytics/report') {
+      handleAnalyticsReport(req, res);
+    } else if (method === 'GET' && path === '/dashboard') {
+      const html = readFileSync(join(SCRIPT_DIR, 'vcontext-dashboard.html'), 'utf-8');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
     } else {
       sendJson(res, 404, {
         error: 'Not found',

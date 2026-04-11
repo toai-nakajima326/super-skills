@@ -117,6 +117,16 @@ async function handleToolUse() {
 
     await store(type, content, tags);
 
+    // Track analytics
+    try {
+      await post('/analytics/track', {
+        event_type: 'tool_use',
+        skill_name: toolName,
+        session: SESSION_ID,
+        metadata: { type: isError ? 'error' : 'observation' }
+      });
+    } catch {}
+
     // Auto-recall related context from other sessions
     try {
       const keywords = extractKeywords(content);
@@ -284,6 +294,11 @@ function get(path) {
  * Outputs markdown to stdout — Claude Code injects this into the conversation.
  */
 async function handleSessionRecall() {
+  // Track session start
+  try {
+    await post('/analytics/track', { event_type: 'session_start', session: SESSION_ID });
+  } catch {}
+
   const namespace = process.env.VCONTEXT_NAMESPACE || '';
   const nsParam = namespace ? `&namespace=${namespace}` : '';
 
@@ -369,6 +384,11 @@ async function handleSessionRecall() {
  * Usage: node vcontext-hooks.js session-end "summary text"
  */
 async function handleSessionEnd(summary) {
+  // Track session end
+  try {
+    await post('/analytics/track', { event_type: 'session_end', session: SESSION_ID });
+  } catch {}
+
   const content = summary || `Session ${SESSION_ID} ended`;
   const result = await store('conversation', content, ['session-end', 'auto']);
   if (!summary) {

@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Virtual Context Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117; color: #e6edf3; padding: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; max-width: 1400px; margin: 0 auto; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+  .card h2 { font-size: 14px; color: #8b949e; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1px; }
+  .stat { font-size: 32px; font-weight: bold; color: #58a6ff; }
+  .stat-label { font-size: 12px; color: #8b949e; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+  .badge-decision { background: #1f6feb33; color: #58a6ff; }
+  .badge-error { background: #da363333; color: #f85149; }
+  .badge-observation { background: #23843233; color: #3fb950; }
+  .badge-conversation { background: #9e6a0333; color: #d29922; }
+  .badge-code { background: #8b5cf633; color: #bc8cff; }
+  .bar { height: 8px; border-radius: 4px; background: #21262d; margin: 4px 0; }
+  .bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
+  .entry { padding: 8px 0; border-bottom: 1px solid #21262d; font-size: 13px; }
+  .entry:last-child { border: none; }
+  .entry-time { color: #8b949e; font-size: 11px; }
+  .btn { background: #21262d; border: 1px solid #30363d; color: #e6edf3; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  .btn:hover { background: #30363d; }
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .status-green { background: #3fb950; }
+  .status-red { background: #f85149; }
+  .status-yellow { background: #d29922; }
+  header { max-width: 1400px; margin: 0 auto 20px; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 20px; }
+  header .meta { font-size: 12px; color: #8b949e; }
+  .model-tag { display: inline-block; background: #1f6feb22; border: 1px solid #1f6feb44; color: #58a6ff; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin: 2px; }
+  .chart-bar { display: flex; align-items: center; margin: 4px 0; }
+  .chart-bar .label { width: 120px; font-size: 12px; color: #8b949e; }
+  .chart-bar .bar-fill { background: #58a6ff; }
+  .wide { grid-column: span 2; }
+  @media (max-width: 768px) { .wide { grid-column: span 1; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Virtual Context Dashboard</h1>
+  <div class="meta">
+    <span id="status-indicator"><span class="status-dot status-yellow"></span>Loading...</span>
+    &nbsp;|&nbsp; Auto-refresh: 10s
+    &nbsp;|&nbsp; <span id="uptime"></span>
+  </div>
+</header>
+<div class="grid">
+  <!-- Health -->
+  <div class="card">
+    <h2>System Health</h2>
+    <div id="health-content">Loading...</div>
+  </div>
+
+  <!-- Storage Tiers -->
+  <div class="card">
+    <h2>Storage Tiers</h2>
+    <div id="tiers-content">Loading...</div>
+  </div>
+
+  <!-- AI Status -->
+  <div class="card">
+    <h2>Local AI (Ollama)</h2>
+    <div id="ai-content">Loading...</div>
+  </div>
+
+  <!-- Quick Actions -->
+  <div class="card">
+    <h2>Quick Actions</h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn" onclick="doAction('/ai/summarize','POST')">Summarize Old</button>
+      <button class="btn" onclick="doAction('/tier/migrate','POST')">Tier Migrate</button>
+      <button class="btn" onclick="refresh()">Refresh</button>
+    </div>
+    <div id="action-result" style="margin-top:8px;font-size:12px;color:#8b949e;"></div>
+  </div>
+
+  <!-- Recent Entries -->
+  <div class="card wide">
+    <h2>Recent Entries</h2>
+    <div id="recent-content">Loading...</div>
+  </div>
+
+  <!-- Skill Usage -->
+  <div class="card wide">
+    <h2>Skill Usage (30 days)</h2>
+    <div id="analytics-content">Loading...</div>
+  </div>
+</div>
+
+<script>
+const API = 'http://localhost:3150';
+
+async function fetchJson(path) {
+  try {
+    const r = await fetch(API + path);
+    return await r.json();
+  } catch { return null; }
+}
+
+async function doAction(path, method) {
+  const el = document.getElementById('action-result');
+  el.textContent = 'Executing...';
+  try {
+    const r = await fetch(API + path, { method });
+    const d = await r.json();
+    el.textContent = JSON.stringify(d).slice(0, 200);
+  } catch (e) { el.textContent = 'Error: ' + e.message; }
+}
+
+function badgeClass(type) {
+  return 'badge badge-' + (type || 'observation');
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+async function refresh() {
+  // Health
+  const health = await fetchJson('/health');
+  if (health) {
+    const si = document.getElementById('status-indicator');
+    si.innerHTML = '<span class="status-dot status-' + (health.status === 'healthy' ? 'green' : 'red') + '"></span>' + escapeHtml(health.status);
+    document.getElementById('uptime').textContent = 'Uptime: ' + Math.floor(health.uptime_seconds / 60) + 'm';
+    document.getElementById('health-content').innerHTML =
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">' +
+        '<div><span class="status-dot status-' + (health.ram_disk ? 'green' : 'red') + '"></span>RAM Disk</div>' +
+        '<div><span class="status-dot status-' + (health.database ? 'green' : 'red') + '"></span>Database</div>' +
+        '<div><span class="status-dot status-' + (health.ssd_database ? 'green' : 'red') + '"></span>SSD DB</div>' +
+        '<div><span class="status-dot status-' + (health.cloud_configured ? 'green' : 'yellow') + '"></span>Cloud</div>' +
+        '<div><span class="status-dot status-' + (health.local_ai ? 'green' : 'yellow') + '"></span>Ollama: ' + escapeHtml(health.local_ai_model || 'off') + '</div>' +
+        '<div><span class="status-dot status-green"></span>WS: ' + (health.ws_clients || 0) + ' clients</div>' +
+      '</div>';
+  }
+
+  // Tiers
+  const tiers = await fetchJson('/tier/stats');
+  if (tiers) {
+    const maxEntries = Math.max(tiers.ram.entries, tiers.ssd.entries, 1);
+    document.getElementById('tiers-content').innerHTML =
+      '<div class="chart-bar"><span class="label">RAM (' + escapeHtml(tiers.ram.size) + ')</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (tiers.ram.entries / maxEntries * 100) + '%;background:#58a6ff"></div></div><span style="margin-left:8px;font-size:13px;">' + tiers.ram.entries + '</span></div>' +
+      '<div class="chart-bar"><span class="label">SSD (' + escapeHtml(tiers.ssd.size) + ')</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (tiers.ssd.entries / maxEntries * 100) + '%;background:#3fb950"></div></div><span style="margin-left:8px;font-size:13px;">' + tiers.ssd.entries + '</span></div>' +
+      '<div class="chart-bar"><span class="label">Cloud</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (tiers.cloud.entries > 0 ? tiers.cloud.entries / maxEntries * 100 : 0) + '%;background:#d29922"></div></div><span style="margin-left:8px;font-size:13px;">' + (tiers.cloud.configured ? tiers.cloud.entries : 'stub') + '</span></div>';
+  }
+
+  // AI
+  const ai = await fetchJson('/ai/status');
+  if (ai) {
+    document.getElementById('ai-content').innerHTML =
+      '<div style="margin-bottom:8px;">' + (ai.ollama_available ? '<span class="status-dot status-green"></span>Available' : '<span class="status-dot status-red"></span>Not available') + '</div>' +
+      '<div>' + (ai.models || []).map(function(m) { return '<span class="model-tag">' + escapeHtml(m) + '</span>'; }).join('') + '</div>' +
+      '<div style="margin-top:8px;font-size:12px;color:#8b949e;">' +
+        Object.entries(ai.features || {}).map(function(pair) { return (pair[1] ? 'ON' : 'OFF') + ' ' + escapeHtml(pair[0]); }).join(' &nbsp; ') +
+      '</div>';
+  }
+
+  // Recent
+  const recent = await fetchJson('/recent?n=10');
+  if (recent && recent.results) {
+    document.getElementById('recent-content').innerHTML = recent.results.map(function(r) {
+      return '<div class="entry">' +
+        '<span class="' + badgeClass(r.type) + '">' + escapeHtml(r.type) + '</span>' +
+        '<span style="margin-left:8px;">' + escapeHtml((r.content || '').slice(0, 120)) + '</span>' +
+        '<div class="entry-time">' + escapeHtml(r.created_at) + (r._tier ? ' | ' + escapeHtml(r._tier) : '') + '</div>' +
+      '</div>';
+    }).join('');
+  }
+
+  // Analytics
+  const analytics = await fetchJson('/analytics/report?days=30');
+  if (analytics && analytics.skill_usage) {
+    var maxCount = Math.max.apply(null, analytics.skill_usage.map(function(s) { return s.count; }).concat([1]));
+    document.getElementById('analytics-content').innerHTML =
+      '<div style="margin-bottom:8px;font-size:13px;">Total events: <strong>' + analytics.total_events + '</strong></div>' +
+      analytics.skill_usage.slice(0, 10).map(function(s) {
+        return '<div class="chart-bar">' +
+          '<span class="label">' + escapeHtml(s.skill) + '</span>' +
+          '<div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (s.count / maxCount * 100) + '%;background:#58a6ff"></div></div>' +
+          '<span style="margin-left:8px;font-size:13px;">' + s.count + '</span>' +
+        '</div>';
+      }).join('') +
+      (analytics.never_used && analytics.never_used.length > 0 ? '<div style="margin-top:8px;font-size:12px;color:#8b949e;">Never used: ' + escapeHtml(analytics.never_used.join(', ')) + '</div>' : '');
+  } else {
+    document.getElementById('analytics-content').innerHTML = '<div style="color:#8b949e;">No analytics data yet</div>';
+  }
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>
