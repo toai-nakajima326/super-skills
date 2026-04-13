@@ -24,7 +24,7 @@
     {
       "name": "skills-planning",
       "description": "Product and architecture planning",
-      "components": ["plan-product", "plan-architecture"]
+      "components": ["plan-product", "plan-architecture", "spec-driven-dev"]
     },
     {
       "name": "skills-qa",

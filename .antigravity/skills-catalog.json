@@ -2,148 +2,238 @@
   "version": 1,
   "skills": [
     {
+      "name": "agent-memory",
+      "displayName": "Agent Memory",
+      "description": "Use when starting work in a project with AGENTS.md files, or to establish project-level institutional memory. Manages...",
+      "path": "skills/agent-memory/SKILL.md"
+    },
+    {
       "name": "api-design",
       "displayName": "Api Design",
-      "description": "Use when designing or reviewing HTTP APIs, choosing between REST and GraphQL, or establishing API contracts and...",
+      "description": "|",
       "path": "skills/api-design/SKILL.md"
+    },
+    {
+      "name": "auto-router",
+      "displayName": "Auto Router",
+      "description": "Use always. Automatically detect context and apply the most appropriate skill without user specifying one.",
+      "path": "skills/auto-router/SKILL.md"
     },
     {
       "name": "backend-patterns",
       "displayName": "Backend Patterns",
-      "description": "Use when building or reviewing backend services, choosing architectural patterns, or structuring server-side application...",
+      "description": "|",
       "path": "skills/backend-patterns/SKILL.md"
     },
     {
       "name": "careful",
       "displayName": "Careful",
-      "description": "Use for critical operations where mistakes are costly -- adds backup creation, impact explanation, and confirmation...",
+      "description": "|",
       "path": "skills/careful/SKILL.md"
     },
     {
       "name": "checkpoint",
       "displayName": "Checkpoint",
-      "description": "Use when making risky changes to save and restore named state checkpoints, enabling safe rollback if something goes...",
+      "description": "|",
       "path": "skills/checkpoint/SKILL.md"
     },
     {
       "name": "coding-standards",
       "displayName": "Coding Standards",
-      "description": "Use when writing or reviewing code to enforce consistency with the project's existing patterns, naming conventions, and...",
+      "description": "|",
       "path": "skills/coding-standards/SKILL.md"
+    },
+    {
+      "name": "confidence-filter",
+      "displayName": "Confidence Filter",
+      "description": "Launch multiple parallel agents to independently assess the same target, then aggregate results and suppress findings...",
+      "path": "skills/confidence-filter/SKILL.md"
+    },
+    {
+      "name": "debate-consensus",
+      "displayName": "Debate Consensus",
+      "description": "Use for high-stakes decisions (architecture choices, risk assessments, spec ambiguities) requiring adversarial...",
+      "path": "skills/debate-consensus/SKILL.md"
     },
     {
       "name": "deep-research",
       "displayName": "Deep Research",
-      "description": "Use when conducting thorough research on a topic, synthesizing information from multiple sources, or producing...",
+      "description": "|",
       "path": "skills/deep-research/SKILL.md"
     },
     {
       "name": "dmux-workflows",
       "displayName": "Dmux Workflows",
-      "description": "Use when decomposing tasks for parallel execution, orchestrating concurrent agent workflows, or designing fan-out/fan-in...",
+      "description": "|",
       "path": "skills/dmux-workflows/SKILL.md"
     },
     {
       "name": "documentation-lookup",
       "displayName": "Documentation Lookup",
-      "description": "Use when answering technical questions to search and reference official documentation, ensuring answers are accurate,...",
+      "description": "|",
       "path": "skills/documentation-lookup/SKILL.md"
+    },
+    {
+      "name": "drift-detect",
+      "displayName": "Drift Detect",
+      "description": "Tiered-certainty drift detection: run deterministic tools (regex/AST/grep) first, escalate to LLM only for MEDIUM/LOW...",
+      "path": "skills/drift-detect/SKILL.md"
     },
     {
       "name": "e2e-testing",
       "displayName": "E2e Testing",
-      "description": "Use when writing, reviewing, or debugging end-to-end tests, setting up test infrastructure, or designing test strategies...",
+      "description": "|",
       "path": "skills/e2e-testing/SKILL.md"
     },
     {
       "name": "exa-search",
       "displayName": "Exa Search",
-      "description": "Use when performing web searches to gather information, integrating search results into analysis, or building...",
+      "description": "|",
       "path": "skills/exa-search/SKILL.md"
     },
     {
       "name": "freeze",
       "displayName": "Freeze",
-      "description": "Use when exploring a codebase or debugging without risk of accidental modifications -- enables strict read-only mode...",
+      "description": "|",
       "path": "skills/freeze/SKILL.md"
     },
     {
       "name": "frontend-patterns",
       "displayName": "Frontend Patterns",
-      "description": "Use when building or reviewing frontend applications, choosing component patterns, or structuring client-side state and...",
+      "description": "|",
       "path": "skills/frontend-patterns/SKILL.md"
     },
     {
       "name": "guard",
       "displayName": "Guard",
-      "description": "Use when executing shell commands or database operations to prevent dangerous destructive actions like rm -rf, DROP...",
+      "description": "|",
       "path": "skills/guard/SKILL.md"
     },
     {
       "name": "health-check",
       "displayName": "Health Check",
-      "description": "Use for assessing overall project health by running build, tests, linter, dependency audit, and security checks, then...",
+      "description": "|",
       "path": "skills/health-check/SKILL.md"
     },
     {
       "name": "investigate",
       "displayName": "Investigate",
-      "description": "Use when debugging a bug or unexpected behavior by tracing to root cause before changing any code.",
+      "description": "|",
       "path": "skills/investigate/SKILL.md"
     },
     {
       "name": "mcp-server-patterns",
       "displayName": "Mcp Server Patterns",
-      "description": "Use when building, reviewing, or debugging MCP (Model Context Protocol) servers, designing tool interfaces, or...",
+      "description": "|",
       "path": "skills/mcp-server-patterns/SKILL.md"
+    },
+    {
+      "name": "model-selector",
+      "displayName": "Model Selector",
+      "description": "Select the appropriate Claude model tier (Haiku/Sonnet/Opus) before launching agents based on task type....",
+      "path": "skills/model-selector/SKILL.md"
+    },
+    {
+      "name": "phase-gate",
+      "displayName": "Phase Gate",
+      "description": "Use when transitioning between work phases. Enforces integrated review, evidence file creation, and todo completion...",
+      "path": "skills/phase-gate/SKILL.md"
     },
     {
       "name": "plan-architecture",
       "displayName": "Plan Architecture",
-      "description": "Use when designing system architecture or making structural decisions before writing code.",
+      "description": "|",
       "path": "skills/plan-architecture/SKILL.md"
     },
     {
       "name": "plan-product",
       "displayName": "Plan Product",
-      "description": "Use when planning a product feature or initiative before jumping into implementation.",
+      "description": "|",
       "path": "skills/plan-product/SKILL.md"
     },
     {
       "name": "qa-browser",
       "displayName": "Qa Browser",
-      "description": "Use for browser-based regression testing of user-facing features and workflows.",
+      "description": "|",
       "path": "skills/qa-browser/SKILL.md"
+    },
+    {
+      "name": "quality-gate",
+      "displayName": "Quality Gate",
+      "description": "Use for all work output. Enforces full-count inspection, source reconciliation, regression testing, and pyramid quality...",
+      "path": "skills/quality-gate/SKILL.md"
+    },
+    {
+      "name": "report-format",
+      "displayName": "Report Format",
+      "description": "Use when reporting task completion. Enforces typed schema with quantitative metrics, coverage rate, and pass/fail...",
+      "path": "skills/report-format/SKILL.md"
+    },
+    {
+      "name": "research-first",
+      "displayName": "Research First",
+      "description": "Always research the latest information before answering capability questions. Past knowledge is unreliable — features...",
+      "path": "skills/research-first/SKILL.md"
     },
     {
       "name": "review",
       "displayName": "Review",
-      "description": "Use for code review focused on high-signal findings rather than stylistic nits.",
+      "description": "|",
       "path": "skills/review/SKILL.md"
     },
     {
       "name": "security-review",
       "displayName": "Security Review",
-      "description": "Use for security-focused code review to find vulnerabilities, auth gaps, and unsafe data handling.",
+      "description": "|",
       "path": "skills/security-review/SKILL.md"
+    },
+    {
+      "name": "self-evolve",
+      "displayName": "Self Evolve",
+      "description": "Use when scheduled or manually triggered to auto-update skills from upstream, discover new patterns via web search, and...",
+      "path": "skills/self-evolve/SKILL.md"
+    },
+    {
+      "name": "session-handoff",
+      "displayName": "Session Handoff",
+      "description": "Use at session start and during work. Ensures state recovery from dev log, todo restoration, and continuous auto-save of...",
+      "path": "skills/session-handoff/SKILL.md"
     },
     {
       "name": "ship-release",
       "displayName": "Ship Release",
-      "description": "Use when preparing a release -- versioning, changelog, and PR creation without auto-pushing.",
+      "description": "|",
       "path": "skills/ship-release/SKILL.md"
+    },
+    {
+      "name": "supervisor-worker",
+      "displayName": "Supervisor Worker",
+      "description": "Use when orchestrating multi-agent work. Enforces pair-agent pattern with workers, checkers, and independent judge.",
+      "path": "skills/supervisor-worker/SKILL.md"
     },
     {
       "name": "tdd-workflow",
       "displayName": "Tdd Workflow",
-      "description": "Use when developing features or fixes using strict test-driven development: red, green, refactor.",
+      "description": "|",
       "path": "skills/tdd-workflow/SKILL.md"
+    },
+    {
+      "name": "ui-implementation",
+      "displayName": "Ui Implementation",
+      "description": "Use when implementing or modifying UI (.tsx files). Enforces Design.md reference, CSS variable usage, and checker...",
+      "path": "skills/ui-implementation/SKILL.md"
     },
     {
       "name": "verification-loop",
       "displayName": "Verification Loop",
-      "description": "Use for automated verification of work results against specifications, iterating until the output fully matches expected...",
+      "description": "|",
       "path": "skills/verification-loop/SKILL.md"
+    },
+    {
+      "name": "virtual-context",
+      "displayName": "Virtual Context",
+      "description": "Use always. Extends context window with 4GB RAM-backed store. Store decisions, recall past context, search history.",
+      "path": "skills/virtual-context/SKILL.md"
     }
   ]
 }

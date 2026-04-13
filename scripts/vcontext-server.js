@@ -2712,7 +2712,7 @@ let ollamaPreferredModel = null;
 // Model preference order for different tasks
 const MODEL_PREFS = {
   summarize: ['llama3.1', 'qwen2.5-coder', 'glm-4.7-flash', 'gemma'],
-  embed: ['gemma', 'llama3.1', 'qwen2.5-coder'],
+  embed: ['nomic-embed-text', 'gemma', 'llama3.1', 'qwen2.5-coder'],
   judge: ['llama3.1', 'glm-4.7-flash', 'qwen2.5-coder'],
   code: ['qwen2.5-coder', 'llama3.1'],
 };

@@ -4,6 +4,80 @@ Auto-maintained by the `self-evolve` skill. Records all upstream syncs, web disc
 
 ---
 
+## 2026-04-13 — upstream-sync (run 4)
+
+### Action: skipped
+- **Target**: 16 skills (agent-memory, auto-router, confidence-filter, debate-consensus, drift-detect, mcp-server-patterns, model-selector, phase-gate, quality-gate, report-format, research-first, self-evolve, session-handoff, supervisor-worker, ui-implementation, virtual-context)
+- **Source**: takurot/super-skills upstream/main
+- **Reasoning**: Same regression as prior runs — upstream shows 1,272 deletions, 0 additions. Syncing would destroy all custom orchestration skills.
+- **Changes**: None applied
+- **Risk assessment**: low (skip was protective)
+
+## 2026-04-13 — web-discovery (run 4)
+
+**Search window**: 2026-04-11 → 2026-04-13
+**Queries executed**: 9
+**New sources checked**: 8 (full page fetches via WebFetch)
+**Candidates found**: 6
+**Adopted**: 1 | **Skipped**: 5
+
+### Action: created — `spec-driven-dev`
+- **Source**: morphllm.com "Spec-Driven Development: How Kiro and AI Agents Build From Specs"; javacodegeeks.com "Spec-Driven Development with AI Coding Agents"; heeki.medium.com "Using spec-driven development with Claude Code"; arxiv 2602.00180 "Spec-Driven Development: From Code to Contract"; Thoughtworks "Spec-driven development — unpacking one of 2025's key engineering practices"; GitHub Spec Kit (84K+ stars, 14+ agent platforms)
+- **Reasoning**: Spec-driven development (SDD) is genuinely novel vs existing skills. `plan-architecture` covers technical planning for known requirements; `plan-product` covers product framing. SDD specifically formalizes requirements first via structured spec document (Requirements → Design → Tasks), with explicit acceptance criteria traceability and three levels of rigor (spec-first / spec-anchored / spec-as-source). The key differentiator: the spec serves as both AI guidance and post-implementation verification artifact — preventing agent hallucination drift past ~500 lines. Proven by 2+ independent sources including arxiv paper, Kiro's enforced 3-phase SDLC, GitHub Spec Kit (84K stars), and Thoughtworks analysis.
+- **Changes**: Created `skills/spec-driven-dev/SKILL.md` with 3-phase workflow (Requirements/Design/Tasks), three rigor levels table, acceptance-criteria spec format, verification use section, and disambiguation vs plan-architecture. Added to `manifests/install-components.json`, added to `skills-planning` module in `manifests/install-modules.json`, added routing entry (P3 plan, trigger: spec/requirements/acceptance criteria/feature >500 lines) to `skills/auto-router/SKILL.md`.
+- **Risk assessment**: low — documentation/workflow skill; no auto-commits; no security implications
+
+### Updated
+- `auto-router`: Added routing entry for `spec-driven-dev` at P3 plan
+- `manifests/install-components.json`: Added `spec-driven-dev` entry
+- `manifests/install-modules.json`: Added `spec-driven-dev` to `skills-planning` module
+
+### Skipped patterns
+
+- `Kiro Powers (dynamic MCP activation)`: POWER.md format for context-aware MCP server activation based on keyword triggers. Novel concept — "mention 'database' and the Neon power activates; switch to deployment and Neon deactivates." However: (1) our `auto-router` already does dynamic skill activation via context triggers; (2) the POWER.md format is Kiro-specific and not portable to a SKILL.md workflow; (3) the underlying concept (activate tools on demand) is covered at the skill level by our routing table. Not extractable as a standalone skill.
+- `Kiro Steering vs AgentSkills distinction`: Steering = workspace-specific rules, Skills = portable cross-workspace procedures. Already covered by our CLAUDE.md / SKILL.md separation. Not novel enough to justify a new skill.
+- `AI Agent Prompt Patterns (CRISP, Chain of Verification, etc.)`: 10 patterns from paxrel.com. Patterns 1-5 (role+constraints, structured output, error recovery, tool heuristics) are basic prompt engineering covered by existing skills. Patterns 6/8/9 (context window management, progressive disclosure, memory integration) overlap `virtual-context`, `phase-gate`, and `agent-memory`. No novel standalone skill extractable.
+- `Bounded Autonomy governance pattern`: Governance framework for production AI agents — operational limits, escalation paths, audit trails. Conceptually sound but: (1) enterprise governance, not a coding-agent workflow; (2) our `guard`/`careful`/`freeze` safety skills already encode operational limits; (3) escalation is covered by `supervisor-worker`. Not actionable as a SKILL.md workflow.
+- `Parallel Model Execution` (Cursor): Run same prompt across multiple models simultaneously and compare. Covered in spirit by `debate-consensus` and `model-selector`. Implementation is Cursor-specific (UI side-by-side comparison). Not extractable without Cursor-specific infrastructure.
+
+## 2026-04-13 — local-ai-maintenance (run 4)
+
+### Models updated
+- `llama3.1:latest` — pulled, no version change (manifest confirmed)
+- `qwen2.5-coder:latest` — pulled, no version change
+- `gemma:2b` — pulled, no version change
+- `glm-4.7-flash:latest` — pulled, no version change
+
+### New model installed
+- **`nomic-embed-text:latest`** (137M, Apache 2.0, purpose-built embedding model)
+  - **Reason**: Current embed model `gemma:2b` is a general-purpose chat model not optimized for embeddings. `nomic-embed-text` is purpose-built for semantic similarity with 768-dim vectors, listed as top embedding choice for RAG on Apple Silicon in 2026 benchmarks. Available via `ollama pull`. Size: 137M — much lighter than gemma:2b.
+  - **Change**: Updated `MODEL_PREFS.embed` in `vcontext-server.js` to `['nomic-embed-text', 'gemma', 'llama3.1', 'qwen2.5-coder']`. Reloaded vcontext server. Confirmed active via `/ai/status`: `"embed": "nomic-embed-text:latest"`.
+  - **Risk assessment**: low — fallback to gemma retained in prefs list
+
+### Models pruned
+- None (gemma:2b retained as fallback)
+
+### Current model lineup
+| Task | Model |
+|------|-------|
+| summarize | llama3.1:latest |
+| embed | nomic-embed-text:latest ← upgraded |
+| judge | llama3.1:latest |
+| code | qwen2.5-coder:latest |
+
+## 2026-04-13 — hook-auto-setup (run 4)
+
+**Tools detected**: Claude Code, Codex, Cursor, Kiro
+**Hooks installed/updated**:
+- Claude Code — already configured (no change)
+- Codex — hooks.json reinstalled (backed up existing)
+- Cursor — vcontext.json reinstalled
+- Kiro — hooks newly installed at `~/.kiro/hooks/`
+
+**Note**: Kiro was newly detected this run — hooks installed for the first time.
+
+**Validated**: 40 skills, 0 errors. Deployed to `~/.claude/skills/` and `~/.codex/skills/`.
+
 ## 2026-04-11 — upstream-sync (run 3)
 
 ### Action: skipped
