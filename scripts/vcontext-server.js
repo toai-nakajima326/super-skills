@@ -3192,10 +3192,13 @@ Keywords:`;
 
       const keywords = await ollamaGenerate(model, keywordPrompt, { maxTokens: 30, temperature: 0.1 });
       if (!keywords || keywords.length < 3) return;
+      // Take only first line to avoid LLM chattering
+      const keywordsClean = keywords.trim().split('\n')[0].trim();
 
       // Step 2: Privacy filter — sanitize before external search
-      const sanitized = sanitizeForExternalSearch(keywords.trim());
+      const sanitized = sanitizeForExternalSearch(keywordsClean);
       if (!sanitized || sanitized.length < 3) return;
+      console.log(`[vcontext:predict] Keywords: "${keywordsClean}" → sanitized: "${sanitized}"`);
 
       // Step 3: Multi-source search with rate limiting
       // Sources: (a) vcontext FTS, (b) DuckDuckGo, (c) Ollama, (d) Wikipedia
@@ -3210,36 +3213,47 @@ Keywords:`;
         }
       } catch {}
 
-      // 3b: DuckDuckGo instant answers (rate limited: 1 req per keyword, max 3)
-      for (const kw of searchWords.slice(0, 3)) {
-        try {
-          const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(kw)}&format=json&no_redirect=1&no_html=1`;
-          const ddgResult = await new Promise((resolve) => {
-            const req = httpsRequest(new URL(ddgUrl), {
-              method: 'GET', timeout: 5000,
-              headers: { 'User-Agent': 'vcontext/2.0' },
+      // 3b: DuckDuckGo HTML search (full web results, rate limited)
+      try {
+        const ddgQuery = sanitized + ' 2026 best practices';
+        const ddgUrl = `https://duckduckgo.com/html/?q=${encodeURIComponent(ddgQuery)}`;
+
+        function httpsGet(url, depth = 0) {
+          if (depth > 3) return Promise.resolve(null);
+          return new Promise((resolve) => {
+            const req = httpsRequest(new URL(url), {
+              method: 'GET', timeout: 10000,
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                'Accept': 'text/html',
+              },
             }, (res) => {
+              if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                httpsGet(res.headers.location, depth + 1).then(resolve);
+                return;
+              }
               const chunks = [];
               res.on('data', c => chunks.push(c));
-              res.on('end', () => {
-                try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
-                catch { resolve(null); }
-              });
+              res.on('end', () => resolve(Buffer.concat(chunks).toString()));
             });
             req.on('error', () => resolve(null));
             req.on('timeout', () => { req.destroy(); resolve(null); });
             req.end();
           });
-          if (ddgResult) {
-            if (ddgResult.Abstract) parts.push(`[ddg:${kw}] ${ddgResult.Abstract.slice(0, 300)}`);
-            for (const topic of (ddgResult.RelatedTopics || []).slice(0, 2)) {
-              if (topic.Text) parts.push(`[ddg:${kw}] ${topic.Text.slice(0, 200)}`);
+        }
+
+        const ddgHtml = await httpsGet(ddgUrl);
+        if (ddgHtml) {
+          // Extract snippets from HTML
+          const snippetMatches = ddgHtml.match(/class="result__snippet"[^>]*>(.*?)<\/(?:td|span|div)/gs) || [];
+          for (const m of snippetMatches.slice(0, 5)) {
+            const clean = m.replace(/<[^>]+>/g, '').replace(/class="result__snippet"[^>]*>/, '').trim();
+            if (clean.length > 20) {
+              parts.push(`[web] ${clean.replace(/&#x27;/g, "'").replace(/&amp;/g, '&').slice(0, 300)}`);
             }
           }
-          // Rate limit: 500ms between requests
-          await new Promise(r => setTimeout(r, 500));
-        } catch {}
-      }
+        }
+      } catch {}
 
       // 3c: Generate background knowledge with Ollama (local, no external call)
       try {
