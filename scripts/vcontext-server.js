@@ -272,10 +272,10 @@ function migrateRamSchema() {
       console.log('[vcontext] Added embedding column to RAM DB');
     }
 
-    // Back-fill last_accessed for existing rows that have NULL
-    dbExec("UPDATE entries SET last_accessed = created_at WHERE last_accessed IS NULL;");
+    // Back-fill last_accessed (small batch to avoid ENOBUFS)
+    try { dbExec("UPDATE entries SET last_accessed = created_at WHERE last_accessed IS NULL LIMIT 100;"); } catch {}
   } catch (e) {
-    console.error('[vcontext] Schema migration for RAM DB failed:', e.message);
+    console.error('[vcontext] Schema migration for RAM DB failed:', e.message?.slice(0, 80));
   }
 
   // Analytics table for usage tracking
@@ -331,8 +331,8 @@ function migrateRamSchema() {
     dbExec(`CREATE INDEX IF NOT EXISTS idx_am_created ON api_metrics(created_at);`);
   } catch {}
 
-  // Backfill entry_index for existing entries
-  backfillIndex(500);
+  // Backfill entry_index (small batch to avoid ENOBUFS at startup)
+  try { backfillIndex(50); } catch {}
 }
 
 // ── SSD database initialisation ───────────────────────────────
@@ -2366,17 +2366,31 @@ function formatBytes(bytes) {
   return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i];
 }
 
-// ── Streaming embed (continuous background loop) ──────────────
+// ── Night window: Ollama tasks only run 22:00-08:00 ──────────
+function isNightWindow() {
+  const hour = new Date().getHours();
+  return hour >= 22 || hour < 8;
+}
+
+// ── Streaming embed (runs only during night window) ──────────
 let embedLoopRunning = false;
 
 async function startEmbedLoop() {
   if (embedLoopRunning) return;
   embedLoopRunning = true;
-  const model = pickModel('embed');
-  if (!model) { embedLoopRunning = false; return; }
 
-  while (embedLoopRunning && ollamaAvailable) {
-    // Pause if flag file exists (memory pressure relief)
+  while (embedLoopRunning) {
+    // Wait for night window
+    if (!isNightWindow()) {
+      await new Promise(r => setTimeout(r, 5 * 60 * 1000)); // check every 5 min
+      continue;
+    }
+
+    if (!ollamaAvailable) { checkOllama(); }
+    const model = pickModel('embed');
+    if (!model) { await new Promise(r => setTimeout(r, 60000)); continue; }
+
+    // Pause if flag file exists
     if (existsSync('/tmp/vcontext-embed-pause')) {
       await new Promise(r => setTimeout(r, 60000));
       continue;
@@ -2502,7 +2516,13 @@ async function startDiscoveryLoop() {
   if (discoveryLoopRunning) return;
   discoveryLoopRunning = true;
 
-  while (discoveryLoopRunning && ollamaAvailable) {
+  while (discoveryLoopRunning) {
+    // Wait for night window (22:00-08:00)
+    if (!isNightWindow()) {
+      await new Promise(r => setTimeout(r, 5 * 60 * 1000));
+      continue;
+    }
+    if (!ollamaAvailable) { checkOllama(); }
     if (existsSync('/tmp/vcontext-embed-pause')) {
       await new Promise(r => setTimeout(r, 60000));
       continue;
@@ -2921,11 +2941,11 @@ let EMBED_DIM = 2048; // auto-detected from first embedding
 
 function initVecDb() {
   try {
-    // Auto-detect embedding dimension from existing data
-    const dimRows = dbQuery("SELECT embedding FROM entries WHERE embedding IS NOT NULL LIMIT 1;");
-    if (dimRows[0]) {
-      try { EMBED_DIM = JSON.parse(dimRows[0].embedding).length; } catch {}
-    }
+    // Auto-detect embedding dimension (skip if DB under pressure)
+    try {
+      const dimRows = dbQuery("SELECT embedding FROM entries WHERE embedding IS NOT NULL ORDER BY id DESC LIMIT 1;");
+      if (dimRows[0]) { try { EMBED_DIM = JSON.parse(dimRows[0].embedding).length; } catch {} }
+    } catch {}
 
     const Database = require('better-sqlite3');
     const sqliteVec = require('sqlite-vec');
@@ -3983,21 +4003,12 @@ server.on('upgrade', (req, socket, head) => {
 // Ensure RAM disk + DB exist
 ensureRamDisk();
 
-// Migrate schema for tiered storage columns
-migrateRamSchema();
-
-// Ensure SSD database exists
-ensureSsdDb();
-
-// Ensure consultations table
-ensureConsultationsTable();
-
-// Restore RAM from SSD if RAM is empty (e.g. after reboot)
-restoreRamFromSsd();
-
-// Initialize sqlite-vec (optional — falls back to JS cosine if not installed)
-initVecDb();
-if (vecDb) vecSync();
+// Startup tasks — each wrapped to prevent crash on memory pressure
+try { migrateRamSchema(); } catch (e) { console.error('[startup] migrateRamSchema:', e.message?.slice(0, 60)); }
+try { ensureSsdDb(); } catch (e) { console.error('[startup] ensureSsdDb:', e.message?.slice(0, 60)); }
+try { ensureConsultationsTable(); } catch (e) { console.error('[startup] ensureConsultationsTable:', e.message?.slice(0, 60)); }
+try { restoreRamFromSsd(); } catch (e) { console.error('[startup] restoreRamFromSsd:', e.message?.slice(0, 60)); }
+try { initVecDb(); if (vecDb) vecSync(); } catch (e) { console.error('[startup] initVecDb:', e.message?.slice(0, 60)); }
 
 // Periodic backup + migration check (replaces plain backup timer)
 const backupTimer = setInterval(doBackupAndMigrate, BACKUP_INTERVAL_MS);
