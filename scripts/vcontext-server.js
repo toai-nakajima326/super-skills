@@ -2412,6 +2412,51 @@ function doBackupAndMigrate() {
   if (ollamaAvailable && !discoveryLoopRunning) {
     startDiscoveryLoop().catch(() => {});
   }
+  // Anomaly detection
+  try { detectAnomalies(); } catch {}
+}
+
+// ── Anomaly detection ─────────────────────────────────────────
+function detectAnomalies() {
+  const alerts = [];
+
+  // 1. Error spike: >10 errors in last 30 min
+  const errorCount = dbQuery("SELECT COUNT(*) as c FROM entry_index WHERE type = 'tool-error' AND created_at >= datetime('now', '-30 minutes');");
+  if ((errorCount[0]?.c || 0) > 10) {
+    alerts.push({ level: 'high', msg: `Error spike: ${errorCount[0].c} errors in last 30 min` });
+  }
+
+  // 2. Embedding stall: no new embeddings in 30 min while backlog exists
+  const embedBacklog = dbQuery("SELECT COUNT(*) as c FROM entries WHERE embedding IS NULL;");
+  const recentEmbeds = dbQuery("SELECT COUNT(*) as c FROM entries WHERE embedding IS NOT NULL AND created_at >= datetime('now', '-30 minutes');");
+  if ((embedBacklog[0]?.c || 0) > 50 && (recentEmbeds[0]?.c || 0) === 0) {
+    alerts.push({ level: 'medium', msg: `Embedding stalled: ${embedBacklog[0].c} pending, 0 in last 30 min` });
+  }
+
+  // 3. RAM/SSD sync gap >50
+  const ramCount = dbQuery("SELECT COUNT(*) as c FROM entries;");
+  const ssdCount = dbQuery("SELECT COUNT(*) as c FROM entries;", SSD_DB_PATH);
+  const gap = (ramCount[0]?.c || 0) - (ssdCount[0]?.c || 0);
+  if (Math.abs(gap) > 50) {
+    alerts.push({ level: 'medium', msg: `RAM/SSD gap: ${gap} entries out of sync` });
+  }
+
+  // 4. Disk usage >80%
+  try {
+    const ramSize = statSync(DB_PATH).size;
+    if (ramSize > 3 * 1024 * 1024 * 1024) {
+      alerts.push({ level: 'high', msg: `RAM disk >3GB (${(ramSize/1024/1024/1024).toFixed(1)}GB)` });
+    }
+  } catch {}
+
+  // Store alerts
+  if (alerts.length > 0) {
+    const content = JSON.stringify({ alerts, detected_at: new Date().toISOString() });
+    try {
+      dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES ('anomaly-alert', ${esc(content)}, '["anomaly-alert","auto"]', 'system', ${estimateTokens(content)}, datetime('now'), 0, 'ram');`);
+      console.log(`[vcontext:alert] ${alerts.length} anomalies detected`);
+    } catch {}
+  }
 }
 
 // ── Streaming skill discovery + user need prediction ──────────

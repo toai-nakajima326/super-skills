@@ -88,6 +88,7 @@
     </span>
   </div>
 </header>
+<div id="alerts-bar" style="max-width:1400px;margin:0 auto 12px;display:none;"></div>
 <div class="grid">
   <!-- Search -->
   <div class="card wide">
@@ -303,6 +304,22 @@ function escapeHtml(str) {
 }
 
 async function refresh() {
+  // Alerts
+  const alertData = await fetchJson('/recent?n=1&type=anomaly-alert');
+  var alertBar = document.getElementById('alerts-bar');
+  if (alertData && alertData.results && alertData.results.length > 0) {
+    try {
+      var ad = JSON.parse(alertData.results[0].content);
+      if (ad.alerts && ad.alerts.length > 0) {
+        alertBar.style.display = 'block';
+        alertBar.innerHTML = ad.alerts.map(function(a) {
+          var color = a.level === 'high' ? 'var(--red)' : 'var(--yellow)';
+          return '<div style="padding:8px 12px;margin-bottom:4px;border-radius:6px;border:1px solid ' + color + ';background:' + color + '22;font-size:13px;color:' + color + ';">' + escapeHtml(a.msg) + '</div>';
+        }).join('');
+      } else { alertBar.style.display = 'none'; }
+    } catch { alertBar.style.display = 'none'; }
+  } else { alertBar.style.display = 'none'; }
+
   // Health
   const health = await fetchJson('/health');
   if (health) {

@@ -181,6 +181,40 @@ async function recordEvent(eventName) {
           session: sessionId,
         });
       }
+
+      // On session-end: generate session summary (additive, raw is NOT deleted)
+      if (eventName === 'session-end') {
+        try {
+          const sessionEntries = await get(`/session/${encodeURIComponent(sessionId)}?limit=50`);
+          if (sessionEntries.results && sessionEntries.results.length > 5) {
+            const types = {};
+            const tools = {};
+            let errors = 0;
+            for (const r of sessionEntries.results) {
+              types[r.type] = (types[r.type] || 0) + 1;
+              try {
+                const d = JSON.parse(r.content);
+                if (d.tool_name) tools[d.tool_name] = (tools[d.tool_name] || 0) + 1;
+              } catch {}
+              if (r.type === 'tool-error') errors++;
+            }
+            const summary = JSON.stringify({
+              session: sessionId,
+              entry_count: sessionEntries.results.length,
+              event_types: types,
+              tools_used: tools,
+              errors,
+              summarized_at: new Date().toISOString(),
+            });
+            await post('/store', {
+              type: 'session-summary',
+              content: summary,
+              tags: ['session-summary', 'auto'],
+              session: sessionId,
+            });
+          }
+        } catch {}
+      }
     } catch {} // Non-fatal
   }
 
@@ -320,6 +354,36 @@ async function handleSessionRecall() {
       lines.push('');
     }
   }
+
+  // Cross-project knowledge: find relevant decisions/errors from other projects
+  try {
+    const data = JSON.parse(input);
+    const cwd = data.cwd || '';
+    const project = cwd.split('/').filter(Boolean).pop() || '';
+    if (project) {
+      // Search for decisions and errors NOT from this project
+      const crossProject = await get(`/recall?q=${encodeURIComponent(project)}&type=decision&limit=5`);
+      const crossErrors = await get(`/recall?q=${encodeURIComponent(project)}&type=completion-violation&limit=3`);
+      const otherProjectEntries = [
+        ...(crossProject.results || []),
+        ...(crossErrors.results || []),
+      ].filter(r => {
+        // Exclude entries from this same project
+        try {
+          const c = JSON.parse(r.content);
+          const entryCwd = c.cwd || '';
+          return !entryCwd.includes(project);
+        } catch { return true; }
+      });
+      if (otherProjectEntries.length > 0) {
+        lines.push('### Cross-Project Knowledge');
+        for (const r of otherProjectEntries.slice(0, 3)) {
+          lines.push(`- [${r.type}] ${summarize(r)}`);
+        }
+        lines.push('');
+      }
+    }
+  } catch {}
 
   // Skill evolution history — extended skills
   const diffs = await get('/recall?q=skill-diff&type=skill-diff&limit=10');
