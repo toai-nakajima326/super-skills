@@ -304,8 +304,18 @@ function escapeHtml(str) {
 }
 
 async function refresh() {
+  // Parallel fetch all data at once
+  const [alertData, health, tiers, ai, recent, allRecent, metrics] = await Promise.all([
+    fetchJson('/recent?n=1&type=anomaly-alert'),
+    fetchJson('/health'),
+    fetchJson('/tier/stats'),
+    fetchJson('/ai/status'),
+    fetchJson('/recent?n=15'),
+    fetchJson('/recent?n=200'),
+    fetchJson('/metrics/report?hours=24'),
+  ]);
+
   // Alerts
-  const alertData = await fetchJson('/recent?n=1&type=anomaly-alert');
   var alertBar = document.getElementById('alerts-bar');
   if (alertData && alertData.results && alertData.results.length > 0) {
     try {
@@ -321,7 +331,6 @@ async function refresh() {
   } else { alertBar.style.display = 'none'; }
 
   // Health
-  const health = await fetchJson('/health');
   if (health) {
     const si = document.getElementById('status-indicator');
     si.innerHTML = '<span class="status-dot status-' + (health.status === 'healthy' ? 'green' : 'red') + '"></span>' + escapeHtml(health.status);
@@ -338,8 +347,6 @@ async function refresh() {
   }
 
   // Tiers + AI
-  const tiers = await fetchJson('/tier/stats');
-  const ai = await fetchJson('/ai/status');
   if (tiers) {
     const maxEntries = Math.max(tiers.ram.entries, tiers.ssd.entries, 1);
     var tiersHtml =
@@ -370,7 +377,6 @@ async function refresh() {
   // AI detail (rendered in Storage Tiers card, standalone card removed)
 
   // Recent
-  const recent = await fetchJson('/recent?n=15');
   if (recent && recent.results) {
     document.getElementById('recent-content').innerHTML = recent.results.map(function(r) {
       var summary = summarizeContent(r.type, r.content);
@@ -393,7 +399,6 @@ async function refresh() {
   }
 
   // Sessions — aggregate from recent entries
-  const allRecent = await fetchJson('/recent?n=200');
   if (allRecent && allRecent.results) {
     var sessions = {};
     for (var i = 0; i < allRecent.results.length; i++) {
@@ -454,7 +459,6 @@ async function refresh() {
   }
 
   // API Metrics — human-readable status + effectiveness
-  const metrics = await fetchJson('/metrics/report?hours=24');
   if (metrics && metrics.operations) {
     var storeOp = metrics.operations['store'] || { count: 0, avg_latency_ms: 0, total_tokens_in: 0, total_tokens_out: 0 };
     var recallOp = metrics.operations['recall'] || { count: 0, avg_latency_ms: 0, avg_result_count: 0 };
