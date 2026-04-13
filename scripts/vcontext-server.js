@@ -3197,9 +3197,10 @@ Keywords:`;
       const sanitized = sanitizeForExternalSearch(keywords.trim());
       if (!sanitized || sanitized.length < 3) return;
 
-      // Step 3: Search vcontext for related past context + generate background knowledge
-      // Two sources: (a) vcontext FTS search, (b) Ollama local knowledge generation
+      // Step 3: Multi-source search with rate limiting
+      // Sources: (a) vcontext FTS, (b) DuckDuckGo, (c) Ollama, (d) Wikipedia
       const parts = [];
+      const searchWords = sanitized.split(' ').filter(w => w.length > 2);
 
       // 3a: Search own vcontext for related entries
       try {
@@ -3209,7 +3210,38 @@ Keywords:`;
         }
       } catch {}
 
-      // 3b: Generate background knowledge with Ollama (local, no external call)
+      // 3b: DuckDuckGo instant answers (rate limited: 1 req per keyword, max 3)
+      for (const kw of searchWords.slice(0, 3)) {
+        try {
+          const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(kw)}&format=json&no_redirect=1&no_html=1`;
+          const ddgResult = await new Promise((resolve) => {
+            const req = httpsRequest(new URL(ddgUrl), {
+              method: 'GET', timeout: 5000,
+              headers: { 'User-Agent': 'vcontext/2.0' },
+            }, (res) => {
+              const chunks = [];
+              res.on('data', c => chunks.push(c));
+              res.on('end', () => {
+                try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+                catch { resolve(null); }
+              });
+            });
+            req.on('error', () => resolve(null));
+            req.on('timeout', () => { req.destroy(); resolve(null); });
+            req.end();
+          });
+          if (ddgResult) {
+            if (ddgResult.Abstract) parts.push(`[ddg:${kw}] ${ddgResult.Abstract.slice(0, 300)}`);
+            for (const topic of (ddgResult.RelatedTopics || []).slice(0, 2)) {
+              if (topic.Text) parts.push(`[ddg:${kw}] ${topic.Text.slice(0, 200)}`);
+            }
+          }
+          // Rate limit: 500ms between requests
+          await new Promise(r => setTimeout(r, 500));
+        } catch {}
+      }
+
+      // 3c: Generate background knowledge with Ollama (local, no external call)
       try {
         const bgPrompt = `List 3 key technical facts or best practices about: ${sanitized}
 Output as a numbered list. Be specific and actionable. Max 100 words.`;
@@ -3219,9 +3251,9 @@ Output as a numbered list. Be specific and actionable. Max 100 words.`;
         }
       } catch {}
 
-      // 3c: Try Wikipedia API for factual context (HTTPS, no tracking)
+      // 3d: Wikipedia (one request for first keyword)
       try {
-        const wikiUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(sanitized.split(' ')[0])}`;
+        const wikiUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(searchWords[0] || sanitized.split(' ')[0])}`;
         const wikiResult = await new Promise((resolve) => {
           const req = httpsRequest(new URL(wikiUrl), {
             method: 'GET', timeout: 5000,
