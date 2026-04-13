@@ -320,7 +320,9 @@ async function refresh() {
   if (alertData && alertData.results && alertData.results.length > 0) {
     try {
       var ad = JSON.parse(alertData.results[0].content);
-      if (ad.alerts && ad.alerts.length > 0) {
+      // Only show alerts from last 30 minutes
+      var alertAge = (Date.now() - new Date(alertData.results[0].created_at + 'Z').getTime()) / 60000;
+      if (ad.alerts && ad.alerts.length > 0 && alertAge < 30) {
         alertBar.style.display = 'block';
         alertBar.innerHTML = ad.alerts.map(function(a) {
           var color = a.level === 'high' ? 'var(--red)' : 'var(--yellow)';
