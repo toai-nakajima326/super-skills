@@ -3326,12 +3326,40 @@ async function handleCompletionCheck(req, res) {
         `[${r.type}] ${r.tool_name || ''} ${r.preview || ''}`
       ).join('\n').slice(0, 2000);
 
+      // Search for latest best practices relevant to this work
+      let latestPractices = '';
+      try {
+        const tools = recentWork.map(r => r.tool_name).filter(Boolean);
+        const mainTool = tools[0] || 'code';
+        const searchQuery = sanitizeForExternalSearch(`${mainTool} completion checklist best practices`);
+        const searchResult = await new Promise((resolve) => {
+          const req = httpRequest(new URL(`${SEARXNG_URL}/search?q=${encodeURIComponent(searchQuery + ' 2026')}&format=json&language=auto`), {
+            method: 'GET', timeout: 8000,
+          }, (res) => {
+            const chunks = [];
+            res.on('data', c => chunks.push(c));
+            res.on('end', () => {
+              try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+              catch { resolve(null); }
+            });
+          });
+          req.on('error', () => resolve(null));
+          req.on('timeout', () => { req.destroy(); resolve(null); });
+          req.end();
+        });
+        if (searchResult && searchResult.results) {
+          latestPractices = searchResult.results.slice(0, 3).map(r =>
+            `- ${(r.content || '').slice(0, 150)}`
+          ).join('\n');
+        }
+      } catch {}
+
       const checkPrompt = `An AI just claimed this work is complete: "${msg.slice(0, 300)}"
 
 Recent actions in this session:
 ${workSummary}
 
-Check for these common AI omissions:
+${latestPractices ? `Latest best practices from web (2026):\n${latestPractices}\n` : ''}Check for these common AI omissions:
 1. Did it update documentation (README, CLAUDE.md, roadmap)?
 2. Did it run tests, build, lint?
 3. Are there workarounds left (grep -v, TODO, FIXME, skip)?
