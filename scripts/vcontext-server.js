@@ -2410,18 +2410,43 @@ async function discoverAndPredict() {
   if (Date.now() - lastDiscoveryRun < DISCOVERY_INTERVAL_MS) return;
   lastDiscoveryRun = Date.now();
 
-  // ── 1. Skill discovery: search for new patterns ──
+  // ── 1. Skill discovery: dynamic topic from user activity ──
   try {
-    const topics = [
-      'AI agent workflow pattern 2026',
-      'Claude Code best practices new',
-      'coding agent automation skill',
-      'LLM developer productivity tool',
-    ];
-    const topic = topics[Math.floor(Math.random() * topics.length)];
+    // Generate search topic from recent user activity
+    let topic = 'AI agent workflow best practices 2026'; // fallback
+    const model = pickModel('summarize');
+    if (model) {
+      try {
+        const recentActivity = dbQuery(`SELECT tool_name, type FROM entry_index WHERE created_at >= datetime('now', '-6 hours') AND tool_name IS NOT NULL ORDER BY entry_id DESC LIMIT 20;`);
+        const recentPrompts = dbQuery(`SELECT substr(content, 1, 200) as c FROM entries WHERE type = 'user-prompt' AND created_at >= datetime('now', '-6 hours') ORDER BY id DESC LIMIT 5;`);
+
+        const activityStr = recentActivity.map(r => r.tool_name).filter(Boolean).join(', ');
+        const promptStr = recentPrompts.map(r => {
+          try { const d = JSON.parse(r.c); return d.prompt || d.content || ''; } catch { return r.c || ''; }
+        }).filter(s => s.length > 5).join('; ');
+
+        const topicPrompt = `Based on this developer's recent work, generate ONE search query to find the most useful new tool, library, or best practice for them. Output ONLY the search query, nothing else.
+
+Recent tools: ${activityStr || 'Bash, Edit, Read'}
+Recent questions: ${sanitizeForExternalSearch(promptStr || 'general development')}
+
+Search query:`;
+        const generated = await ollamaGenerate(model, topicPrompt, { maxTokens: 30, temperature: 0.7 });
+        if (generated && generated.length > 5) {
+          topic = sanitizeForExternalSearch(generated.trim().split('\n')[0]);
+        }
+      } catch {}
+    }
+    console.log(`[vcontext:discover] Topic: "${topic}"`);
+
+    // Dedup: skip if we already searched this exact topic
+    const existing = dbQuery(`SELECT id FROM entries WHERE type = 'skill-discovery' AND content LIKE ${esc('%' + topic.slice(0, 30) + '%')} LIMIT 1;`);
+    if (existing.length > 0) {
+      console.log(`[vcontext:discover] Skipped (already searched)`);
+    } else {
 
     const searchResult = await new Promise((resolve) => {
-      const req = httpRequest(new URL(`${SEARXNG_URL}/search?q=${encodeURIComponent(topic)}&format=json&language=en`), {
+      const req = httpRequest(new URL(`${SEARXNG_URL}/search?q=${encodeURIComponent(topic + ' 2026')}&format=json&language=auto`), {
         method: 'GET', timeout: 10000,
       }, (res) => {
         const chunks = [];
@@ -2450,6 +2475,7 @@ async function discoverAndPredict() {
         console.log(`[vcontext:discover] Searched "${topic}" → ${snippets.length} results`);
       } catch {}
     }
+    } // end dedup else
   } catch {}
 
   // ── 2. User need prediction: analyze activity patterns ──
