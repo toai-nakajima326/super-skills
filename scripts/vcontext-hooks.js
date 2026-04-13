@@ -142,6 +142,18 @@ async function recordEvent(eventName) {
     session: sessionId,
   });
 
+  // On user-prompt: trigger predictive search (async, non-blocking)
+  if (eventName === 'user-prompt') {
+    try {
+      const data = JSON.parse(input);
+      const prompt = data.prompt || data.content || data.message || '';
+      if (prompt.length >= 15) {
+        // Fire and forget — don't await, don't block the hook
+        post('/predictive-search', { prompt: prompt.slice(0, 500), session: sessionId }).catch(() => {});
+      }
+    } catch {}
+  }
+
   // On tool-use/session-end: extract and store AI response text from transcript
   if (eventName === 'tool-use' || eventName === 'session-end') {
     try {

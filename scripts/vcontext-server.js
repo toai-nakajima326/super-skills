@@ -32,6 +32,7 @@
  */
 
 import { createServer, request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { execSync, execFileSync } from 'node:child_process';
 import { existsSync, statSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -3133,6 +3134,137 @@ function handleAnalyticsReport(req, res) {
   });
 }
 
+// ── Predictive search with privacy filter ─────────────────────
+
+// Privacy filter: strip sensitive info before sending to external search
+function sanitizeForExternalSearch(text) {
+  let cleaned = text;
+  // Remove file paths
+  cleaned = cleaned.replace(/\/[\w\-./]+/g, '');
+  // Remove URLs
+  cleaned = cleaned.replace(/https?:\/\/[^\s]+/g, '');
+  // Remove email addresses
+  cleaned = cleaned.replace(/[\w.-]+@[\w.-]+/g, '');
+  // Remove API keys, tokens, secrets (common patterns)
+  cleaned = cleaned.replace(/[a-zA-Z0-9_-]{20,}/g, '');
+  // Remove IP addresses
+  cleaned = cleaned.replace(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/g, '');
+  // Remove common usernames / hostnames from tags
+  cleaned = cleaned.replace(/user:\S+/g, '');
+  // Collapse whitespace
+  cleaned = cleaned.replace(/\s+/g, ' ').trim();
+  return cleaned;
+}
+
+/**
+ * POST /predictive-search
+ * Body: { prompt }
+ * Extracts keywords from user prompt (via Ollama, local only),
+ * sanitizes for privacy, searches the web, stores results in vcontext.
+ * Fully async — returns immediately, results stored in background.
+ */
+async function handlePredictiveSearch(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  const body = await readBody(req);
+  const prompt = body.prompt || '';
+  if (!prompt || prompt.length < 10) {
+    return sendJson(res, 200, { status: 'skipped', reason: 'prompt too short' });
+  }
+
+  // Return immediately — do work in background
+  sendJson(res, 202, { status: 'searching', prompt_length: prompt.length });
+
+  setImmediate(async () => {
+    try {
+      if (!ollamaAvailable) return;
+
+      // Step 1: Extract search keywords using local Ollama (no external call)
+      const model = pickModel('summarize');
+      if (!model) return;
+
+      const keywordPrompt = `Extract 2-3 search keywords from this user request. Output ONLY the keywords separated by spaces, nothing else. No explanation.
+
+Request: ${prompt.slice(0, 500)}
+
+Keywords:`;
+
+      const keywords = await ollamaGenerate(model, keywordPrompt, { maxTokens: 30, temperature: 0.1 });
+      if (!keywords || keywords.length < 3) return;
+
+      // Step 2: Privacy filter — sanitize before external search
+      const sanitized = sanitizeForExternalSearch(keywords.trim());
+      if (!sanitized || sanitized.length < 3) return;
+
+      // Step 3: Search vcontext for related past context + generate background knowledge
+      // Two sources: (a) vcontext FTS search, (b) Ollama local knowledge generation
+      const parts = [];
+
+      // 3a: Search own vcontext for related entries
+      try {
+        const related = dbQuery(`SELECT id, type, content, created_at FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(sanitized)} LIMIT 5);`);
+        for (const r of related) {
+          parts.push(`[past:${r.type}] ${String(r.content).slice(0, 200)}`);
+        }
+      } catch {}
+
+      // 3b: Generate background knowledge with Ollama (local, no external call)
+      try {
+        const bgPrompt = `List 3 key technical facts or best practices about: ${sanitized}
+Output as a numbered list. Be specific and actionable. Max 100 words.`;
+        const bgKnowledge = await ollamaGenerate(model, bgPrompt, { maxTokens: 200, temperature: 0.3 });
+        if (bgKnowledge && bgKnowledge.length > 20) {
+          parts.push(`[knowledge] ${bgKnowledge.trim()}`);
+        }
+      } catch {}
+
+      // 3c: Try Wikipedia API for factual context (HTTPS, no tracking)
+      try {
+        const wikiUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(sanitized.split(' ')[0])}`;
+        const wikiResult = await new Promise((resolve) => {
+          const req = httpsRequest(new URL(wikiUrl), {
+            method: 'GET', timeout: 5000,
+            headers: { 'User-Agent': 'vcontext/2.0' },
+          }, (res) => {
+            const chunks = [];
+            res.on('data', c => chunks.push(c));
+            res.on('end', () => {
+              try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+              catch { resolve(null); }
+            });
+          });
+          req.on('error', () => resolve(null));
+          req.on('timeout', () => { req.destroy(); resolve(null); });
+          req.end();
+        });
+        if (wikiResult && wikiResult.extract) {
+          parts.push(`[wiki] ${wikiResult.extract.slice(0, 300)}`);
+        }
+      } catch {}
+
+      if (parts.length === 0) return;
+
+      const content = JSON.stringify({
+        query: sanitized,
+        original_keywords: keywords.trim(),
+        results: parts,
+        source: 'vcontext+ollama+wikipedia',
+        fetched_at: new Date().toISOString(),
+      });
+
+      // Step 5: Store in vcontext
+      const sql = `INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES (${esc('predictive-search')}, ${esc(content)}, ${esc(JSON.stringify(['predictive-search', 'auto']))}, ${esc(body.session || 'predictive')}, ${estimateTokens(content)}, datetime('now'), 0, 'ram');`;
+      dbExec(sql);
+
+      console.log(`[vcontext:predict] Searched: "${sanitized}" → ${parts.length} results stored`);
+    } catch (e) {
+      // Non-fatal
+      console.error('[vcontext:predict] Error:', e.message);
+    }
+  });
+}
+
 // GET /metrics/report — API performance metrics
 function handleMetricsReport(req, res) {
   const auth = validateApiKey(req);
@@ -3388,6 +3520,8 @@ const server = createServer(async (req, res) => {
       handleAnalyticsReport(req, res);
     } else if (method === 'GET' && path === '/metrics/report') {
       handleMetricsReport(req, res);
+    } else if (method === 'POST' && path === '/predictive-search') {
+      await handlePredictiveSearch(req, res);
     } else if (method === 'GET' && path === '/dashboard') {
       const html = readFileSync(join(SCRIPT_DIR, 'vcontext-dashboard.html'), 'utf-8');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
