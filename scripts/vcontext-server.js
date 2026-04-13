@@ -124,14 +124,22 @@ function getAccessibleGroups(auth) {
  * @param {string} [dbPath=DB_PATH] - path to the database file
  */
 function dbExec(sql, dbPath = DB_PATH) {
-  try {
-    execFileSync('sqlite3', [dbPath, sql], {
-      timeout: 30000,
-      maxBuffer: 50 * 1024 * 1024,
-    });
-  } catch (e) {
-    console.error(`[db exec error @ ${dbPath}]`, e.message);
-    throw new Error(`SQLite exec error: ${e.message}`);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      execFileSync('sqlite3', [dbPath, sql], {
+        timeout: 30000,
+        maxBuffer: 50 * 1024 * 1024,
+      });
+      return;
+    } catch (e) {
+      if (e.message && e.message.includes('database is locked') && attempt < 2) {
+        // Wait and retry on lock
+        execFileSync('sleep', ['1']);
+        continue;
+      }
+      console.error(`[db exec error @ ${dbPath}]`, e.message?.slice(0, 100));
+      throw new Error(`SQLite exec error: ${e.message}`);
+    }
   }
 }
 
@@ -151,15 +159,25 @@ function dbQuery(sql, dbPath = DB_PATH) {
     if (!trimmed || trimmed === '[]') return [];
     return JSON.parse(trimmed);
   } catch (e) {
-    // sqlite3 -json returns empty string or error for no results
     const stdout = e.stdout || '';
     if (e.status === 0 || stdout.trim() === '' || stdout.trim() === '[]') return [];
-    // Also return [] for common non-critical errors
     if (e.message && (e.message.includes('ENOBUFS') || e.message.includes('spawnSync'))) {
       console.error(`[db query error @ ${dbPath}]`, e.message.slice(0, 100));
       return [];
     }
-    console.error(`[db query error @ ${dbPath}]`, e.message);
+    // Retry once on database lock
+    if (e.message && e.message.includes('database is locked')) {
+      try {
+        execFileSync('sleep', ['1']);
+        const out2 = execFileSync('sqlite3', ['-json', dbPath, sql], {
+          timeout: 60000, maxBuffer: 100 * 1024 * 1024, encoding: 'utf-8',
+        });
+        const trimmed2 = out2.trim();
+        if (!trimmed2 || trimmed2 === '[]') return [];
+        return JSON.parse(trimmed2);
+      } catch { return []; }
+    }
+    console.error(`[db query error @ ${dbPath}]`, e.message?.slice(0, 100));
     throw new Error(`SQLite query error: ${e.message}`);
   }
 }
@@ -202,6 +220,12 @@ function ensureRamDisk() {
 
 // ── Schema migration for tiered storage columns ───────────────
 function migrateRamSchema() {
+  // Enable WAL mode for better concurrent read/write (reduces "database is locked")
+  try {
+    dbExec("PRAGMA journal_mode=WAL;");
+    dbExec("PRAGMA busy_timeout=5000;");
+  } catch {}
+
   // Add tiered-storage columns if they do not already exist.
   // SQLite does not support ADD COLUMN IF NOT EXISTS, so we check
   // the table_info pragma first.
@@ -354,8 +378,13 @@ CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN
 END;
 `;
     dbExec(schema, SSD_DB_PATH);
+    dbExec("PRAGMA journal_mode=WAL;", SSD_DB_PATH);
+    dbExec("PRAGMA busy_timeout=5000;", SSD_DB_PATH);
     console.log('[vcontext] SSD database initialised');
   } else {
+    // Enable WAL on existing SSD DB
+    try { dbExec("PRAGMA journal_mode=WAL;", SSD_DB_PATH); } catch {}
+    try { dbExec("PRAGMA busy_timeout=5000;", SSD_DB_PATH); } catch {}
     // Ensure tiered columns exist in SSD DB too
     try {
       const cols = dbQuery("PRAGMA table_info(entries);", SSD_DB_PATH);
