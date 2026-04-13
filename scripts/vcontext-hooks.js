@@ -247,9 +247,22 @@ async function handleSessionRecall() {
   const recent = await get(`/recent?n=10${nsParam}`);
   const stats = await get('/tier/stats');
 
+  const rules = await get('/recall?q=MANDATORY+RULE&type=decision&limit=10');
+
   const lines = ['## Virtual Context — Session Recall', ''];
   lines.push(`Session: ${sessionId}`);
   lines.push('');
+
+  // Global rules — ALWAYS first
+  if (rules.results && rules.results.length > 0) {
+    lines.push('### MANDATORY RULES');
+    for (const r of rules.results) {
+      if (r.status === 'active') {
+        lines.push(`- ${r.content}`);
+      }
+    }
+    lines.push('');
+  }
 
   // Own session entries first
   if (own.results && own.results.length > 0) {
