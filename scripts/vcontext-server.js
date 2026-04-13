@@ -2376,6 +2376,11 @@ async function startEmbedLoop() {
   if (!model) { embedLoopRunning = false; return; }
 
   while (embedLoopRunning && ollamaAvailable) {
+    // Pause if flag file exists (memory pressure relief)
+    if (existsSync('/tmp/vcontext-embed-pause')) {
+      await new Promise(r => setTimeout(r, 60000));
+      continue;
+    }
     try {
       const rows = dbQuery('SELECT id, content FROM entries WHERE embedding IS NULL ORDER BY id ASC LIMIT 1;');
       if (rows.length === 0) {
@@ -2500,6 +2505,10 @@ async function startDiscoveryLoop() {
   discoveryLoopRunning = true;
 
   while (discoveryLoopRunning && ollamaAvailable) {
+    if (existsSync('/tmp/vcontext-embed-pause')) {
+      await new Promise(r => setTimeout(r, 60000));
+      continue;
+    }
     try {
       await runOneDiscovery();
     } catch {}
