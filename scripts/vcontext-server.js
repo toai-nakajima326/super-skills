@@ -2328,27 +2328,36 @@ function formatBytes(bytes) {
   return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i];
 }
 
-// ── Batch embed (fills backlog, runs N entries per cycle) ─────
-async function batchEmbed(limit = 5) {
+// ── Streaming embed (continuous background loop) ──────────────
+let embedLoopRunning = false;
+
+async function startEmbedLoop() {
+  if (embedLoopRunning) return;
+  embedLoopRunning = true;
   const model = pickModel('embed');
-  if (!model) return;
-  const rows = dbQuery(`SELECT id, content FROM entries WHERE embedding IS NULL ORDER BY id DESC LIMIT ${limit};`);
-  if (rows.length === 0) return;
-  let done = 0;
-  for (const row of rows) {
+  if (!model) { embedLoopRunning = false; return; }
+
+  while (embedLoopRunning && ollamaAvailable) {
     try {
+      const rows = dbQuery('SELECT id, content FROM entries WHERE embedding IS NULL ORDER BY id ASC LIMIT 1;');
+      if (rows.length === 0) {
+        // Nothing to embed — sleep 30s then check again
+        await new Promise(r => setTimeout(r, 30000));
+        continue;
+      }
+      const row = rows[0];
       const embedding = await ollamaEmbed(model, String(row.content).slice(0, 1000));
       if (embedding && embedding.length > 0) {
         dbExec(`UPDATE entries SET embedding = ${esc(JSON.stringify(embedding))} WHERE id = ${row.id};`);
         vecUpsert(row.id, embedding);
         try { dbExec(`UPDATE entry_index SET has_embedding = 1 WHERE entry_id = ${row.id};`); } catch {}
-        done++;
       }
     } catch {
-      break; // Ollama likely overloaded, stop this cycle
+      // Ollama error — back off 60s then retry
+      await new Promise(r => setTimeout(r, 60000));
     }
   }
-  if (done > 0) console.log(`[vcontext:embed] Batch: ${done}/${rows.length} entries embedded`);
+  embedLoopRunning = false;
 }
 
 // ── Periodic migration check (piggybacks on backup timer) ─────
@@ -2368,9 +2377,9 @@ function doBackupAndMigrate() {
   try { backfillIndex(200); } catch {}
   // Recheck Ollama availability
   checkOllama();
-  // Batch embed: generate missing embeddings (up to 20 per cycle)
-  if (ollamaAvailable) {
-    batchEmbed(20).catch(() => {});
+  // Ensure embed loop is running (self-healing — restarts if stopped)
+  if (ollamaAvailable && !embedLoopRunning) {
+    startEmbedLoop().catch(() => {});
   }
   // Quick migration check
   try {
@@ -3428,6 +3437,7 @@ function shutdown(signal) {
   }
   wsClients.clear();
   doBackup();
+  embedLoopRunning = false;
   if (vecDb) { try { vecDb.close(); } catch {} }
   server.close(() => {
     console.log('[vcontext] Server closed');
@@ -3440,8 +3450,9 @@ function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-// Check local AI availability
+// Check local AI availability + start embed loop
 checkOllama();
+if (ollamaAvailable) startEmbedLoop().catch(() => {});
 
 // Start
 server.listen(PORT, '127.0.0.1', () => {
