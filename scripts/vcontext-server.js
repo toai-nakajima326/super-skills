@@ -2366,41 +2366,73 @@ function formatBytes(bytes) {
   return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i];
 }
 
-// ── Streaming embed (continuous background loop) ──────────────
+// ── Streaming embed (wave pattern: burst → unload → rest → repeat) ──
 let embedLoopRunning = false;
+const EMBED_BURST_SIZE = 10;    // process N entries per wave
+const EMBED_REST_MS = 3 * 60 * 1000; // rest 3 min between waves (model unloads)
 
 async function startEmbedLoop() {
   if (embedLoopRunning) return;
   embedLoopRunning = true;
-  const model = pickModel('embed');
-  if (!model) { embedLoopRunning = false; return; }
 
   while (embedLoopRunning && ollamaAvailable) {
-    // Pause if flag file exists (memory pressure relief)
+    // Pause if flag file exists
     if (existsSync('/tmp/vcontext-embed-pause')) {
       await new Promise(r => setTimeout(r, 60000));
       continue;
     }
-    try {
-      const rows = dbQuery('SELECT id, content FROM entries WHERE embedding IS NULL ORDER BY id ASC LIMIT 1;');
-      if (rows.length === 0) {
-        // Nothing to embed — sleep 30s then check again
-        await new Promise(r => setTimeout(r, 30000));
-        continue;
-      }
-      const row = rows[0];
-      const embedding = await ollamaEmbed(model, String(row.content).slice(0, 1000));
-      if (embedding && embedding.length > 0) {
-        const embJson = esc(JSON.stringify(embedding));
-        dbExec(`UPDATE entries SET embedding = ${embJson} WHERE id = ${row.id};`);
-        try { dbExec(`UPDATE entries SET embedding = ${embJson} WHERE id = ${row.id};`, SSD_DB_PATH); } catch {}
-        vecUpsert(row.id, embedding);
-        try { dbExec(`UPDATE entry_index SET has_embedding = 1 WHERE entry_id = ${row.id};`); } catch {}
-      }
-    } catch {
-      // Ollama error — back off 60s then retry
-      await new Promise(r => setTimeout(r, 60000));
+
+    const model = pickModel('embed');
+    if (!model) { await new Promise(r => setTimeout(r, 60000)); continue; }
+
+    // Check backlog
+    const pending = dbQuery('SELECT COUNT(*) as c FROM entries WHERE embedding IS NULL;');
+    if ((pending[0]?.c || 0) === 0) {
+      // Nothing to do — sleep long, model stays unloaded
+      await new Promise(r => setTimeout(r, EMBED_REST_MS));
+      continue;
     }
+
+    // Burst: process up to N entries
+    let done = 0;
+    for (let i = 0; i < EMBED_BURST_SIZE && embedLoopRunning; i++) {
+      try {
+        const rows = dbQuery('SELECT id, content FROM entries WHERE embedding IS NULL ORDER BY id ASC LIMIT 1;');
+        if (rows.length === 0) break;
+        const row = rows[0];
+        const embedding = await ollamaEmbed(model, String(row.content).slice(0, 1000));
+        if (embedding && embedding.length > 0) {
+          const embJson = esc(JSON.stringify(embedding));
+          dbExec(`UPDATE entries SET embedding = ${embJson} WHERE id = ${row.id};`);
+          try { dbExec(`UPDATE entries SET embedding = ${embJson} WHERE id = ${row.id};`, SSD_DB_PATH); } catch {}
+          vecUpsert(row.id, embedding);
+          try { dbExec(`UPDATE entry_index SET has_embedding = 1 WHERE entry_id = ${row.id};`); } catch {}
+          done++;
+        }
+      } catch {
+        break; // Ollama error — stop this burst
+      }
+    }
+
+    if (done > 0) console.log(`[vcontext:embed] Burst: ${done} entries`);
+
+    // Unload model to free memory
+    try {
+      await new Promise((resolve) => {
+        const body = JSON.stringify({ model, keep_alive: 0 });
+        const req = httpRequest(new URL(`${OLLAMA_URL}/api/generate`), {
+          method: 'POST', timeout: 5000,
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+        }, () => resolve());
+        req.on('error', () => resolve());
+        req.on('timeout', () => { req.destroy(); resolve(); });
+        req.write(body);
+        req.end();
+      });
+    } catch {}
+
+    // Rest — let memory recover
+    await new Promise(r => setTimeout(r, EMBED_REST_MS));
   }
   embedLoopRunning = false;
 }
