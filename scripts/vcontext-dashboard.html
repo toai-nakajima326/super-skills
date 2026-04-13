@@ -326,7 +326,8 @@ async function refresh() {
         alertBar.style.display = 'block';
         alertBar.innerHTML = ad.alerts.map(function(a) {
           var color = a.level === 'high' ? 'var(--red)' : 'var(--yellow)';
-          return '<div style="padding:8px 12px;margin-bottom:4px;border-radius:6px;border:1px solid ' + color + ';background:' + color + '22;font-size:13px;color:' + color + ';">' + escapeHtml(a.msg) + '</div>';
+          var alertTime = toJST(alertData.results[0].created_at);
+          return '<div style="padding:8px 12px;margin-bottom:4px;border-radius:6px;border:1px solid ' + color + ';background:' + color + '22;font-size:13px;color:' + color + ';">' + escapeHtml(a.msg) + ' <span style="font-size:11px;opacity:0.7;">(' + alertTime + ')</span></div>';
         }).join('');
       } else { alertBar.style.display = 'none'; }
     } catch { alertBar.style.display = 'none'; }
