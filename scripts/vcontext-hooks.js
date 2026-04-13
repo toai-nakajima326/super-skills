@@ -184,6 +184,29 @@ async function recordEvent(eventName) {
     } catch {} // Non-fatal
   }
 
+  // Auto-check completions: when AI claims "done", verify automatically
+  if (eventName === 'tool-use') {
+    try {
+      const data = JSON.parse(input);
+      const transcriptPath = data.transcript_path;
+      if (transcriptPath) {
+        // Check the latest assistant message for completion claims
+        const posFile = `/tmp/vcontext-completion-check-${sessionId.replace(/[^a-zA-Z0-9-]/g, '')}`;
+        let lastCheck = 0;
+        try { lastCheck = parseInt(readFileSync(posFile, 'utf-8').trim(), 10) || 0; } catch {}
+        // Only check every 60 seconds to avoid spam
+        if (Date.now() - lastCheck > 60000) {
+          try { writeFileSync(posFile, String(Date.now()), 'utf-8'); } catch {}
+          const messages = extractNewAssistantMessages(transcriptPath, sessionId + '-completion');
+          const latest = messages[messages.length - 1] || '';
+          if (/完了|complete|done|finished|100%|全て.*完了|実装.*済|修正.*済/i.test(latest)) {
+            post('/completion-check', { session: sessionId, assistant_message: latest.slice(0, 500) }).catch(() => {});
+          }
+        }
+      }
+    } catch {}
+  }
+
   // Check for pending consultations from other AIs (piggyback on tool-use)
   if (eventName === 'tool-use') {
     try {

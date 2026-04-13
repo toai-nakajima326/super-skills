@@ -151,8 +151,14 @@ function dbQuery(sql, dbPath = DB_PATH) {
     if (!trimmed || trimmed === '[]') return [];
     return JSON.parse(trimmed);
   } catch (e) {
-    // sqlite3 -json returns empty string for no results, which is fine
-    if (e.status === 0 || (e.stdout && e.stdout.trim() === '')) return [];
+    // sqlite3 -json returns empty string or error for no results
+    const stdout = e.stdout || '';
+    if (e.status === 0 || stdout.trim() === '' || stdout.trim() === '[]') return [];
+    // Also return [] for common non-critical errors
+    if (e.message && (e.message.includes('ENOBUFS') || e.message.includes('spawnSync'))) {
+      console.error(`[db query error @ ${dbPath}]`, e.message.slice(0, 100));
+      return [];
+    }
     console.error(`[db query error @ ${dbPath}]`, e.message);
     throw new Error(`SQLite query error: ${e.message}`);
   }
@@ -3286,6 +3292,92 @@ function sanitizeForExternalSearch(text) {
  * sanitizes for privacy, searches the web, stores results in vcontext.
  * Fully async — returns immediately, results stored in background.
  */
+/**
+ * POST /completion-check
+ * Body: { session, assistant_message }
+ * Auto-detects completion claims, runs checklist, stores violations as rules.
+ */
+async function handleCompletionCheck(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  const body = await readBody(req);
+  const msg = body.assistant_message || '';
+  const session = body.session || '';
+
+  // Detect completion claims
+  const completionPatterns = /完了|complete|done|finished|100%|全て.*完了|実装.*済|修正.*済|対応.*済|コミット.*済/i;
+  if (!completionPatterns.test(msg)) {
+    return sendJson(res, 200, { checked: false, reason: 'no completion claim detected' });
+  }
+
+  sendJson(res, 202, { checked: true, analyzing: true });
+
+  // Background: analyze recent work for gaps
+  setImmediate(async () => {
+    try {
+      const model = pickModel('summarize');
+      if (!model) return;
+
+      // Gather recent session activity
+      const recentWork = dbQuery(`SELECT type, tool_name, substr(content,1,200) as preview FROM entry_index WHERE session = ${esc(session)} AND created_at >= datetime('now', '-1 hour') ORDER BY entry_id DESC LIMIT 30;`);
+
+      const workSummary = recentWork.map(r =>
+        `[${r.type}] ${r.tool_name || ''} ${r.preview || ''}`
+      ).join('\n').slice(0, 2000);
+
+      const checkPrompt = `An AI just claimed this work is complete: "${msg.slice(0, 300)}"
+
+Recent actions in this session:
+${workSummary}
+
+Check for these common AI omissions:
+1. Did it update documentation (README, CLAUDE.md, roadmap)?
+2. Did it run tests, build, lint?
+3. Are there workarounds left (grep -v, TODO, FIXME, skip)?
+4. Did it verify git status is clean (stash, untracked)?
+5. Did it check related files that should change together?
+6. Did it verify previous session claims independently?
+
+List ONLY the violations found (omissions). If none, say "NONE".
+Be specific about what was missed.`;
+
+      const violations = await ollamaGenerate(model, checkPrompt, { maxTokens: 300, temperature: 0.2 });
+      if (!violations || violations.trim() === 'NONE' || violations.length < 10) {
+        console.log('[vcontext:check] Completion check passed');
+        return;
+      }
+
+      // Store violations
+      const content = JSON.stringify({
+        completion_claim: msg.slice(0, 300),
+        violations: violations.trim(),
+        session,
+        detected_at: new Date().toISOString(),
+      });
+      dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES ('completion-violation', ${esc(content)}, '["completion-violation","auto"]', ${esc(session)}, ${estimateTokens(content)}, datetime('now'), 0, 'ram');`);
+
+      // Auto-generate a new rule from the violation pattern
+      const rulePrompt = `Based on this violation, write a short MANDATORY RULE (1-2 sentences) to prevent it from happening again. Output ONLY the rule text.
+
+Violation: ${violations.trim().slice(0, 300)}`;
+      const newRule = await ollamaGenerate(model, rulePrompt, { maxTokens: 100, temperature: 0.2 });
+      if (newRule && newRule.length > 20) {
+        // Check if a similar rule already exists
+        const existing = dbQuery(`SELECT id FROM entries WHERE type = 'decision' AND content LIKE ${esc('%' + newRule.trim().slice(0, 30) + '%')} AND tags LIKE '%global-rule%' LIMIT 1;`);
+        if (existing.length === 0) {
+          dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier, confidence, status) VALUES ('decision', ${esc('MANDATORY RULE: ' + newRule.trim())}, '["global-rule","quality-gate","mandatory","auto-generated"]', 'global', ${estimateTokens(newRule)}, datetime('now'), 0, 'ram', 'high', 'active');`);
+          console.log(`[vcontext:check] New rule auto-generated: ${newRule.trim().slice(0, 80)}`);
+        }
+      }
+
+      console.log(`[vcontext:check] Violations found: ${violations.trim().slice(0, 100)}`);
+    } catch (e) {
+      console.error('[vcontext:check] Error:', e.message);
+    }
+  });
+}
+
 async function handlePredictiveSearch(req, res) {
   const auth = validateApiKey(req);
   if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
@@ -3698,6 +3790,8 @@ const server = createServer(async (req, res) => {
       handleMetricsReport(req, res);
     } else if (method === 'POST' && path === '/predictive-search') {
       await handlePredictiveSearch(req, res);
+    } else if (method === 'POST' && path === '/completion-check') {
+      await handleCompletionCheck(req, res);
     } else if (method === 'GET' && path === '/dashboard') {
       const html = readFileSync(join(SCRIPT_DIR, 'vcontext-dashboard.html'), 'utf-8');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
