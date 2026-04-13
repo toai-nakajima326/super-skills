@@ -527,7 +527,7 @@ function recordMetric({ operation, startTime, requestChars, responseChars, resul
 
 function backfillIndex(batchSize) {
   try {
-    const missing = dbQuery(`SELECT id, type, session, content, token_estimate, embedding FROM entries WHERE id NOT IN (SELECT entry_id FROM entry_index) ORDER BY id ASC LIMIT ${batchSize};`);
+    const missing = dbQuery(`SELECT e.id, e.type, e.session, e.content, e.token_estimate, e.embedding FROM entries e LEFT JOIN entry_index ei ON e.id = ei.entry_id WHERE ei.entry_id IS NULL ORDER BY e.id ASC LIMIT ${batchSize};`);
     for (const row of missing) {
       const f = extractIndexFields(row.content || '');
       dbExec(`INSERT OR IGNORE INTO entry_index (entry_id, type, session, tool_name, file_path, command, token_estimate, has_embedding, created_at) VALUES (${row.id}, ${esc(row.type)}, ${esc(row.session)}, ${esc(f.tool_name)}, ${esc(f.file_path)}, ${esc(f.command)}, ${row.token_estimate || 0}, ${row.embedding ? 1 : 0}, datetime('now'));`);
@@ -3213,47 +3213,42 @@ Keywords:`;
         }
       } catch {}
 
-      // 3b: DuckDuckGo HTML search (full web results, rate limited)
+      // 3b: SearXNG meta-search (Google+Bing+DDG+Brave, local instance)
+      const SEARXNG_URL = process.env.SEARXNG_URL || 'http://127.0.0.1:3160';
       try {
-        const ddgQuery = sanitized + ' 2026 best practices';
-        const ddgUrl = `https://duckduckgo.com/html/?q=${encodeURIComponent(ddgQuery)}`;
-
-        function httpsGet(url, depth = 0) {
-          if (depth > 3) return Promise.resolve(null);
-          return new Promise((resolve) => {
-            const req = httpsRequest(new URL(url), {
-              method: 'GET', timeout: 10000,
-              headers: {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-                'Accept': 'text/html',
-              },
-            }, (res) => {
-              if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                httpsGet(res.headers.location, depth + 1).then(resolve);
-                return;
-              }
-              const chunks = [];
-              res.on('data', c => chunks.push(c));
-              res.on('end', () => resolve(Buffer.concat(chunks).toString()));
+        const searchQuery = sanitized + ' 2026';
+        const searchUrl = `${SEARXNG_URL}/search?q=${encodeURIComponent(searchQuery)}&format=json&language=auto`;
+        const searchResult = await new Promise((resolve) => {
+          const req = httpRequest(new URL(searchUrl), {
+            method: 'GET', timeout: 10000,
+          }, (res) => {
+            const chunks = [];
+            res.on('data', c => chunks.push(c));
+            res.on('end', () => {
+              try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+              catch { resolve(null); }
             });
-            req.on('error', () => resolve(null));
-            req.on('timeout', () => { req.destroy(); resolve(null); });
-            req.end();
           });
-        }
-
-        const ddgHtml = await httpsGet(ddgUrl);
-        if (ddgHtml) {
-          // Extract snippets from HTML
-          const snippetMatches = ddgHtml.match(/class="result__snippet"[^>]*>(.*?)<\/(?:td|span|div)/gs) || [];
-          for (const m of snippetMatches.slice(0, 5)) {
-            const clean = m.replace(/<[^>]+>/g, '').replace(/class="result__snippet"[^>]*>/, '').trim();
-            if (clean.length > 20) {
-              parts.push(`[web] ${clean.replace(/&#x27;/g, "'").replace(/&amp;/g, '&').slice(0, 300)}`);
+          req.on('error', () => resolve(null));
+          req.on('timeout', () => { req.destroy(); resolve(null); });
+          req.end();
+        });
+        if (searchResult && searchResult.results) {
+          for (const r of searchResult.results.slice(0, 5)) {
+            const engine = r.engine || '?';
+            const title = r.title || '';
+            const content = r.content || '';
+            if (content.length > 20) {
+              parts.push(`[web:${engine}] ${title}: ${content.slice(0, 300)}`);
             }
           }
+          console.log(`[vcontext:predict] SearXNG: ${searchResult.results.length} results`);
+        } else {
+          console.log(`[vcontext:predict] SearXNG: no results or null response`);
         }
-      } catch {}
+      } catch (e) {
+        console.log(`[vcontext:predict] SearXNG error: ${e.message}`);
+      }
 
       // 3c: Generate background knowledge with Ollama (local, no external call)
       try {
@@ -3299,11 +3294,23 @@ Output as a numbered list. Be specific and actionable. Max 100 words.`;
         fetched_at: new Date().toISOString(),
       });
 
-      // Step 5: Store in vcontext
-      const sql = `INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES (${esc('predictive-search')}, ${esc(content)}, ${esc(JSON.stringify(['predictive-search', 'auto']))}, ${esc(body.session || 'predictive')}, ${estimateTokens(content)}, datetime('now'), 0, 'ram');`;
-      dbExec(sql);
-
-      console.log(`[vcontext:predict] Searched: "${sanitized}" → ${parts.length} results stored`);
+      // Step 5: Store in vcontext (use handleStore-compatible direct insert)
+      try {
+        const tagsJson = JSON.stringify(['predictive-search', 'auto']);
+        const tokenEst = estimateTokens(content);
+        // Use parameterized-safe esc() for the insert
+        dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES ('predictive-search', ${esc(content)}, ${esc(tagsJson)}, ${esc(body.session || 'predictive')}, ${tokenEst}, datetime('now'), 0, 'ram');`);
+        console.log(`[vcontext:predict] Searched: "${sanitized}" → ${parts.length} results stored`);
+      } catch (storeErr) {
+        // Fallback: store a simplified version if content has problematic chars
+        const simpleContent = JSON.stringify({ query: sanitized, results: parts.map(p => p.slice(0, 200)), source: 'searxng' });
+        try {
+          dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES ('predictive-search', ${esc(simpleContent)}, '["predictive-search","auto"]', ${esc(body.session || 'predictive')}, ${estimateTokens(simpleContent)}, datetime('now'), 0, 'ram');`);
+          console.log(`[vcontext:predict] Searched: "${sanitized}" → ${parts.length} results stored (simplified)`);
+        } catch (e2) {
+          console.error(`[vcontext:predict] Store failed: ${e2.message}`);
+        }
+      }
     } catch (e) {
       // Non-fatal
       console.error('[vcontext:predict] Error:', e.message);
