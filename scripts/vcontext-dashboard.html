@@ -472,8 +472,8 @@ async function refresh() {
 
     // Effectiveness — period + cumulative
     mhtml += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--bg-bar);font-size:12px;">';
-    var pRate = Math.round((derived.period_savings_rate || 0) * 100);
-    var cRate = Math.round((derived.cumulative_savings_rate || 0) * 100);
+    var pRate = ((derived.period_savings_rate || 0) * 100).toFixed(2);
+    var cRate = ((derived.cumulative_savings_rate || 0) * 100).toFixed(2);
     var pColor = pRate >= 50 ? 'var(--green)' : pRate >= 20 ? 'var(--yellow)' : 'var(--text-dim)';
     var cColor = cRate >= 50 ? 'var(--green)' : cRate >= 20 ? 'var(--yellow)' : 'var(--text-dim)';
     mhtml += '<div style="display:flex;gap:16px;">';
