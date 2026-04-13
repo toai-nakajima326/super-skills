@@ -812,7 +812,9 @@ async function handleStore(req, res) {
         if (!model) return;
         const embedding = await ollamaEmbed(model, content.slice(0, 1000));
         if (embedding && embedding.length > 0) {
-          dbExec(`UPDATE entries SET embedding = ${esc(JSON.stringify(embedding))} WHERE id = ${entry.id};`);
+          const embJson = esc(JSON.stringify(embedding));
+          dbExec(`UPDATE entries SET embedding = ${embJson} WHERE id = ${entry.id};`);
+          try { dbExec(`UPDATE entries SET embedding = ${embJson} WHERE id = ${entry.id};`, SSD_DB_PATH); } catch {}
           vecUpsert(entry.id, embedding);
           try { dbExec(`UPDATE entry_index SET has_embedding = 1 WHERE entry_id = ${entry.id};`); } catch {}
         }
@@ -2355,7 +2357,9 @@ async function startEmbedLoop() {
       const row = rows[0];
       const embedding = await ollamaEmbed(model, String(row.content).slice(0, 1000));
       if (embedding && embedding.length > 0) {
-        dbExec(`UPDATE entries SET embedding = ${esc(JSON.stringify(embedding))} WHERE id = ${row.id};`);
+        const embJson = esc(JSON.stringify(embedding));
+        dbExec(`UPDATE entries SET embedding = ${embJson} WHERE id = ${row.id};`);
+        try { dbExec(`UPDATE entries SET embedding = ${embJson} WHERE id = ${row.id};`, SSD_DB_PATH); } catch {}
         vecUpsert(row.id, embedding);
         try { dbExec(`UPDATE entry_index SET has_embedding = 1 WHERE entry_id = ${row.id};`); } catch {}
       }
@@ -2376,9 +2380,12 @@ function doBackupAndMigrate() {
   } catch (e) {
     console.error('[vcontext:auto] RAM→SSD sync failed:', e.message);
   }
-  // Sync new embeddings to vec index
+  // Sync new embeddings to vec index + SSD
   try {
     vecSync();
+  } catch {}
+  try {
+    syncEmbeddingsToSsd(100);
   } catch {}
   // Incremental index backfill
   try { backfillIndex(200); } catch {}
@@ -2559,15 +2566,40 @@ function syncRamToSsd() {
   const ramMaxId = ramMax[0]?.max_id || 0;
   const gap = ramMaxId - ssdMaxId;
   if (gap <= 0) return;
-  // Use ATTACH to copy missing entries in one shot
+  // Use ATTACH to copy missing entries in one shot (including embedding)
   dbExec(`
     ATTACH '${SSD_DB_PATH}' AS ssd;
-    INSERT OR IGNORE INTO ssd.entries (id, type, content, tags, session, created_at, token_estimate, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status)
-      SELECT id, type, content, tags, session, created_at, token_estimate, last_accessed, access_count, 'ssd', reasoning, conditions, supersedes, confidence, status
+    INSERT OR IGNORE INTO ssd.entries (id, type, content, tags, session, created_at, token_estimate, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status, embedding)
+      SELECT id, type, content, tags, session, created_at, token_estimate, last_accessed, access_count, 'ssd', reasoning, conditions, supersedes, confidence, status, embedding
       FROM main.entries WHERE id > ${ssdMaxId};
     DETACH ssd;
   `);
   console.log(`[vcontext:sync] Caught up ${gap} entries RAM→SSD (${ssdMaxId}→${ramMaxId})`);
+}
+
+// ── Embedding backfill RAM → SSD (batch via ATTACH)
+function syncEmbeddingsToSsd() {
+  if (!existsSync(SSD_DB_PATH)) return;
+  try {
+    dbExec(`
+      ATTACH '${SSD_DB_PATH}' AS ssd;
+      UPDATE ssd.entries SET embedding = (
+        SELECT main.entries.embedding FROM main.entries
+        WHERE main.entries.id = ssd.entries.id AND main.entries.embedding IS NOT NULL
+      )
+      WHERE ssd.entries.embedding IS NULL
+      AND ssd.entries.id IN (
+        SELECT id FROM main.entries WHERE embedding IS NOT NULL LIMIT 200
+      );
+      DETACH ssd;
+    `);
+    const ssdCount = dbQuery("SELECT count(*) as c FROM entries WHERE embedding IS NOT NULL;", SSD_DB_PATH);
+    const ramCount = dbQuery("SELECT count(*) as c FROM entries WHERE embedding IS NOT NULL;");
+    const gap = (ramCount[0]?.c || 0) - (ssdCount[0]?.c || 0);
+    if (gap > 0) console.log(`[vcontext:sync] Embedding SSD sync: ${ssdCount[0]?.c || 0} done, ${gap} remaining`);
+  } catch (e) {
+    console.error('[vcontext:sync] Embedding SSD sync error:', e.message?.slice(0, 80));
+  }
 }
 
 // ── SSD → RAM restore (after reboot / RAM disk wipe) ────────────
