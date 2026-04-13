@@ -2401,20 +2401,43 @@ function doBackupAndMigrate() {
   } catch (e) {
     console.error('[vcontext:auto] Auto-migration SSD→Cloud failed:', e.message);
   }
-  // Skill discovery + user need prediction (once per hour)
-  if (ollamaAvailable) {
-    discoverAndPredict().catch(() => {});
+  // Ensure discovery loop is running (self-healing)
+  if (ollamaAvailable && !discoveryLoopRunning) {
+    startDiscoveryLoop().catch(() => {});
   }
 }
 
-// ── Skill discovery + user need prediction ────────────────────
-let lastDiscoveryRun = 0;
-const DISCOVERY_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+// ── Streaming skill discovery + user need prediction ──────────
+let discoveryLoopRunning = false;
 const SEARXNG_URL = process.env.SEARXNG_URL || 'http://127.0.0.1:3160';
+const DISCOVERY_INTERVAL_MS = 5 * 60 * 1000;   // 5 min between searches
+const PREDICTION_INTERVAL_MS = 30 * 60 * 1000;  // 30 min between predictions
+let lastPredictionRun = 0;
 
-async function discoverAndPredict() {
-  if (Date.now() - lastDiscoveryRun < DISCOVERY_INTERVAL_MS) return;
-  lastDiscoveryRun = Date.now();
+async function startDiscoveryLoop() {
+  if (discoveryLoopRunning) return;
+  discoveryLoopRunning = true;
+
+  while (discoveryLoopRunning && ollamaAvailable) {
+    try {
+      await runOneDiscovery();
+    } catch {}
+
+    // User need prediction every 30 min
+    if (Date.now() - lastPredictionRun >= PREDICTION_INTERVAL_MS) {
+      lastPredictionRun = Date.now();
+      try {
+        await runOnePrediction();
+      } catch {}
+    }
+
+    // Wait 5 min before next search
+    await new Promise(r => setTimeout(r, DISCOVERY_INTERVAL_MS));
+  }
+  discoveryLoopRunning = false;
+}
+
+async function runOneDiscovery() {
 
   // ── 1. Skill discovery: dynamic topic from user activity ──
   try {
@@ -2483,8 +2506,9 @@ Search query:`;
     }
     } // end dedup else
   } catch {}
+}
 
-  // ── 2. User need prediction: analyze activity patterns ──
+async function runOnePrediction() {
   try {
     const model = pickModel('summarize');
     if (!model) return;
@@ -3876,6 +3900,7 @@ function shutdown(signal) {
   wsClients.clear();
   doBackup();
   embedLoopRunning = false;
+  discoveryLoopRunning = false;
   if (vecDb) { try { vecDb.close(); } catch {} }
   server.close(() => {
     console.log('[vcontext] Server closed');
@@ -3888,9 +3913,12 @@ function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-// Check local AI availability + start embed loop
+// Check local AI availability + start background loops
 checkOllama();
-if (ollamaAvailable) startEmbedLoop().catch(() => {});
+if (ollamaAvailable) {
+  startEmbedLoop().catch(() => {});
+  startDiscoveryLoop().catch(() => {});
+}
 
 // Start
 server.listen(PORT, '127.0.0.1', () => {
