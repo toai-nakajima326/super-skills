@@ -816,8 +816,8 @@ async function handleStore(req, res) {
     console.error('[write-through] SSD sync failed:', e.message);
   }
 
-  // Auto-summarize with local AI if available (async, non-blocking)
-  if (ollamaAvailable && content.length > 200) {
+  // Auto-summarize with local AI (night window only)
+  if (ollamaAvailable && isNightWindow() && content.length > 200) {
     setImmediate(async () => {
       try {
         const model = pickModel('summarize');
@@ -833,8 +833,8 @@ async function handleStore(req, res) {
     });
   }
 
-  // Generate embedding with local AI (async, non-blocking)
-  if (ollamaAvailable) {
+  // Generate embedding with local AI (night window only)
+  if (ollamaAvailable && isNightWindow()) {
     setImmediate(async () => {
       try {
         const model = pickModel('embed');
@@ -3468,6 +3468,11 @@ async function handleCompletionCheck(req, res) {
     return sendJson(res, 200, { checked: false, reason: 'no completion claim detected' });
   }
 
+  // Completion check uses Ollama — night window only
+  if (!isNightWindow()) {
+    return sendJson(res, 200, { checked: true, analyzing: false, reason: 'outside night window (22:00-08:00)' });
+  }
+
   sendJson(res, 202, { checked: true, analyzing: true });
 
   // Background: analyze recent work for gaps
@@ -3571,6 +3576,11 @@ async function handlePredictiveSearch(req, res) {
   const prompt = body.prompt || '';
   if (!prompt || prompt.length < 10) {
     return sendJson(res, 200, { status: 'skipped', reason: 'prompt too short' });
+  }
+
+  // Predictive search uses Ollama — night window only
+  if (!isNightWindow()) {
+    return sendJson(res, 200, { status: 'skipped', reason: 'outside night window (22:00-08:00)' });
   }
 
   // Return immediately — do work in background
