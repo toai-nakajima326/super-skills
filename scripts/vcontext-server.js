@@ -3186,11 +3186,11 @@ function handleMetricsReport(req, res) {
 
   // 24h savings: prior context that didn't need regenerating / total needed
   const periodTotal = priorStoredTokens + periodNewTokens;
-  const periodSavingsRate = periodTotal > 0 ? Math.round(priorStoredTokens / periodTotal * 1000) / 1000 : 0;
+  const periodSavingsRate = periodTotal > 0 ? priorStoredTokens / periodTotal : 0;
 
   // Cumulative savings: all_stored / (all_stored + period_new)
   const cumulativeTotal = allStoredTokens + periodNewTokens;
-  const cumulativeSavingsRate = cumulativeTotal > 0 ? Math.round(allStoredTokens / cumulativeTotal * 1000) / 1000 : 0;
+  const cumulativeSavingsRate = cumulativeTotal > 0 ? allStoredTokens / cumulativeTotal : 0;
 
   // Session count for context
   const sessionCountRows = dbQuery(`SELECT COUNT(DISTINCT session) as c FROM entry_index WHERE created_at >= ${since};`);
