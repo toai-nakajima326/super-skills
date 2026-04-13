@@ -2395,6 +2395,103 @@ function doBackupAndMigrate() {
   } catch (e) {
     console.error('[vcontext:auto] Auto-migration SSD→Cloud failed:', e.message);
   }
+  // Skill discovery + user need prediction (once per hour)
+  if (ollamaAvailable) {
+    discoverAndPredict().catch(() => {});
+  }
+}
+
+// ── Skill discovery + user need prediction ────────────────────
+let lastDiscoveryRun = 0;
+const DISCOVERY_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const SEARXNG_URL = process.env.SEARXNG_URL || 'http://127.0.0.1:3160';
+
+async function discoverAndPredict() {
+  if (Date.now() - lastDiscoveryRun < DISCOVERY_INTERVAL_MS) return;
+  lastDiscoveryRun = Date.now();
+
+  // ── 1. Skill discovery: search for new patterns ──
+  try {
+    const topics = [
+      'AI agent workflow pattern 2026',
+      'Claude Code best practices new',
+      'coding agent automation skill',
+      'LLM developer productivity tool',
+    ];
+    const topic = topics[Math.floor(Math.random() * topics.length)];
+
+    const searchResult = await new Promise((resolve) => {
+      const req = httpRequest(new URL(`${SEARXNG_URL}/search?q=${encodeURIComponent(topic)}&format=json&language=en`), {
+        method: 'GET', timeout: 10000,
+      }, (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => {
+          try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+          catch { resolve(null); }
+        });
+      });
+      req.on('error', () => resolve(null));
+      req.on('timeout', () => { req.destroy(); resolve(null); });
+      req.end();
+    });
+
+    if (searchResult && searchResult.results && searchResult.results.length > 0) {
+      const snippets = searchResult.results.slice(0, 5).map(r =>
+        `[${r.engine || '?'}] ${r.title || ''}: ${(r.content || '').slice(0, 200)}`
+      );
+      const content = JSON.stringify({
+        topic,
+        results: snippets,
+        discovered_at: new Date().toISOString(),
+      });
+      try {
+        dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES ('skill-discovery', ${esc(content)}, '["skill-discovery","auto"]', 'system', ${estimateTokens(content)}, datetime('now'), 0, 'ram');`);
+        console.log(`[vcontext:discover] Searched "${topic}" → ${snippets.length} results`);
+      } catch {}
+    }
+  } catch {}
+
+  // ── 2. User need prediction: analyze activity patterns ──
+  try {
+    const model = pickModel('summarize');
+    if (!model) return;
+
+    // Get recent activity patterns
+    const recentTools = dbQuery(`SELECT tool_name, COUNT(*) as cnt FROM entry_index WHERE tool_name IS NOT NULL AND created_at >= datetime('now', '-24 hours') GROUP BY tool_name ORDER BY cnt DESC LIMIT 10;`);
+    const recentErrors = dbQuery(`SELECT COUNT(*) as cnt FROM entry_index WHERE type = 'tool-error' AND created_at >= datetime('now', '-24 hours');`);
+    const recentTopics = dbQuery(`SELECT type, COUNT(*) as cnt FROM entry_index WHERE created_at >= datetime('now', '-24 hours') GROUP BY type ORDER BY cnt DESC LIMIT 5;`);
+
+    const activitySummary = `Tools used: ${recentTools.map(r => `${r.tool_name}(${r.cnt})`).join(', ')}
+Errors: ${recentErrors[0]?.cnt || 0}
+Event types: ${recentTopics.map(r => `${r.type}(${r.cnt})`).join(', ')}`;
+
+    // Get existing skills
+    const skillList = dbQuery(`SELECT DISTINCT tool_name FROM entry_index WHERE type IN ('skill-version','skill-diff');`);
+    const existingSkills = skillList.map(r => r.tool_name).filter(Boolean).join(', ');
+
+    const prompt = `Based on this user's activity in the last 24h, suggest 1-2 skills or automations that would help them.
+
+Activity:
+${activitySummary}
+
+Existing skills: ${existingSkills || 'standard set'}
+
+Output ONLY the suggestion in 2-3 sentences. Be specific about what the skill would do.`;
+
+    const suggestion = await ollamaGenerate(model, prompt, { maxTokens: 150, temperature: 0.5 });
+    if (suggestion && suggestion.length > 20) {
+      const content = JSON.stringify({
+        activity: activitySummary,
+        suggestion: suggestion.trim(),
+        suggested_at: new Date().toISOString(),
+      });
+      try {
+        dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES ('skill-suggestion', ${esc(content)}, '["skill-suggestion","auto"]', 'system', ${estimateTokens(content)}, datetime('now'), 0, 'ram');`);
+        console.log(`[vcontext:predict] Skill suggestion generated`);
+      } catch {}
+    }
+  } catch {}
 }
 
 // ── RAM → SSD catch-up sync (fills gaps from failed write-through) ─

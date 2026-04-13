@@ -318,6 +318,32 @@ async function handleSessionRecall() {
     lines.push('');
   }
 
+  // Skill suggestions from auto-discovery
+  const suggestions = await get('/recall?q=skill-suggestion&type=skill-suggestion&limit=3');
+  if (suggestions.results && suggestions.results.length > 0) {
+    lines.push('### Skill Suggestions');
+    for (const r of suggestions.results.slice(0, 2)) {
+      try {
+        const d = JSON.parse(r.content);
+        lines.push(`- ${d.suggestion.slice(0, 200)}`);
+      } catch {}
+    }
+    lines.push('');
+  }
+
+  // Skill discoveries from web search
+  const discoveries = await get('/recall?q=skill-discovery&type=skill-discovery&limit=3');
+  if (discoveries.results && discoveries.results.length > 0) {
+    lines.push('### New Patterns Discovered');
+    for (const r of discoveries.results.slice(0, 2)) {
+      try {
+        const d = JSON.parse(r.content);
+        lines.push(`- [${d.topic}] ${d.results[0]?.slice(0, 150) || ''}`);
+      } catch {}
+    }
+    lines.push('');
+  }
+
   if (stats.ram) {
     lines.push(`Memory: RAM ${stats.ram.entries} (${stats.ram.size}) | SSD ${stats.ssd?.entries || 0} (${stats.ssd?.size || '0'})`);
   }
