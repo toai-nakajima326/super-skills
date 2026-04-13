@@ -49,9 +49,24 @@ origin: unified
 3. Do not mark pair as completed until full implement → re-verify → re-approve cycle completes
 4. "Fixed so it's fine" and "totals match so it's fine" are prohibited
 
+## Completion Gate — HARD BLOCK
+
+**Before reporting "complete", "done", "100%", or "finished":**
+
+1. Run tests: `npm test` / `jest` / `pytest` / whatever the project uses
+2. Run build: `npm run build` / `tsc --noEmit`
+3. Run lint: `eslint` / equivalent
+4. If ANY tests fail → **you are NOT complete**. Fix first.
+5. If you skip tests → **you are lying about completion**
+
+**These are not optional. These are not "nice to have". Tests failing = not done.**
+
+A build passing with tests failing is NOT sufficient. Tests exist for a reason.
+
 ## Gotchas
 
 - Approval layer must verify not just calculation results but calculation inputs (premises)
 - "X items are duplicates" → verify each ID against source
 - "Approximately" or "estimated" numbers must be resolved before approval
 - When comparing numbers, verify not just values match but definitions match (what was counted?)
+- **Never report "complete" without running tests. This is the #1 violation pattern.**
