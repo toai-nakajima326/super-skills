@@ -333,6 +333,10 @@ async function refresh() {
     } catch { alertBar.style.display = 'none'; }
   } else { alertBar.style.display = 'none'; }
 
+  // Night window check (shared by Health + Storage cards)
+  var nowHour = new Date().getHours();
+  var isNight = nowHour >= 22 || nowHour < 8;
+
   // Health
   if (health) {
     const si = document.getElementById('status-indicator');
@@ -344,7 +348,7 @@ async function refresh() {
         '<div><span class="status-dot status-' + (health.database ? 'green' : 'red') + '"></span>Database</div>' +
         '<div><span class="status-dot status-' + (health.ssd_database ? 'green' : 'red') + '"></span>SSD DB</div>' +
         '<div><span class="status-dot status-' + (health.cloud_configured ? 'green' : 'yellow') + '"></span>Cloud</div>' +
-        '<div><span class="status-dot status-' + (health.local_ai ? 'green' : 'yellow') + '"></span>Ollama: ' + escapeHtml(health.local_ai_model || 'off') + '</div>' +
+        '<div><span class="status-dot status-' + (!health.local_ai ? 'red' : isNight ? 'green' : 'yellow') + '"></span>Ollama: ' + escapeHtml(health.local_ai_model || 'off') + (isNight ? '' : ' (22:00-)') + '</div>' +
         '<div><span class="status-dot status-green"></span>WS: ' + (health.ws_clients || 0) + ' clients</div>' +
       '</div>';
   }
@@ -360,13 +364,11 @@ async function refresh() {
     // Local AI status inline
     if (ai) {
       var embedCount = ai.embedding_count || 0;
-      var totalCount = tiers.ram.entries || 1;
-      var embedPct = Math.round(embedCount / totalCount * 100);
+      var totalCount = Math.max(tiers.ram.entries || 0, embedCount, 1);
+      var embedPct = Math.min(100, Math.round(embedCount / totalCount * 100));
       tiersHtml += '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--bg-bar);">';
       tiersHtml += '<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">LOCAL AI</div>';
       tiersHtml += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:12px;">';
-      var nowHour = new Date().getHours();
-      var isNight = nowHour >= 22 || nowHour < 8;
       var ollamaStatus = !ai.ollama_available ? 'red' : isNight ? 'green' : 'yellow';
       var ollamaLabel = !ai.ollama_available ? 'Ollama OFF' : isNight ? 'Ollama ACTIVE' : 'Ollama (22:00-)';
       tiersHtml += '<div><span class="status-dot status-' + ollamaStatus + '"></span>' + ollamaLabel + '</div>';
@@ -626,7 +628,7 @@ connectWs();
 var pollTimer = null;
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(refresh, wsConnected ? 30000 : 5000);
+  pollTimer = setInterval(refresh, wsConnected ? 60000 : 15000);
 }
 startPolling();
 </script>
