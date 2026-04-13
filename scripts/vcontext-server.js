@@ -2368,9 +2368,9 @@ function doBackupAndMigrate() {
   try { backfillIndex(200); } catch {}
   // Recheck Ollama availability
   checkOllama();
-  // Batch embed: generate missing embeddings (up to 5 per cycle)
+  // Batch embed: generate missing embeddings (up to 20 per cycle)
   if (ollamaAvailable) {
-    batchEmbed(5).catch(() => {});
+    batchEmbed(20).catch(() => {});
   }
   // Quick migration check
   try {
@@ -3156,27 +3156,28 @@ function handleMetricsReport(req, res) {
 
   // Credit savings calculation (two views):
   //
-  // Period (24h): tokens stored in period vs tokens consumed in period
-  //   = "of this period's work, how much is now reusable?"
+  // 24h savings: "of today's work, how much was served by prior context?"
+  //   = prior_stored / (prior_stored + period_new)
+  //   prior_stored = all tokens stored BEFORE this period
+  //   period_new = tokens created in this period
   //
-  // Cumulative (all-time): total stored vs period consumption
-  //   = "of all knowledge, how much was already free?"
+  // Cumulative: "of all knowledge, how much is reusable?"
+  //   = all_stored / (all_stored + period_new)
 
-  // Period: tokens stored within the period
-  const periodStoredRows = dbQuery(`SELECT SUM(token_estimate) as total FROM entries WHERE created_at >= ${since};`);
-  const periodStoredTokens = periodStoredRows[0]?.total || 0;
-
-  // Period: new tokens consumed (tool I/O in this period)
-  const periodConsumedRows = dbQuery(`SELECT SUM(token_estimate) as total FROM entry_index WHERE created_at >= ${since};`);
-  const periodNewTokens = periodConsumedRows[0]?.total || 0;
-
-  // Period savings: stored_in_period / (stored_in_period + consumed_in_period)
-  const periodTotal = periodStoredTokens + periodNewTokens;
-  const periodSavingsRate = periodTotal > 0 ? Math.round(periodStoredTokens / periodTotal * 1000) / 1000 : 0;
-
-  // Cumulative: all stored tokens (entire vcontext history)
+  // All stored tokens
   const allStoredRows = dbQuery(`SELECT SUM(token_estimate) as total FROM entries;`);
   const allStoredTokens = allStoredRows[0]?.total || 0;
+
+  // Tokens created in this period (new work)
+  const periodNewRows = dbQuery(`SELECT SUM(token_estimate) as total FROM entries WHERE created_at >= ${since};`);
+  const periodNewTokens = periodNewRows[0]?.total || 0;
+
+  // Prior context = all stored minus what was created in this period
+  const priorStoredTokens = Math.max(0, allStoredTokens - periodNewTokens);
+
+  // 24h savings: prior context that didn't need regenerating / total needed
+  const periodTotal = priorStoredTokens + periodNewTokens;
+  const periodSavingsRate = periodTotal > 0 ? Math.round(priorStoredTokens / periodTotal * 1000) / 1000 : 0;
 
   // Cumulative savings: all_stored / (all_stored + period_new)
   const cumulativeTotal = allStoredTokens + periodNewTokens;
@@ -3235,7 +3236,7 @@ function handleMetricsReport(req, res) {
       resume_cost_tokens: resumeCost,
       search_hit_rate: Math.round(hitRate * 1000) / 1000,
       period_savings_rate: periodSavingsRate,
-      period_stored_tokens: periodStoredTokens,
+      prior_stored_tokens: priorStoredTokens,
       period_new_tokens: periodNewTokens,
       cumulative_savings_rate: cumulativeSavingsRate,
       cumulative_stored_tokens: allStoredTokens,

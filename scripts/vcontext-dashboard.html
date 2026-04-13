@@ -483,9 +483,9 @@ async function refresh() {
     mhtml += '<div style="font-size:18px;font-weight:bold;color:' + cColor + ';">' + cRate + '%</div></div>';
     mhtml += '</div>';
     mhtml += '<div style="font-size:10px;color:var(--text-dim);margin-top:4px;">';
-    mhtml += '24h: ' + (derived.period_stored_tokens || 0).toLocaleString() + ' stored / ' + (derived.period_new_tokens || 0).toLocaleString() + ' new';
+    mhtml += 'Prior: ' + (derived.prior_stored_tokens || 0).toLocaleString() + ' tok';
+    mhtml += ' | New: ' + (derived.period_new_tokens || 0).toLocaleString() + ' tok';
     mhtml += ' | Total: ' + (derived.cumulative_stored_tokens || 0).toLocaleString() + ' tok';
-    mhtml += ' | ' + (derived.active_sessions || 0) + ' sessions';
     mhtml += '</div>';
     mhtml += '</div>';
 
