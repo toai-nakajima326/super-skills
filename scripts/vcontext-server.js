@@ -2650,16 +2650,22 @@ function wsBroadcast(eventType, entry) {
 
 // ── sqlite-vec (optional, for fast vector search) ────────────
 let vecDb = null; // better-sqlite3 instance with vec0 extension
-const EMBED_DIM = 2048; // gemma:2b dimension
+let EMBED_DIM = 2048; // auto-detected from first embedding
 
 function initVecDb() {
   try {
+    // Auto-detect embedding dimension from existing data
+    const dimRows = dbQuery("SELECT embedding FROM entries WHERE embedding IS NOT NULL LIMIT 1;");
+    if (dimRows[0]) {
+      try { EMBED_DIM = JSON.parse(dimRows[0].embedding).length; } catch {}
+    }
+
     const Database = require('better-sqlite3');
     const sqliteVec = require('sqlite-vec');
     vecDb = new Database(join(MOUNT_POINT, 'vcontext-vec.db'));
     sqliteVec.load(vecDb);
     vecDb.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS vec_entries USING vec0(embedding float[${EMBED_DIM}])`);
-    console.log('[sqlite-vec] Loaded — fast vector search enabled');
+    console.log(`[sqlite-vec] Loaded — dim=${EMBED_DIM}, fast vector search enabled`);
   } catch (e) {
     console.log(`[sqlite-vec] Not available (${e.message}) — falling back to JS cosine`);
     vecDb = null;
@@ -2712,7 +2718,7 @@ let ollamaPreferredModel = null;
 // Model preference order for different tasks
 const MODEL_PREFS = {
   summarize: ['llama3.1', 'qwen2.5-coder', 'glm-4.7-flash', 'gemma'],
-  embed: ['nomic-embed-text', 'gemma', 'llama3.1', 'qwen2.5-coder'],
+  embed: ['qwen3-embedding', 'nomic-embed-text', 'bge-m3', 'gemma', 'llama3.1'],
   judge: ['llama3.1', 'glm-4.7-flash', 'qwen2.5-coder'],
   code: ['qwen2.5-coder', 'llama3.1'],
 };
