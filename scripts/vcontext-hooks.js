@@ -151,15 +151,30 @@ async function recordEvent(eventName) {
         // Skill routing: search vcontext for matching skills
         const matched = await get(`/recall?q=${encodeURIComponent(prompt.slice(0, 100))}&type=skill-registry&limit=2`);
         if (matched.results && matched.results.length > 0) {
-          const lines = ['[auto-router] Matched skills:'];
+          const lines = ['[super-skills] Matched skills:'];
+          const matchedNames = [];
           for (const r of matched.results.slice(0, 2)) {
             try {
               const skill = JSON.parse(r.content);
               lines.push(`\n### Skill: ${skill.name}`);
               lines.push(skill.full_content || skill.description || '');
+              matchedNames.push(skill.name);
             } catch {}
           }
           process.stdout.write(lines.join('\n') + '\n');
+
+          // Record skill usage for effectiveness tracking
+          post('/store', {
+            type: 'skill-usage',
+            content: JSON.stringify({
+              skills: matchedNames,
+              prompt: prompt.slice(0, 200),
+              session: sessionId,
+              used_at: new Date().toISOString(),
+            }),
+            tags: ['skill-usage', ...matchedNames.map(n => 'skill:' + n)],
+            session: sessionId,
+          }).catch(() => {});
         }
       }
       if (prompt.length >= 15) {

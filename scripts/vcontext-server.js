@@ -2678,14 +2678,27 @@ Event types: ${recentTopics.map(r => `${r.type}(${r.cnt})`).join(', ')}`;
     const skillList = dbQuery(`SELECT DISTINCT tool_name FROM entry_index WHERE type IN ('skill-version','skill-diff');`);
     const existingSkills = skillList.map(r => r.tool_name).filter(Boolean).join(', ');
 
-    const prompt = `Based on this user's activity in the last 24h, suggest 1-2 skills or automations that would help them.
+    // Skill effectiveness feedback
+    const usageRows = dbQuery("SELECT content FROM entries WHERE type = 'skill-usage' ORDER BY id DESC LIMIT 200;");
+    const usageCounts = {};
+    for (const row of usageRows) {
+      try { const d = JSON.parse(row.content); for (const n of (d.skills || [])) usageCounts[n] = (usageCounts[n] || 0) + 1; } catch {}
+    }
+    const topSkills = Object.entries(usageCounts).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([n, c]) => `${n}(${c})`).join(', ');
+    const neverUsed = (existingSkills ? existingSkills.split(', ') : []).filter(s => !usageCounts[s]).slice(0, 5).join(', ');
 
-Activity:
+    const prompt = `Based on this user's activity and skill effectiveness data, suggest 1-2 NEW skills that would help them.
+
+Activity (24h):
 ${activitySummary}
 
+Most used skills: ${topSkills || 'none yet'}
+Never used skills: ${neverUsed || 'none'}
 Existing skills: ${existingSkills || 'standard set'}
 
-Output ONLY the suggestion in 2-3 sentences. Be specific about what the skill would do.`;
+Focus on gaps: what patterns appear in the activity that NO existing skill covers?
+Do NOT suggest skills similar to never-used ones (they were not useful).
+Output ONLY the suggestion in 2-3 sentences. Be specific.`;
 
     const suggestion = await ollamaGenerate(model, prompt, { maxTokens: 150, temperature: 0.5 });
     if (suggestion && suggestion.length > 20) {
@@ -3888,6 +3901,46 @@ Output as a numbered list. Be specific and actionable. Max 100 words.`;
   });
 }
 
+// GET /skills/effectiveness — Skill usage stats + effectiveness
+function handleSkillEffectiveness(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  // Count skill usage from skill-usage entries
+  const usageRows = dbQuery("SELECT content FROM entries WHERE type = 'skill-usage' ORDER BY id DESC LIMIT 500;");
+  const skillCounts = {};
+  for (const row of usageRows) {
+    try {
+      const d = JSON.parse(row.content);
+      for (const name of (d.skills || [])) {
+        skillCounts[name] = (skillCounts[name] || 0) + 1;
+      }
+    } catch {}
+  }
+
+  // Count skill creation
+  const createdRows = dbQuery("SELECT content FROM entries WHERE type = 'skill-created';");
+  const created = createdRows.map(r => { try { return JSON.parse(r.content).skill_name; } catch { return null; } }).filter(Boolean);
+
+  // Count total registered skills
+  const registeredRows = dbQuery("SELECT content FROM entries WHERE type = 'skill-registry';");
+  const registered = registeredRows.map(r => { try { return JSON.parse(r.content).name; } catch { return null; } }).filter(Boolean);
+
+  // Find never-used skills
+  const neverUsed = registered.filter(name => !skillCounts[name]);
+
+  // Sort by usage
+  const ranked = Object.entries(skillCounts).sort((a, b) => b[1] - a[1]).map(([name, count]) => ({ name, count }));
+
+  sendJson(res, 200, {
+    total_registered: registered.length,
+    total_auto_created: created.length,
+    usage_ranking: ranked,
+    never_used: neverUsed,
+    never_used_count: neverUsed.length,
+  });
+}
+
 // GET /metrics/report — API performance metrics
 function handleMetricsReport(req, res) {
   const auth = validateApiKey(req);
@@ -4143,6 +4196,8 @@ const server = createServer(async (req, res) => {
       handleAnalyticsReport(req, res);
     } else if (method === 'GET' && path === '/metrics/report') {
       handleMetricsReport(req, res);
+    } else if (method === 'GET' && path === '/skills/effectiveness') {
+      handleSkillEffectiveness(req, res);
     } else if (method === 'POST' && path === '/predictive-search') {
       await handlePredictiveSearch(req, res);
     } else if (method === 'POST' && path === '/completion-check') {
