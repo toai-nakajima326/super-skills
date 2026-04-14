@@ -76,7 +76,7 @@ For each promising result found in Step 1:
 For each candidate pattern:
 - **Is it novel?** — Does it cover something our current skills don't?
 - **Is it proven?** — Found in 2+ independent sources, or from a reputable origin?
-- **Is it compatible?** — Fits our SKILL.md format and auto-router structure?
+- **Is it compatible?** — Fits our SKILL.md format and super-skills structure?
 - **Is it safe?** — No security risks, no telemetry, no auto-approval?
 - **Is it actionable?** — Can be expressed as a concrete workflow, not just a concept?
 
@@ -85,7 +85,7 @@ If adopting:
 - Create new `skills/<name>/SKILL.md` following the standard format
 - Add to `manifests/install-components.json`
 - Add to appropriate module in `manifests/install-modules.json`
-- Update auto-router routing table if needed
+- Update super-skills routing table if needed
 - Run `npm run validate` → `npm run build` → deploy
 
 ### Step 5: Log everything
