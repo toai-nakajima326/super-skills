@@ -1387,10 +1387,12 @@ function handleHealth(req, res) {
     cloud_configured: cloudStore.isConfigured(),
     local_ai: ollamaAvailable,
     local_ai_model: ollamaPreferredModel,
+    coreml_available: coremlAvailable,
     ws_clients: wsClients.size,
     uptime_seconds: Math.floor(process.uptime()),
     features: {
-      semantic_search: ollamaAvailable,
+      semantic_search: ollamaAvailable || coremlAvailable,
+      coreml_embed: coremlAvailable,
       usage_analytics: true,
     },
   });
@@ -2437,8 +2439,9 @@ function doBackupAndMigrate() {
   } catch {}
   // Incremental index backfill
   try { backfillIndex(200); } catch {}
-  // Recheck Ollama availability
+  // Recheck AI availability
   checkOllama();
+  checkCoreml(); // lightweight CoreML embed server for daytime search
   // Ensure embed loop is running (self-healing — restarts if stopped)
   if (ollamaAvailable && !embedLoopRunning) {
     startEmbedLoop().catch(() => {});
@@ -3168,6 +3171,68 @@ function vecSync() {
   } catch {}
 }
 
+// ── CoreML Embedding Server (lightweight, NPU-accelerated) ────
+const COREML_EMBED_URL = process.env.COREML_EMBED_URL || 'http://127.0.0.1:3161';
+let coremlAvailable = false;
+
+/**
+ * Check if CoreML embed server is running on port 3161.
+ * This is a lightweight server (no Ollama/GPU needed) for search-time query embedding.
+ */
+async function checkCoreml() {
+  try {
+    const parsed = new URL(`${COREML_EMBED_URL}/health`);
+    const data = await new Promise((resolve, reject) => {
+      const req = httpRequest(parsed, { method: 'GET', timeout: 2000 }, (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => {
+          try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+          catch { reject(new Error('Invalid JSON')); }
+        });
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+      req.end();
+    });
+    coremlAvailable = data && data.status === 'ok';
+    if (coremlAvailable) {
+      console.log(`[coreml] Available: ${data.backend || 'coreml'} (dim=${data.embedding_dim}, seq=${data.max_seq_len})`);
+    }
+  } catch {
+    coremlAvailable = false;
+  }
+}
+
+/**
+ * Generate embedding via CoreML server (Ollama-compatible /api/embeddings).
+ * Returns 384-dim normalized embedding or null on failure.
+ */
+function coremlEmbed(text) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({ model: 'bge-small-en-v1.5', prompt: text });
+    const parsed = new URL(`${COREML_EMBED_URL}/api/embeddings`);
+    const req = httpRequest(parsed, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      timeout: 5000, // 5s — CoreML is fast, no need for long timeout
+    }, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        try {
+          const data = JSON.parse(Buffer.concat(chunks).toString());
+          resolve(data.embedding || []);
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('coreml embed timeout')); });
+    req.write(body);
+    req.end();
+  });
+}
+
 // ── Local AI (Ollama, optional) ───────────────────────────────
 
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
@@ -3304,6 +3369,10 @@ function handleAiStatus(req, res) {
     ollama_available: ollamaAvailable,
     ollama_url: OLLAMA_URL,
     models: ollamaModels,
+    coreml_available: coremlAvailable,
+    coreml_url: COREML_EMBED_URL,
+    coreml_model: 'bge-small-en-v1.5',
+    coreml_dim: 384,
     embedding_count: embeddingCount,
     preferred: {
       summarize: pickModel('summarize'),
@@ -3315,7 +3384,7 @@ function handleAiStatus(req, res) {
       auto_summarize: ollamaAvailable,
       auto_embed: ollamaAvailable,
       auto_conflict_resolve: ollamaAvailable,
-      semantic_search: ollamaAvailable,
+      semantic_search: ollamaAvailable || coremlAvailable,
     },
   });
 }
@@ -3373,8 +3442,8 @@ async function handleSemanticSearch(req, res) {
   const q = params.q;
   if (!q) return sendJson(res, 400, { error: 'Missing query parameter: q' });
 
-  // No Ollama → immediate FTS fallback
-  if (!ollamaAvailable) {
+  // No embedding source at all → immediate FTS fallback
+  if (!ollamaAvailable && !coremlAvailable) {
     const limit = Math.min(parseInt(params.limit) || 10, 50);
     const ftsResults = dbQuery(`SELECT id, type, content, tags, created_at, reasoning FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(q)} LIMIT ${limit});`);
     parseTags(ftsResults);
@@ -3386,26 +3455,48 @@ async function handleSemanticSearch(req, res) {
   const auth = validateApiKey(req);
   if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
 
-  // Generate query embedding — fallback to FTS if Ollama fails
-  const model = pickModel('embed');
+  // Generate query embedding — try CoreML first (fast, no Ollama needed), then Ollama, then FTS
   let queryEmbed;
-  try {
-    queryEmbed = await ollamaEmbed(model, q);
-  } catch (e) {
-    // Ollama timeout/error — fallback to FTS keyword search
-    const ftsResults = dbQuery(`SELECT id, type, content, tags, created_at, reasoning FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(q)} LIMIT ${limit});`);
-    parseTags(ftsResults);
-    return sendJson(res, 200, {
-      results: ftsResults,
-      count: ftsResults.length,
-      engine: 'fts-fallback',
-      model_used: null,
-      threshold,
-      _note: 'Ollama unavailable, fell back to FTS keyword search',
-    });
+  let embedSource = null;
+
+  // Strategy 1: CoreML (fast ~3ms, 384-dim, no Ollama process needed)
+  // Only usable for semantic search if stored embeddings match CoreML dimension (384)
+  if (coremlAvailable) {
+    try {
+      const coremlResult = await coremlEmbed(q);
+      if (coremlResult && coremlResult.length > 0) {
+        // Check if CoreML embedding dimension matches stored embeddings
+        if (coremlResult.length === EMBED_DIM) {
+          queryEmbed = coremlResult;
+          embedSource = 'coreml';
+        } else {
+          // Dimension mismatch — CoreML=384 but stored=2048 (qwen3-embedding)
+          // Can't use for vector search, but CoreML is confirmed working
+          // Fall through to Ollama or FTS
+        }
+      }
+    } catch (e) {
+      // CoreML failed — fall through to Ollama
+      console.log(`[search/semantic] CoreML embed failed: ${e.message}`);
+    }
   }
+
+  // Strategy 2: Ollama (slower ~3s, but matches stored embedding dimension)
+  if (!queryEmbed && ollamaAvailable) {
+    const model = pickModel('embed');
+    try {
+      queryEmbed = await ollamaEmbed(model, q);
+      if (queryEmbed && queryEmbed.length > 0) {
+        embedSource = 'ollama';
+      }
+    } catch (e) {
+      // Ollama failed — fall through to FTS
+      console.log(`[search/semantic] Ollama embed failed: ${e.message}`);
+    }
+  }
+
+  // Strategy 3: FTS fallback if no embedding could be generated
   if (!queryEmbed || queryEmbed.length === 0) {
-    // Same fallback
     const ftsResults = dbQuery(`SELECT id, type, content, tags, created_at, reasoning FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(q)} LIMIT ${limit});`);
     parseTags(ftsResults);
     return sendJson(res, 200, {
@@ -3414,8 +3505,13 @@ async function handleSemanticSearch(req, res) {
       engine: 'fts-fallback',
       model_used: null,
       threshold,
+      _note: coremlAvailable
+        ? 'CoreML available but dim mismatch with stored embeddings; Ollama unavailable; fell back to FTS'
+        : 'No embedding source available, fell back to FTS keyword search',
     });
   }
+
+  const model_used = embedSource === 'coreml' ? 'bge-small-en-v1.5 (coreml)' : pickModel('embed');
 
   const results = [];
 
@@ -3479,7 +3575,8 @@ async function handleSemanticSearch(req, res) {
     results: filtered.slice(0, limit),
     count: Math.min(filtered.length, limit),
     engine: results[0]?._engine || (vecDb ? 'sqlite-vec' : 'js-cosine'),
-    model_used: model,
+    model_used: model_used,
+    embed_source: embedSource,
     threshold,
   });
 }
@@ -4264,6 +4361,7 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 // Check local AI availability + start background loops
 checkOllama();
+checkCoreml(); // Lightweight CoreML embed server (port 3161) for daytime search
 if (ollamaAvailable) {
   startEmbedLoop().catch(() => {});
   startDiscoveryLoop().catch(() => {});
