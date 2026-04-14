@@ -365,7 +365,8 @@ async function refresh() {
     if (ai) {
       var embedCount = ai.embedding_count || 0;
       var totalCount = Math.max(tiers.ram.entries || 0, embedCount, 1);
-      var embedPct = Math.min(100, Math.round(embedCount / totalCount * 100));
+      var embedPctRaw = embedCount / totalCount * 100;
+      var embedPct = embedCount === totalCount ? 100 : Math.min(99, Math.floor(embedPctRaw));
       tiersHtml += '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--bg-bar);">';
       tiersHtml += '<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">LOCAL AI</div>';
       tiersHtml += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:12px;">';

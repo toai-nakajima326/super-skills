@@ -3278,10 +3278,7 @@ function mlxGenerate(prompt, options = {}) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
       model: MLX_GENERATE_MODEL,
-      messages: [
-        { role: 'system', content: '/no_think' },
-        { role: 'user', content: prompt },
-      ],
+      messages: [{ role: 'user', content: prompt }],
       max_tokens: options.maxTokens || 500,
       temperature: options.temperature || 0.3,
     });

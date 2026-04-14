@@ -375,11 +375,11 @@ class ModelManager:
 
             embeddings.append(embedding)
         
-        # Periodic GPU memory cleanup (every 10 calls)
+        # Periodic GPU memory cleanup (every 5 calls)
         if not hasattr(self, '_call_count'):
             self._call_count = 0
         self._call_count += 1
-        if self._call_count % 10 == 0:
+        if self._call_count % 5 == 0:
             if hasattr(mx, 'metal') and hasattr(mx.metal, 'clear_cache'):
                 mx.metal.clear_cache()
             gc.collect()
