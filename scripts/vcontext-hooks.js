@@ -142,13 +142,27 @@ async function recordEvent(eventName) {
     session: sessionId,
   });
 
-  // On user-prompt: trigger predictive search (async, non-blocking)
+  // On user-prompt: skill routing + predictive search
   if (eventName === 'user-prompt') {
     try {
       const data = JSON.parse(input);
       const prompt = data.prompt || data.content || data.message || '';
+      if (prompt.length >= 5) {
+        // Skill routing: search vcontext for matching skills
+        const matched = await get(`/recall?q=${encodeURIComponent(prompt.slice(0, 100))}&type=skill-registry&limit=2`);
+        if (matched.results && matched.results.length > 0) {
+          const lines = ['[auto-router] Matched skills:'];
+          for (const r of matched.results.slice(0, 2)) {
+            try {
+              const skill = JSON.parse(r.content);
+              lines.push(`\n### Skill: ${skill.name}`);
+              lines.push(skill.full_content || skill.description || '');
+            } catch {}
+          }
+          process.stdout.write(lines.join('\n') + '\n');
+        }
+      }
       if (prompt.length >= 15) {
-        // Fire and forget — don't await, don't block the hook
         post('/predictive-search', { prompt: prompt.slice(0, 500), session: sessionId }).catch(() => {});
       }
     } catch {}

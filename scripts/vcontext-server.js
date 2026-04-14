@@ -2703,33 +2703,36 @@ Output ONLY the suggestion in 2-3 sentences. Be specific about what the skill wo
 }
 
 // ── Auto skill creation from suggestions ──────────────────────
-let lastSkillCreation = 0;
-const SKILL_CREATION_INTERVAL_MS = 6 * 60 * 60 * 1000; // max once per 6 hours
 
 async function autoCreateSkill() {
-  if (Date.now() - lastSkillCreation < SKILL_CREATION_INTERVAL_MS) return;
   if (!ollamaAvailable) return;
 
   try {
     const model = pickModel('summarize');
     if (!model) return;
 
-    // Get latest unprocessed suggestion
-    const suggestions = dbQuery(`SELECT id, content FROM entries WHERE type = 'skill-suggestion' AND tags NOT LIKE '%skill-created%' ORDER BY id DESC LIMIT 1;`);
+    // Get ALL unprocessed suggestions
+    const suggestions = dbQuery(`SELECT id, content FROM entries WHERE type = 'skill-suggestion' AND tags NOT LIKE '%skill-created%' ORDER BY id ASC LIMIT 10;`);
     if (suggestions.length === 0) return;
-
-    const suggestion = suggestions[0];
-    let suggestionText = '';
-    try { suggestionText = JSON.parse(suggestion.content).suggestion || ''; } catch { suggestionText = suggestion.content; }
-    if (suggestionText.length < 20) return;
 
     // Get existing skill names to avoid duplicates
     const skillsDir = join(process.env.HOME, 'skills', 'skills');
     let existingSkills = [];
     try { existingSkills = readdirSync(skillsDir).filter(d => statSync(join(skillsDir, d)).isDirectory()); } catch {}
+    // Also check vcontext registry
+    const registeredSkills = dbQuery("SELECT content FROM entries WHERE type = 'skill-registry';");
+    for (const r of registeredSkills) {
+      try { const s = JSON.parse(r.content); if (s.name) existingSkills.push(s.name); } catch {}
+    }
+    existingSkills = [...new Set(existingSkills)];
 
-    // Ask Ollama to generate a skill name and SKILL.md content
-    const genPrompt = `Create a new AI workflow skill based on this suggestion:
+    let created = 0;
+    for (const suggestion of suggestions) {
+      let suggestionText = '';
+      try { suggestionText = JSON.parse(suggestion.content).suggestion || ''; } catch { suggestionText = suggestion.content; }
+      if (suggestionText.length < 20) continue;
+
+      const genPrompt = `Create a new AI workflow skill based on this suggestion:
 "${suggestionText.slice(0, 300)}"
 
 Existing skills (do NOT duplicate): ${existingSkills.join(', ')}
@@ -2756,64 +2759,60 @@ origin: auto-generated
 
 - First gotcha`;
 
-    const generated = await ollamaGenerate(model, genPrompt, { maxTokens: 500, temperature: 0.3 });
-    // Wait after LLM call to reduce memory pressure
-    await new Promise(r => setTimeout(r, 30000));
-    if (!generated || generated.length < 50) return;
+      const generated = await ollamaGenerate(model, genPrompt, { maxTokens: 500, temperature: 0.3 });
+      await new Promise(r => setTimeout(r, 30000));
+      if (!generated || generated.length < 50) continue;
 
-    // Parse skill name from output
-    const nameMatch = generated.match(/SKILL_NAME:\s*([a-z0-9-]+)/);
-    if (!nameMatch) return;
-    const skillName = nameMatch[1];
+      const nameMatch = generated.match(/SKILL_NAME:\s*([a-z0-9-]+)/);
+      if (!nameMatch) continue;
+      const skillName = nameMatch[1];
 
-    // Check duplicate
-    if (existingSkills.includes(skillName)) {
-      console.log(`[vcontext:skill] Skipped "${skillName}" — already exists`);
-      return;
-    }
-
-    // Extract SKILL.md content (everything after first ---)
-    const skillContent = generated.slice(generated.indexOf('---'));
-    if (!skillContent || skillContent.length < 50) return;
-
-    // Write SKILL.md
-    const skillDir = join(skillsDir, skillName);
-    mkdirSync(skillDir, { recursive: true });
-    writeFileSync(join(skillDir, 'SKILL.md'), skillContent, 'utf-8');
-
-    // Build all targets
-    try {
-      execSync(`node ${join(process.env.HOME, 'skills', 'scripts', 'build-all.js')}`, {
-        cwd: join(process.env.HOME, 'skills'),
-        timeout: 30000,
-        encoding: 'utf-8',
-      });
-    } catch (e) {
-      console.error(`[vcontext:skill] Build failed: ${e.message?.slice(0, 80)}`);
-    }
-
-    // Mark suggestion as processed
-    try {
-      const currentTags = dbQuery(`SELECT tags FROM entries WHERE id = ${suggestion.id};`);
-      if (currentTags[0]) {
-        let tags = JSON.parse(currentTags[0].tags || '[]');
-        tags.push('skill-created');
-        dbExec(`UPDATE entries SET tags = ${esc(JSON.stringify(tags))} WHERE id = ${suggestion.id};`);
+      if (existingSkills.includes(skillName)) {
+        console.log(`[vcontext:skill] Skipped "${skillName}" — already exists`);
+        // Mark as processed anyway
+        try { const t = dbQuery(`SELECT tags FROM entries WHERE id = ${suggestion.id};`); if (t[0]) { let tags = JSON.parse(t[0].tags || '[]'); tags.push('skill-created'); dbExec(`UPDATE entries SET tags = ${esc(JSON.stringify(tags))} WHERE id = ${suggestion.id};`); } } catch {}
+        continue;
       }
-    } catch {}
 
-    // Record the creation
-    const record = JSON.stringify({
-      skill_name: skillName,
-      source_suggestion_id: suggestion.id,
-      created_at: new Date().toISOString(),
-    });
-    try {
-      dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES ('skill-created', ${esc(record)}, '["skill-created","auto"]', 'system', ${estimateTokens(record)}, datetime('now'), 0, 'ram');`);
-    } catch {}
+      const skillContent = generated.slice(generated.indexOf('---'));
+      if (!skillContent || skillContent.length < 50) continue;
 
-    lastSkillCreation = Date.now();
-    console.log(`[vcontext:skill] Auto-created skill: ${skillName}`);
+      // Write SKILL.md
+      const skillDir = join(skillsDir, skillName);
+      mkdirSync(skillDir, { recursive: true });
+      writeFileSync(join(skillDir, 'SKILL.md'), skillContent, 'utf-8');
+
+      // Register in vcontext
+      const descMatch = skillContent.match(/description:\s*["']?(.*?)(?:["']?\n|$)/s);
+      const desc = descMatch ? descMatch[1].trim().slice(0, 200) : '';
+      try {
+        dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES ('skill-registry', ${esc(JSON.stringify({ name: skillName, description: desc, full_content: skillContent }))}, ${esc(JSON.stringify(['skill-registry', 'skill:' + skillName]))}, 'system', ${estimateTokens(skillContent)}, datetime('now'), 0, 'ram');`);
+      } catch {}
+
+      // Mark suggestion as processed
+      try { const t = dbQuery(`SELECT tags FROM entries WHERE id = ${suggestion.id};`); if (t[0]) { let tags = JSON.parse(t[0].tags || '[]'); tags.push('skill-created'); dbExec(`UPDATE entries SET tags = ${esc(JSON.stringify(tags))} WHERE id = ${suggestion.id};`); } } catch {}
+
+      // Record creation
+      try {
+        dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES ('skill-created', ${esc(JSON.stringify({ skill_name: skillName, source_suggestion_id: suggestion.id, created_at: new Date().toISOString() }))}, '["skill-created","auto"]', 'system', 20, datetime('now'), 0, 'ram');`);
+      } catch {}
+
+      existingSkills.push(skillName);
+      created++;
+      console.log(`[vcontext:skill] Auto-created skill: ${skillName}`);
+    }
+
+    // Build all targets once after all skills created
+    if (created > 0) {
+      try {
+        execSync(`node ${join(process.env.HOME, 'skills', 'scripts', 'build-all.js')}`, {
+          cwd: join(process.env.HOME, 'skills'), timeout: 60000, encoding: 'utf-8',
+        });
+        console.log(`[vcontext:skill] Built ${created} new skills`);
+      } catch (e) {
+        console.error(`[vcontext:skill] Build failed: ${e.message?.slice(0, 80)}`);
+      }
+    }
   } catch (e) {
     console.error(`[vcontext:skill] Error: ${e.message?.slice(0, 80)}`);
   }
