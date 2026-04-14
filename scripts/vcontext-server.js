@@ -2542,7 +2542,7 @@ function detectAnomalies() {
 
 // ── Streaming skill discovery + user need prediction ──────────
 let discoveryLoopRunning = false;
-const SEARXNG_URL = process.env.SEARXNG_URL || 'http://127.0.0.1:3160';
+const SEARXNG_URL = process.env.SEARXNG_URL || 'http://127.0.0.1:8888';
 const DISCOVERY_INTERVAL_MS = 5 * 60 * 1000;   // 5 min between searches
 const PREDICTION_INTERVAL_MS = 30 * 60 * 1000;  // 30 min between predictions
 let lastPredictionRun = 0;
@@ -3827,7 +3827,7 @@ Keywords:`;
       } catch {}
 
       // 3b: SearXNG meta-search (Google+Bing+DDG+Brave, local instance)
-      const SEARXNG_URL = process.env.SEARXNG_URL || 'http://127.0.0.1:3160';
+      const SEARXNG_URL = process.env.SEARXNG_URL || 'http://127.0.0.1:8888';
       try {
         const searchQuery = sanitized + ' 2026';
         const searchUrl = `${SEARXNG_URL}/search?q=${encodeURIComponent(searchQuery)}&format=json&language=auto`;
@@ -4313,16 +4313,17 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
 // Check local AI availability + start background loops
-checkMlxGenerate();
 checkMlx().then(() => {
-  // Start embed loop after MLX check completes (was race condition — mlxAvailable still false at sync check)
   if (mlxAvailable) {
     startEmbedLoop().catch(() => {});
   }
 }).catch(() => {});
-if (mlxGenerateAvailable) {
-  startDiscoveryLoop().catch(() => {});
-}
+checkMlxGenerate().then(() => {
+  if (mlxGenerateAvailable) {
+    startDiscoveryLoop().catch(() => {});
+    console.log('[discovery] Loop started (MLX generate available)');
+  }
+}).catch(() => {});
 
 // Start
 server.listen(PORT, '127.0.0.1', () => {

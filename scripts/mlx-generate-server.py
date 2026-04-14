@@ -110,8 +110,16 @@ def do_generate(messages: List[Dict], max_tokens: int = 500, temperature: float 
         }
     }
 
-# ── HTTP Server (stdlib, no extra deps) ──────────────────────
+# ── HTTP Server (ThreadingMixin for non-blocking health checks) ──
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
+import threading
+
+# Lock to serialize generation (MLX is not thread-safe) while allowing health checks
+_generate_lock = threading.Lock()
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *a):
@@ -160,7 +168,8 @@ class Handler(BaseHTTPRequestHandler):
                 max_tokens = body.get("max_tokens", 500)
                 temperature = body.get("temperature", 0.3)
 
-                result = do_generate(messages, max_tokens, temperature)
+                with _generate_lock:
+                    result = do_generate(messages, max_tokens, temperature)
                 self._send_json(200, result)
                 logger.info(f"POST /v1/chat/completions - {result['usage']['completion_tokens']} tokens in {result['usage']['prompt_tokens']+result['usage']['completion_tokens']}t")
             except Exception as e:
@@ -170,7 +179,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not found"})
 
 if __name__ == "__main__":
-    server = HTTPServer((args.host, args.port), Handler)
+    server = ThreadedHTTPServer((args.host, args.port), Handler)
     logger.info(f"MLX Generate Server running at http://{args.host}:{args.port}")
     logger.info(f"Model: {args.model} | Cache clear every {args.cache_clear_interval} calls | Metal cache limit: 6GB")
     try:
