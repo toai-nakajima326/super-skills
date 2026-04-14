@@ -2410,6 +2410,8 @@ async function startEmbedLoop() {
         vecUpsert(row.id, embedding);
         try { dbExec(`UPDATE entry_index SET has_embedding = 1 WHERE entry_id = ${row.id};`); } catch {}
       }
+      // Wait between entries to avoid memory pressure
+      await new Promise(r => setTimeout(r, 30000));
     } catch {
       await new Promise(r => setTimeout(r, 60000));
     }
