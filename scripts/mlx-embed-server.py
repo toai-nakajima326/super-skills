@@ -852,8 +852,9 @@ async def general_exception_handler(request: Request, exc: Exception):
 # Main entry point
 def main():
     """Run the server"""
+    # Use __name__ so it works regardless of filename (server.py or mlx-embed-server.py)
     uvicorn.run(
-        "server:app",
+        app,
         host=config.host,
         port=config.port,
         log_level=os.getenv("LOG_LEVEL", "info").lower(),
