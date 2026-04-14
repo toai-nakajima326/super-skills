@@ -193,8 +193,9 @@ class OnnxDirectMLBackend(EmbedBackend):
 
         results = []
         for text in texts:
+            prefixed = BGE_QUERY_PREFIX + text
             tokens = self.tokenizer(
-                text,
+                prefixed,
                 padding="max_length",
                 truncation=True,
                 max_length=MAX_SEQ_LEN,
@@ -279,8 +280,9 @@ class OnnxCpuBackend(EmbedBackend):
 
         results = []
         for text in texts:
+            prefixed = BGE_QUERY_PREFIX + text
             tokens = self.tokenizer(
-                text,
+                prefixed,
                 padding="max_length",
                 truncation=True,
                 max_length=MAX_SEQ_LEN,
@@ -695,8 +697,25 @@ def main():
     EmbedHandler.backend = backend
     EmbedHandler.start_time = time.time()
 
+    # Port check — auto-find available port if default is taken
+    import socket
+    port = args.port
+    for attempt in range(10):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind((args.host, port))
+            sock.close()
+            break
+        except OSError:
+            sock.close()
+            print(f"[server] Port {port} in use, trying {port + 1}")
+            port += 1
+    else:
+        print(f"[error] No available port found ({args.port}-{port})")
+        sys.exit(1)
+
     # Start server
-    server = HTTPServer((args.host, args.port), EmbedHandler)
+    server = HTTPServer((args.host, port), EmbedHandler)
     print(f"[server] Embedding server running on http://{args.host}:{args.port}")
     print(f"[server] Backend: {backend.name} | Model: {MODEL_NAME} | Dim: {EMBED_DIM}")
     print(f"[server] Platform: {platform.system()} {platform.machine()}")
