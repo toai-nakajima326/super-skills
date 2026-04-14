@@ -103,5 +103,23 @@ while true; do
     check_searxng
   fi
 
+  # MLX Generate memory check every 10 minutes (every 10th iteration)
+  # Restart if footprint exceeds 8GB (model=5GB + 3GB buffer)
+  if [[ $((SEARXNG_CHECK_COUNTER % 10)) -eq 0 ]]; then
+    GEN_PID=$(pgrep -f "mlx_lm server" | head -1)
+    if [[ -n "$GEN_PID" ]]; then
+      GEN_MB=$(footprint -p "$GEN_PID" 2>/dev/null | grep Footprint | grep -o '[0-9]* MB' | grep -o '[0-9]*')
+      if [[ -n "$GEN_MB" ]] && [[ "$GEN_MB" -gt 8000 ]]; then
+        log "MLX Generate memory ${GEN_MB}MB > 8GB, restarting..."
+        launchctl unload ~/Library/LaunchAgents/com.vcontext.mlx-generate.plist 2>/dev/null
+        sleep 1
+        kill -9 "$GEN_PID" 2>/dev/null
+        sleep 1
+        launchctl load ~/Library/LaunchAgents/com.vcontext.mlx-generate.plist 2>/dev/null
+        log "MLX Generate restarted"
+      fi
+    fi
+  fi
+
   sleep $CHECK_INTERVAL
 done
