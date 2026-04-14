@@ -15,10 +15,10 @@ Usage:
   python3 coreml-embed-server.py --backend onnx-dml  # force ONNX+DirectML
   python3 coreml-embed-server.py --backend onnx-cpu  # force ONNX CPU
 
-Port: 3155 (within Claude Code 3100-3199 range, same project as vcontext 3150)
+Port: 3161 (within Claude Code 3000-3499 range, same project as vcontext 3150)
 
 Model: BAAI/bge-small-en-v1.5 (384-dim embeddings, ~33M params)
-  - CoreML:  models/bge-small-en-v1.5.mlpackage
+  - CoreML:  /Volumes/VContext/bge-small-coreml.mlpackage (converted with CLS pooling + L2 norm)
   - ONNX:   models/bge-small-en-v1.5.onnx
 
 Export models first:
@@ -41,11 +41,14 @@ from urllib.parse import urlparse, parse_qs
 # ---------------------------------------------------------------------------
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
 EMBED_DIM = 384
-MAX_SEQ_LEN = 512
-DEFAULT_PORT = int(os.environ.get("EMBED_PORT", "3155"))
+MAX_SEQ_LEN = 128  # our CoreML model was converted with seq_len=128 (sufficient for queries)
+DEFAULT_PORT = int(os.environ.get("EMBED_PORT", "3161"))
 MODEL_DIR = Path(__file__).parent.parent / "models"
-COREML_PATH = MODEL_DIR / "bge-small-en-v1.5.mlpackage"
+COREML_PATH = Path("/Volumes/VContext/bge-small-coreml.mlpackage")
 ONNX_PATH = MODEL_DIR / "bge-small-en-v1.5.onnx"
+
+# BGE instruction prefix for query embedding (improves retrieval quality)
+BGE_QUERY_PREFIX = "Represent this sentence: "
 
 # ---------------------------------------------------------------------------
 # Backend: abstract base
@@ -81,12 +84,13 @@ class CoreMLBackend(EmbedBackend):
         if not COREML_PATH.exists():
             raise FileNotFoundError(
                 f"CoreML model not found at {COREML_PATH}. "
-                f"Run: python3 {__file__} --export"
+                f"Run: python3 convert-bge-coreml.py"
             )
 
-        print(f"[coreml] Loading model from {COREML_PATH} ...")
+        print(f"[coreml] Loading tokenizer: {MODEL_NAME}")
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
+        print(f"[coreml] Loading CoreML model from {COREML_PATH} ...")
         # Prefer Neural Engine, fall back to CPU+GPU
         self.model = ct.models.MLModel(
             str(COREML_PATH),
@@ -94,54 +98,48 @@ class CoreMLBackend(EmbedBackend):
         )
         print("[coreml] Model loaded (compute_units=ALL, ANE preferred)")
 
+        # Warmup — first inference compiles for Neural Engine
+        print("[coreml] Warming up (first inference compiles for ANE)...")
+        t0 = time.time()
+        self.embed(["warmup"])
+        warmup_ms = (time.time() - t0) * 1000
+        print(f"[coreml] Warmup: {warmup_ms:.0f}ms")
+
+        t0 = time.time()
+        self.embed(["speed test query"])
+        speed_ms = (time.time() - t0) * 1000
+        print(f"[coreml] Inference speed: {speed_ms:.1f}ms")
+
     def embed(self, texts: list[str]) -> list[list[float]]:
         import numpy as np
 
         results = []
         for text in texts:
+            # BGE recommends prefixing queries for better retrieval
+            prefixed = BGE_QUERY_PREFIX + text
+
             tokens = self.tokenizer(
-                text,
+                prefixed,
                 padding="max_length",
                 truncation=True,
                 max_length=MAX_SEQ_LEN,
                 return_tensors="np",
             )
 
+            # Our converted model expects input_ids, attention_mask, token_type_ids
+            # and outputs a pre-pooled, L2-normalized 384-dim embedding directly
             prediction = self.model.predict({
                 "input_ids": tokens["input_ids"].astype(np.int32),
                 "attention_mask": tokens["attention_mask"].astype(np.int32),
+                "token_type_ids": tokens.get(
+                    "token_type_ids",
+                    np.zeros_like(tokens["input_ids"]),
+                ).astype(np.int32),
             })
 
-            # Extract [CLS] token embedding (first token of last_hidden_state)
-            # CoreML output key depends on export; try common names
-            for key in ["last_hidden_state", "output", "embeddings", "token_embeddings"]:
-                if key in prediction:
-                    hidden = np.array(prediction[key])
-                    break
-            else:
-                # Use first available output
-                hidden = np.array(list(prediction.values())[0])
-
-            # Mean pooling over non-padding tokens
-            mask = tokens["attention_mask"].astype(np.float32)
-            if hidden.ndim == 3:
-                # shape: (1, seq_len, hidden_dim)
-                mask_expanded = np.expand_dims(mask, -1)  # (1, seq_len, 1)
-                summed = np.sum(hidden * mask_expanded, axis=1)  # (1, hidden_dim)
-                counts = np.sum(mask_expanded, axis=1).clip(min=1e-9)
-                pooled = (summed / counts)[0]
-            elif hidden.ndim == 2 and hidden.shape[-1] == EMBED_DIM:
-                # Already pooled: (1, hidden_dim)
-                pooled = hidden[0]
-            else:
-                pooled = hidden.flatten()[:EMBED_DIM]
-
-            # L2 normalize
-            norm = np.linalg.norm(pooled)
-            if norm > 0:
-                pooled = pooled / norm
-
-            results.append(pooled.tolist())
+            # Model output is named "embedding" — already CLS-pooled and L2-normalized
+            embedding = np.array(prediction["embedding"]).flatten()
+            results.append(embedding.tolist())
 
         return results
 
