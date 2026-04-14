@@ -210,7 +210,17 @@
       "WebFetch(domain:antigravity.google)",
       "WebFetch(domain:antigravity.codes)",
       "WebFetch(domain:geminicli.com)",
-      "WebFetch(domain:discuss.ai.google.dev)"
+      "WebFetch(domain:discuss.ai.google.dev)",
+      "WebFetch(domain:ollama.com)",
+      "WebFetch(domain:contracollective.com)",
+      "WebFetch(domain:www.apple.com)",
+      "WebFetch(domain:apple.github.io)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:sbert.net)",
+      "Bash(mkdir -p .claude/skills)",
+      "Bash(node scripts/build-all.js)",
+      "Bash(rm -f /Users/mitsuru_nakajima/skills/.git/index.lock)",
+      "Bash(git commit -m 'fix: self-evolve auto-router → super-skills:*)"
     ]
   }
 }
