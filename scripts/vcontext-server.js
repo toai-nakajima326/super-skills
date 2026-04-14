@@ -834,11 +834,26 @@ async function handleStore(req, res) {
   }
 
   // Generate embedding with MLX (always — fast ~30-100ms on Apple Silicon GPU)
-  // MLX is the sole embedding backend; Ollama is no longer used for embeddings
-  if (mlxAvailable) {
+  // Falls back to Ollama if MLX unavailable (night window only)
+  if (mlxAvailable || (ollamaAvailable && isNightWindow())) {
     setImmediate(async () => {
       try {
-        const embedding = await mlxEmbed(content.slice(0, 1000));
+        let embedding = null;
+        // Try MLX first (fast, always available, no night-window restriction)
+        if (mlxAvailable) {
+          try {
+            embedding = await mlxEmbed(content.slice(0, 1000));
+          } catch (e) {
+            console.log(`[store] MLX embed failed, trying Ollama fallback: ${e.message}`);
+          }
+        }
+        // Fallback to Ollama (night window only)
+        if ((!embedding || embedding.length === 0) && ollamaAvailable && isNightWindow()) {
+          const model = pickModel('embed');
+          if (model) {
+            embedding = await ollamaEmbed(model, content.slice(0, 1000));
+          }
+        }
         if (embedding && embedding.length > 0) {
           const embJson = esc(JSON.stringify(embedding));
           dbExec(`UPDATE entries SET embedding = ${embJson} WHERE id = ${entry.id};`);
@@ -846,9 +861,7 @@ async function handleStore(req, res) {
           vecUpsert(entry.id, embedding);
           try { dbExec(`UPDATE entry_index SET has_embedding = 1 WHERE entry_id = ${entry.id};`); } catch {}
         }
-      } catch (e) {
-        console.log(`[store] MLX embed failed: ${e.message}`);
-      }
+      } catch {} // Non-fatal
     });
   }
 
@@ -2376,7 +2389,7 @@ function isNightWindow() {
   return hour >= 22 || hour < 8;
 }
 
-// ── Streaming embed (MLX only — runs 24/7, no night-window restriction) ──
+// ── Streaming embed (MLX: always, Ollama fallback: night only) ──
 let embedLoopRunning = false;
 
 async function startEmbedLoop() {
@@ -2384,13 +2397,18 @@ async function startEmbedLoop() {
   embedLoopRunning = true;
 
   while (embedLoopRunning) {
-    // MLX must be available — no Ollama fallback for embeddings
-    if (!mlxAvailable) {
-      checkMlx();
-      if (!mlxAvailable) {
-        await new Promise(r => setTimeout(r, 60000)); // retry every 60s
-        continue;
-      }
+    // MLX runs always; Ollama-only falls back to night window
+    if (!mlxAvailable && !isNightWindow()) {
+      await new Promise(r => setTimeout(r, 5 * 60 * 1000)); // check every 5 min
+      continue;
+    }
+
+    // Ensure at least one embed backend is available
+    if (!mlxAvailable) { checkMlx(); }
+    if (!ollamaAvailable) { checkOllama(); }
+    if (!mlxAvailable && !ollamaAvailable) {
+      await new Promise(r => setTimeout(r, 60000));
+      continue;
     }
 
     // Pause if flag file exists
@@ -2406,10 +2424,20 @@ async function startEmbedLoop() {
       }
       const row = rows[0];
       let embedding = null;
-      try {
-        embedding = await mlxEmbed(String(row.content).slice(0, 1000));
-      } catch (e) {
-        console.log(`[embed-loop] MLX failed for id=${row.id}: ${e.message}`);
+      // Try MLX first (fast, always available)
+      if (mlxAvailable) {
+        try {
+          embedding = await mlxEmbed(String(row.content).slice(0, 1000));
+        } catch (e) {
+          console.log(`[embed-loop] MLX failed for id=${row.id}: ${e.message}`);
+        }
+      }
+      // Fallback to Ollama (night window only)
+      if ((!embedding || embedding.length === 0) && ollamaAvailable && isNightWindow()) {
+        const model = pickModel('embed');
+        if (model) {
+          embedding = await ollamaEmbed(model, String(row.content).slice(0, 1000));
+        }
       }
       if (embedding && embedding.length > 0) {
         const embJson = esc(JSON.stringify(embedding));
@@ -2418,8 +2446,8 @@ async function startEmbedLoop() {
         vecUpsert(row.id, embedding);
         try { dbExec(`UPDATE entry_index SET has_embedding = 1 WHERE entry_id = ${row.id};`); } catch {}
       }
-      // MLX is fast (~30-100ms) — 5s between entries is sufficient
-      await new Promise(r => setTimeout(r, 5000));
+      // Wait between entries — 5s for MLX (lightweight), 30s for Ollama (heavy)
+      await new Promise(r => setTimeout(r, mlxAvailable ? 5000 : 30000));
     } catch {
       await new Promise(r => setTimeout(r, 60000));
     }
@@ -2447,10 +2475,9 @@ function doBackupAndMigrate() {
   try { backfillIndex(200); } catch {}
   // Recheck AI availability
   checkOllama();
-  checkMlx(); // MLX embed server — sole embedding provider (24/7)
+  checkMlx(); // MLX embed server (always-on embedding)
   // Ensure embed loop is running (self-healing — restarts if stopped)
-  // Embedding is MLX-only now; Ollama is only for llama3.1 summarize/skill-gen (night)
-  if (mlxAvailable && !embedLoopRunning) {
+  if ((mlxAvailable || ollamaAvailable) && !embedLoopRunning) {
     startEmbedLoop().catch(() => {});
   }
   // Quick migration check
@@ -4356,13 +4383,12 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
 // Check local AI availability + start background loops
-checkOllama(); // Ollama: llama3.1 for summarize/skill-gen (night only)
-checkMlx();    // MLX embed server (port 3161) — sole embedding provider, 24/7
-// Start embed loop (MLX only — no night-window restriction)
-if (mlxAvailable) {
+checkOllama();
+checkMlx(); // MLX embed server (port 3161) — always-on embedding with Qwen3-8B
+// Start embed loop if any embed backend is available (MLX = always, Ollama = night only)
+if (mlxAvailable || ollamaAvailable) {
   startEmbedLoop().catch(() => {});
 }
-// Discovery loop uses Ollama for skill generation (night only)
 if (ollamaAvailable) {
   startDiscoveryLoop().catch(() => {});
 }
