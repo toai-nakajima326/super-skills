@@ -1,6 +1,0 @@
-interface:
-  display_name: "Deep Research"
-  short_description: "|"
-  default_prompt: "Use Deep Research for this task."
-policy:
-  allow_implicit_invocation: true

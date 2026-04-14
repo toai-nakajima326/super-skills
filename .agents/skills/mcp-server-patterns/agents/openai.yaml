@@ -1,6 +1,0 @@
-interface:
-  display_name: "Mcp Server Patterns"
-  short_description: "|"
-  default_prompt: "Use Mcp Server Patterns for this task."
-policy:
-  allow_implicit_invocation: true

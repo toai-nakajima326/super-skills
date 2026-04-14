@@ -1,6 +1,0 @@
-interface:
-  display_name: "Verification Loop"
-  short_description: "|"
-  default_prompt: "Use Verification Loop for this task."
-policy:
-  allow_implicit_invocation: true
