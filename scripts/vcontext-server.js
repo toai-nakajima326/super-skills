@@ -2542,6 +2542,24 @@ async function startDiscoveryLoop() {
       // Auto-create skill only when embedding backlog is clear (avoid Ollama contention)
       const pendingEmbeds = dbQuery('SELECT COUNT(*) as c FROM entries WHERE embedding IS NULL;');
       if ((pendingEmbeds[0]?.c || 0) === 0) {
+        // Unload embedding model before loading summarize model
+        try {
+          const embedModel = pickModel('embed');
+          if (embedModel) {
+            await new Promise((resolve) => {
+              const body = JSON.stringify({ model: embedModel, keep_alive: 0 });
+              const req = httpRequest(new URL(`${OLLAMA_URL}/api/generate`), {
+                method: 'POST', timeout: 5000,
+                headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+              }, () => resolve());
+              req.on('error', () => resolve());
+              req.on('timeout', () => { req.destroy(); resolve(); });
+              req.write(body);
+              req.end();
+            });
+            await new Promise(r => setTimeout(r, 5000)); // wait for memory release
+          }
+        } catch {}
         try {
           await autoCreateSkill();
         } catch {}
