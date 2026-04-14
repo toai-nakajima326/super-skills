@@ -2540,9 +2540,25 @@ function detectAnomalies() {
   }
 }
 
+// ── SearXNG dynamic URL detection ─────────────────────────────
+let searxngUrl = process.env.SEARXNG_URL || '';
+function detectSearxngUrl() {
+  if (process.env.SEARXNG_URL) return; // env var takes priority
+  try {
+    const port = execFileSync('docker', ['port', 'searxng', '8080'], {
+      timeout: 5000, encoding: 'utf-8',
+    }).trim().split(':').pop();
+    if (port && /^\d+$/.test(port)) {
+      searxngUrl = `http://127.0.0.1:${port}`;
+      return;
+    }
+  } catch {}
+  searxngUrl = 'http://127.0.0.1:8888'; // fallback
+}
+detectSearxngUrl();
+
 // ── Streaming skill discovery + user need prediction ──────────
 let discoveryLoopRunning = false;
-const SEARXNG_URL = process.env.SEARXNG_URL || 'http://127.0.0.1:8888';
 const DISCOVERY_INTERVAL_MS = 5 * 60 * 1000;   // 5 min between searches
 const PREDICTION_INTERVAL_MS = 30 * 60 * 1000;  // 30 min between predictions
 let lastPredictionRun = 0;
@@ -2585,6 +2601,7 @@ async function startDiscoveryLoop() {
 }
 
 async function runOneDiscovery() {
+  detectSearxngUrl(); // re-detect port in case Docker restarted
 
   // ── 1. Skill discovery: dynamic topic from user activity ──
   try {
@@ -2621,7 +2638,7 @@ Search query:`;
     } else {
 
     const searchResult = await new Promise((resolve) => {
-      const req = httpRequest(new URL(`${SEARXNG_URL}/search?q=${encodeURIComponent(topic + ' 2026')}&format=json&language=auto`), {
+      const req = httpRequest(new URL(`${searxngUrl}/search?q=${encodeURIComponent(topic + ' 2026')}&format=json&language=auto`), {
         method: 'GET', timeout: 10000,
       }, (res) => {
         const chunks = [];
@@ -3701,7 +3718,7 @@ async function handleCompletionCheck(req, res) {
         const mainTool = tools[0] || 'code';
         const searchQuery = sanitizeForExternalSearch(`${mainTool} completion checklist best practices`);
         const searchResult = await new Promise((resolve) => {
-          const req = httpRequest(new URL(`${SEARXNG_URL}/search?q=${encodeURIComponent(searchQuery + ' 2026')}&format=json&language=auto`), {
+          const req = httpRequest(new URL(`${searxngUrl}/search?q=${encodeURIComponent(searchQuery + ' 2026')}&format=json&language=auto`), {
             method: 'GET', timeout: 8000,
           }, (res) => {
             const chunks = [];
@@ -3827,10 +3844,10 @@ Keywords:`;
       } catch {}
 
       // 3b: SearXNG meta-search (Google+Bing+DDG+Brave, local instance)
-      const SEARXNG_URL = process.env.SEARXNG_URL || 'http://127.0.0.1:8888';
+      detectSearxngUrl(); // re-detect in case Docker restarted
       try {
         const searchQuery = sanitized + ' 2026';
-        const searchUrl = `${SEARXNG_URL}/search?q=${encodeURIComponent(searchQuery)}&format=json&language=auto`;
+        const searchUrl = `${searxngUrl}/search?q=${encodeURIComponent(searchQuery)}&format=json&language=auto`;
         const searchResult = await new Promise((resolve) => {
           const req = httpRequest(new URL(searchUrl), {
             method: 'GET', timeout: 10000,
