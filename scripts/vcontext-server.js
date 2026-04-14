@@ -2557,11 +2557,28 @@ async function startDiscoveryLoop() {
               req.write(body);
               req.end();
             });
-            await new Promise(r => setTimeout(r, 5000)); // wait for memory release
+            await new Promise(r => setTimeout(r, 5 * 60 * 1000)); // 5 min wait for memory release
           }
         } catch {}
         try {
           await autoCreateSkill();
+        } catch {}
+        // Unload summarize model after skill creation
+        try {
+          const sumModel = pickModel('summarize');
+          if (sumModel) {
+            const body = JSON.stringify({ model: sumModel, keep_alive: 0 });
+            await new Promise((resolve) => {
+              const req = httpRequest(new URL(`${OLLAMA_URL}/api/generate`), {
+                method: 'POST', timeout: 5000,
+                headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+              }, () => resolve());
+              req.on('error', () => resolve());
+              req.on('timeout', () => { req.destroy(); resolve(); });
+              req.write(body);
+              req.end();
+            });
+          }
         } catch {}
       }
     }
