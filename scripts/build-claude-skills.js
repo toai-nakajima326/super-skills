@@ -17,6 +17,10 @@ function build() {
   let built = 0;
   const allErrors = [];
 
+  // Only deploy super-skills to .claude/skills/ — all other skills
+  // live in vcontext skill-registry and are loaded on demand via recall
+  const CLAUDE_DEPLOY = ['super-skills'];
+
   for (const dir of dirs) {
     const { meta, body, filePath } = readSkill(SRC, dir);
     const { errors, warnings } = validateMeta(meta, dir);
@@ -27,7 +31,8 @@ function build() {
     }
     for (const w of warnings) console.warn(`  WARN: ${w}`);
 
-    // Claude Code reads SKILL.md directly — copy the entire skill directory
+    if (!CLAUDE_DEPLOY.includes(dir)) continue; // vcontext handles the rest
+
     const destDir = join(OUT, dir);
     copyRecursive(join(SRC, dir), destDir);
     built++;
