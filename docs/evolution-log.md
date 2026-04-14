@@ -4,6 +4,70 @@ Auto-maintained by the `self-evolve` skill. Records all upstream syncs, web disc
 
 ---
 
+## 2026-04-14 — upstream-sync (run 5)
+
+### Action: skipped
+- **Target**: 17 skills (agent-memory, auto-router, confidence-filter, debate-consensus, drift-detect, mcp-server-patterns, model-selector, phase-gate, quality-gate, report-format, research-first, self-evolve, session-handoff, spec-driven-dev, supervisor-worker, ui-implementation, virtual-context)
+- **Source**: takurot/super-skills upstream/main
+- **Reasoning**: Same regression as prior runs — upstream shows 1,392 deletions, 0 additions. Syncing would destroy all custom orchestration skills including newly added `spec-driven-dev` and `agent-memory`.
+- **Changes**: None applied
+- **Risk assessment**: low (skip was protective)
+
+## 2026-04-14 — web-discovery (run 5)
+
+**Search window**: 2026-04-13 → 2026-04-14
+**Queries executed**: 9
+**New sources checked**: 12 (full page fetches via WebSearch + deep dives)
+**Candidates found**: 5
+**Adopted**: 1 (update) | **Skipped**: 4
+
+### Action: updated — `quality-gate`
+- **Source**: agnix (agent-sh/agnix on GitHub; Hacker News "Show HN: Agnix – lint your AI agent configs"; VS Code Marketplace; NPM package `agnix`; skills.pawgrammer.com/skills/agnix)
+- **Reasoning**: Agnix is a linter/LSP for AI agent configuration files (CLAUDE.md, AGENTS.md, SKILL.md, hooks, MCP) with 385 rules across Claude Code, Codex CLI, OpenCode, Cursor, Copilot, and more. The key insight from the HN post: **skills invoke at 0% without correct syntax** — e.g. wrong casing in skill name makes it invisible to the auto-router. This is a real problem that `quality-gate`'s completion gate should address. Adding `npx agnix .` as a lint step for agent config changes fills a genuine gap: the existing "run lint: eslint / equivalent" step doesn't cover SKILL.md / CLAUDE.md files. Auto-fix available via `agnix --fix .`.
+- **Changes**: Added step 4 to `quality-gate` Completion Gate: "For AI agent config changes (CLAUDE.md, SKILL.md, hooks, MCP): `npx agnix .` — catches syntax errors that silently break skill auto-routing"
+- **Risk assessment**: low — documentation/tool reference only; no auto-execution
+
+### Skipped patterns
+
+- **Trellis** (mindfold-ai/Trellis): Multi-platform AI coding workflow CLI with `.trellis/` directory structure (spec/, tasks/, workspace/), parallel agents via git worktrees, and cross-platform entry point generation. Core concepts are already covered: specs → `spec-driven-dev`, parallel agents → `dmux-workflows`, memory/continuity → `session-handoff`, project config → `agent-memory`. Trellis is a tool that *implements* these patterns, not a novel workflow pattern itself.
+- **qwen3-coder:30b** (model upgrade): Qwen3-Coder is a 30B-A3B MoE model (3.3B active params, 70%+ SWE-bench Verified) available via `ollama pull qwen3-coder:30b`. Evaluated but not installed — the `code` model in MODEL_PREFS is only used for status reporting (not actual vcontext processing), so the upgrade has no functional impact on the current system. Will reconsider if a code-query endpoint is added to vcontext.
+- **Hermes Agent** (Nous Research): Self-improving open-source agent framework (32K+ GitHub stars) with persistent memory, 40+ tools, Atropos RL training loop, and multi-platform messaging (Telegram, Discord, Slack). Platform/framework (not a SKILL.md workflow). The self-improvement concept overlaps `self-evolve`; the persistent memory concept overlaps `virtual-context` + `agent-memory`. Not extractable as a portable workflow.
+- **Multi-agent orchestration taxonomy** (Sequential/Pipeline, Orchestration vs Choreography, Hierarchical): Well-documented in multiple sources (Vellum AI, TrueFoundry, Chanl, StackAI). All three patterns are already covered by `supervisor-worker` (hierarchical orchestration) and `dmux-workflows` (parallel execution). No new actionable pattern found.
+
+## 2026-04-14 — local-ai-maintenance (run 5)
+
+### Models updated
+- `llama3.1:latest` — pulled, no version change (manifest confirmed)
+- `qwen2.5-coder:latest` — pulled, no version change
+- `qwen3-embedding:latest` — pulled, no version change
+
+### New model evaluated
+- **`qwen3-coder:30b`** — evaluated but not installed. See web-discovery section above.
+
+### Models pruned
+- None
+
+### Current model lineup
+| Task | Model |
+|------|-------|
+| summarize | llama3.1:latest |
+| embed | qwen3-embedding:latest |
+| judge | llama3.1:latest |
+| code | qwen2.5-coder:latest (code model only used in status reporting) |
+
+## 2026-04-14 — hook-auto-setup (run 5)
+
+**Tools detected**: Claude Code, Codex, Cursor, Kiro
+**Hooks installed/updated**:
+- Claude Code — already configured (no change)
+- Codex — hooks.json reinstalled
+- Cursor — vcontext.json reinstalled
+- Kiro — hooks reinstalled
+
+**Validated**: 40 skills, 0 errors. Deployed to `~/.claude/skills/` and `~/.codex/skills/`.
+
+---
+
 ## 2026-04-13 — upstream-sync (run 4)
 
 ### Action: skipped

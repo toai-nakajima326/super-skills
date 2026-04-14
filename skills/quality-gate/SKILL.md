@@ -56,7 +56,8 @@ origin: unified
 1. Run tests: `npm test` / `jest` / `pytest` / whatever the project uses
 2. Run build: `npm run build` / `tsc --noEmit`
 3. Run lint: `eslint` / equivalent
-4. If ANY tests fail → **you are NOT complete**. Fix first.
+4. For AI agent config changes (CLAUDE.md, SKILL.md, hooks, MCP): `npx agnix .` — catches syntax errors that silently break skill auto-routing (e.g. wrong case in skill name = 0% trigger rate)
+5. If ANY tests fail → **you are NOT complete**. Fix first.
 5. If you skip tests → **you are lying about completion**
 
 **These are not optional. These are not "nice to have". Tests failing = not done.**
