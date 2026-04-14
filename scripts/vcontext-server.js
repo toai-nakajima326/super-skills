@@ -2539,10 +2539,13 @@ async function startDiscoveryLoop() {
       try {
         await runOnePrediction();
       } catch {}
-      // Auto-create skill from suggestions (max once per 6 hours)
-      try {
-        await autoCreateSkill();
-      } catch {}
+      // Auto-create skill only when embedding backlog is clear (avoid Ollama contention)
+      const pendingEmbeds = dbQuery('SELECT COUNT(*) as c FROM entries WHERE embedding IS NULL;');
+      if ((pendingEmbeds[0]?.c || 0) === 0) {
+        try {
+          await autoCreateSkill();
+        } catch {}
+      }
     }
 
     // Wait 5 min before next search
