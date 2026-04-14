@@ -120,7 +120,7 @@
     <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);">
     <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Quick Actions</div>
     <div style="display:flex;gap:4px;flex-wrap:wrap;">
-      <button class="btn" style="font-size:11px;padding:3px 8px;" onclick="confirmAction('Summarize', '24時間以上前のエントリをOllamaで要約', '/ai/summarize', 'POST')">Summarize</button>
+      <button class="btn" style="font-size:11px;padding:3px 8px;" onclick="confirmAction('Summarize', '24時間以上前のエントリをLocal LLMで要約', '/ai/summarize', 'POST')">Summarize</button>
       <button class="btn" style="font-size:11px;padding:3px 8px;" onclick="confirmAction('Migrate', 'RAM→SSD→Cloudに移動', '/tier/migrate', 'POST')">Migrate</button>
       <button class="btn" style="font-size:11px;padding:3px 8px;" onclick="confirmAction('Refresh', 'ダッシュボード更新', '_refresh', '')">Refresh</button>
     </div>
@@ -348,7 +348,7 @@ async function refresh() {
         '<div><span class="status-dot status-' + (health.database ? 'green' : 'red') + '"></span>Database</div>' +
         '<div><span class="status-dot status-' + (health.ssd_database ? 'green' : 'red') + '"></span>SSD DB</div>' +
         '<div><span class="status-dot status-' + (health.cloud_configured ? 'green' : 'yellow') + '"></span>Cloud</div>' +
-        '<div><span class="status-dot status-' + (!health.local_ai ? 'red' : isNight ? 'green' : 'yellow') + '"></span>Ollama: ' + escapeHtml(health.local_ai_model || 'off') + (isNight ? '' : ' (22:00-)') + '</div>' +
+        '<div><span class="status-dot status-' + (health.mlx_generate_available ? 'green' : 'red') + '"></span>MLX Generate: ' + escapeHtml(health.mlx_generate_model || 'off') + '</div>' +
         '<div><span class="status-dot status-green"></span>WS: ' + (health.ws_clients || 0) + ' clients</div>' +
       '</div>';
   }
@@ -369,10 +369,10 @@ async function refresh() {
       tiersHtml += '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--bg-bar);">';
       tiersHtml += '<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">LOCAL AI</div>';
       tiersHtml += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:12px;">';
-      var ollamaStatus = !ai.ollama_available ? 'red' : isNight ? 'green' : 'yellow';
-      var ollamaLabel = !ai.ollama_available ? 'Ollama OFF' : isNight ? 'Ollama ACTIVE' : 'Ollama (22:00-)';
-      tiersHtml += '<div><span class="status-dot status-' + ollamaStatus + '"></span>' + ollamaLabel + '</div>';
-      tiersHtml += '<div>' + (ai.preferred ? escapeHtml(ai.preferred.embed || '') : '') + '</div>';
+      var genStatus = ai.mlx_generate_available ? 'green' : 'red';
+      var genLabel = ai.mlx_generate_available ? 'MLX Generate ACTIVE' : 'MLX Generate OFF';
+      tiersHtml += '<div><span class="status-dot status-' + genStatus + '"></span>' + genLabel + '</div>';
+      tiersHtml += '<div style="font-size:11px;">' + escapeHtml(ai.mlx_generate_model || '') + '</div>';
       tiersHtml += '</div>';
       var remaining = totalCount - embedCount;
       tiersHtml += '<div class="chart-bar" style="margin-top:4px;"><span class="label">Embedding</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + embedPct + '%;background:var(--purple)"></div></div><span style="margin-left:8px;font-size:13px;">' + embedCount + '/' + totalCount + ' (' + embedPct + '%)</span></div>';

@@ -1,18 +1,24 @@
 #!/bin/bash
-# Trigger zero-downtime reload of vcontext server
-PID_FILE="/tmp/vcontext-server.pid"
-WRAPPER_PID=$(pgrep -f "vcontext-wrapper.sh")
+# Trigger reload of vcontext server via launchd (clean restart, no port conflicts)
+PLIST="com.vcontext.server"
 
-if [[ -n "$WRAPPER_PID" ]]; then
-  echo "Sending SIGHUP to wrapper (PID: $WRAPPER_PID)..."
-  kill -HUP "$WRAPPER_PID"
-  sleep 2
-  # Verify
-  if curl -s http://localhost:3150/health | grep -q healthy; then
-    echo "Server reloaded successfully!"
-  else
-    echo "WARNING: Server may not be healthy after reload"
-  fi
+echo "Reloading vcontext server via launchd..."
+launchctl kickstart -k "gui/$(id -u)/$PLIST" 2>/dev/null
+
+if [ $? -ne 0 ]; then
+  # Fallback: unload/load cycle
+  echo "kickstart unavailable, using unload/load..."
+  launchctl unload ~/Library/LaunchAgents/${PLIST}.plist 2>/dev/null
+  sleep 1
+  # Kill any orphaned processes
+  lsof -ti :3150 | xargs kill -9 2>/dev/null
+  sleep 1
+  launchctl load ~/Library/LaunchAgents/${PLIST}.plist 2>/dev/null
+fi
+
+sleep 3
+if curl -s http://localhost:3150/health | grep -q healthy; then
+  echo "Server reloaded successfully!"
 else
-  echo "Wrapper not running. Start with: ./scripts/vcontext-wrapper.sh"
+  echo "WARNING: Server may not be healthy after reload"
 fi

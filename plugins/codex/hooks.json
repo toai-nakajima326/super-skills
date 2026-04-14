@@ -1,22 +1,81 @@
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "/Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh user-prompt"
+      }
+    ],
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "/Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh session-recall"
+      }
+    ],
     "PreToolUse": [
       {
         "type": "command",
-        "command": "/Users/mitsuru_nakajima/.nvm/versions/node/v18.20.7/bin/node /Users/mitsuru_nakajima/skills/scripts/vcontext-hooks.js session-recall"
+        "command": "/Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh pre-tool"
       }
     ],
     "PostToolUse": [
       {
         "type": "command",
-        "command": "/Users/mitsuru_nakajima/.nvm/versions/node/v18.20.7/bin/node /Users/mitsuru_nakajima/skills/scripts/vcontext-hooks.js tool-use",
-        "toolNames": ["shell", "bash", "write", "edit", "apply_patch"]
+        "command": "/Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh tool-use"
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "type": "command",
+        "command": "/Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh tool-error"
+      }
+    ],
+    "SubagentStart": [
+      {
+        "type": "command",
+        "command": "/Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh subagent-start"
+      }
+    ],
+    "SubagentStop": [
+      {
+        "type": "command",
+        "command": "/Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh subagent-stop"
+      }
+    ],
+    "PreCompact": [
+      {
+        "type": "command",
+        "command": "/Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh pre-compact"
+      }
+    ],
+    "PostCompact": [
+      {
+        "type": "command",
+        "command": "/Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh compact"
+      }
+    ],
+    "Notification": [
+      {
+        "type": "command",
+        "command": "/Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh notification"
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "type": "command",
+        "command": "/Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh permission-request"
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "type": "command",
+        "command": "/Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh permission-denied"
       }
     ],
     "Stop": [
       {
         "type": "command",
-        "command": "/Users/mitsuru_nakajima/.nvm/versions/node/v18.20.7/bin/node /Users/mitsuru_nakajima/skills/scripts/vcontext-hooks.js session-end"
+        "command": "/Users/mitsuru_nakajima/skills/scripts/vcontext-hook-wrapper.sh session-end"
       }
     ]
   }
