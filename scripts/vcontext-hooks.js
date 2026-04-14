@@ -328,6 +328,62 @@ function summarize(entry) {
   }
 }
 
+// ── Subagent start: record + context + skills ───────────────────
+// Records with agent: tag, injects session context and skill routing
+async function handleSubagentStart() {
+  const input = await readStdin();
+  const sessionId = extractSessionId(input);
+
+  // Parse agent info
+  let description = '';
+  let agentType = 'agent';
+  try {
+    const data = JSON.parse(input);
+    description = data.description || data.prompt || '';
+    agentType = data.subagent_type || 'agent';
+  } catch {}
+
+  // 1. Record with agent: tag (distinguishes from main session)
+  await post('/store', {
+    type: 'subagent-start',
+    content: input.slice(0, 10000),
+    tags: ['agent', `agent-type:${agentType}`],
+    session: sessionId,
+  });
+
+  // 2. Skill routing from agent prompt
+  const prompt = description;
+  if (prompt.length >= 5) {
+    try {
+      const matched = await get(`/recall?q=${encodeURIComponent(prompt.slice(0, 100))}&type=skill-registry&limit=2`);
+      if (matched.results && matched.results.length > 0) {
+        const lines = ['[super-skills:agent] Matched skills:'];
+        for (const r of matched.results.slice(0, 2)) {
+          try {
+            const skill = JSON.parse(r.content);
+            lines.push(`\n### Skill: ${skill.name}`);
+            lines.push(skill.full_content || skill.description || '');
+          } catch {}
+        }
+        process.stdout.write(lines.join('\n') + '\n');
+      }
+    } catch {}
+  }
+
+  // 3. Inject recent session context (lightweight — last 5 entries)
+  try {
+    const recent = await get(`/recent?n=5&session=${sessionId}`);
+    if (recent.results && recent.results.length > 0) {
+      const lines = ['[vcontext:agent] Session context:'];
+      for (const r of recent.results) {
+        const summary = r.reasoning || String(r.content).slice(0, 150);
+        lines.push(`- [${r.type}] ${summary}`);
+      }
+      process.stdout.write(lines.join('\n') + '\n');
+    }
+  } catch {}
+}
+
 // ── Session recall ───────────────────────────────────────────────
 // Reads stdin to get session_id, then:
 //   1. Own session context (primary)
@@ -542,6 +598,8 @@ switch (command) {
   case 'tool-use':
   case 'tool-error':
   case 'subagent-start':
+    handleSubagentStart().catch(() => process.exit(0));
+    break;
   case 'subagent-stop':
   case 'notification':
   case 'session-end':
