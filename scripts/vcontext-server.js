@@ -2446,7 +2446,7 @@ async function startEmbedLoop() {
         vecUpsert(row.id, embedding);
         try { dbExec(`UPDATE entry_index SET has_embedding = 1 WHERE entry_id = ${row.id};`); } catch {}
       }
-      // Wait between entries — 5s for MLX (lightweight), 30s for Ollama (heavy)
+      // Wait between entries — 5s for MLX (memory-friendly pacing), 30s for Ollama (heavy)
       await new Promise(r => setTimeout(r, mlxAvailable ? 5000 : 30000));
     } catch {
       await new Promise(r => setTimeout(r, 60000));
@@ -4384,11 +4384,12 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 // Check local AI availability + start background loops
 checkOllama();
-checkMlx(); // MLX embed server (port 3161) — always-on embedding with Qwen3-8B
-// Start embed loop if any embed backend is available (MLX = always, Ollama = night only)
-if (mlxAvailable || ollamaAvailable) {
-  startEmbedLoop().catch(() => {});
-}
+checkMlx().then(() => {
+  // Start embed loop after MLX check completes (was race condition — mlxAvailable still false at sync check)
+  if (mlxAvailable || ollamaAvailable) {
+    startEmbedLoop().catch(() => {});
+  }
+}).catch(() => {});
 if (ollamaAvailable) {
   startDiscoveryLoop().catch(() => {});
 }

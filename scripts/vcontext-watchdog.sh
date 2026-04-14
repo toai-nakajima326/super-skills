@@ -52,9 +52,26 @@ send_recovery() {
   log "RECOVERY: $message"
 }
 
+# Ensure SearXNG container is running (docker compose up -d is idempotent)
+SEARXNG_COMPOSE="$HOME/skills/config/searxng/docker-compose.yml"
+check_searxng() {
+  if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^searxng$'; then
+      log "SearXNG container not running, starting via compose..."
+      docker compose -f "$SEARXNG_COMPOSE" up -d 2>/dev/null
+      if [[ $? -eq 0 ]]; then
+        log "SearXNG started via docker compose"
+      else
+        log "SearXNG docker compose failed"
+      fi
+    fi
+  fi
+}
+
 # Main loop
 log "Watchdog started (interval: ${CHECK_INTERVAL}s)"
 WAS_DOWN=false
+SEARXNG_CHECK_COUNTER=0
 
 while true; do
   if check_health; then
@@ -78,6 +95,12 @@ while true; do
         WAS_DOWN=false
       fi
     fi
+  fi
+
+  # Check SearXNG every 5 minutes (every 5th iteration)
+  SEARXNG_CHECK_COUNTER=$((SEARXNG_CHECK_COUNTER + 1))
+  if [[ $((SEARXNG_CHECK_COUNTER % 5)) -eq 0 ]]; then
+    check_searxng
   fi
 
   sleep $CHECK_INTERVAL

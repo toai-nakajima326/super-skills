@@ -19,6 +19,7 @@ from enum import Enum
 
 import argparse
 
+import gc
 import numpy as np
 import mlx
 import mlx.core as mx
@@ -360,13 +361,25 @@ class ModelManager:
             # Force evaluation and convert to numpy
             mx.eval(pooled)
             embedding = np.array(pooled.tolist()[0], dtype=np.float32)
-            
+
+            # Free intermediate MLX tensors to prevent GPU memory growth
+            del hidden_states, pooled, input_ids
+
             # Cache the result (with size limit)
-            if len(self._embedding_cache) < 1000:  # Simple cache size limit
+            if len(self._embedding_cache) < 500:  # Reduced cache to limit memory
                 self._embedding_cache[cache_key] = embedding
-            
+
             embeddings.append(embedding)
         
+        # Periodic GPU memory cleanup (every 10 calls)
+        if not hasattr(self, '_call_count'):
+            self._call_count = 0
+        self._call_count += 1
+        if self._call_count % 10 == 0:
+            if hasattr(mx, 'metal') and hasattr(mx.metal, 'clear_cache'):
+                mx.metal.clear_cache()
+            gc.collect()
+
         return np.array(embeddings, dtype=np.float32), model_name, embedding_dim
     
     def get_status(self, model_name: Optional[str] = None) -> Dict[str, Any]:
@@ -852,13 +865,12 @@ async def general_exception_handler(request: Request, exc: Exception):
 # Main entry point
 def main():
     """Run the server"""
-    # Use __name__ so it works regardless of filename (server.py or mlx-embed-server.py)
+    # Use app object directly so it works regardless of filename
     uvicorn.run(
         app,
         host=config.host,
         port=config.port,
         log_level=os.getenv("LOG_LEVEL", "info").lower(),
-        reload=os.getenv("DEV_MODE", "false").lower() == "true",
         access_log=True
     )
 
