@@ -3247,7 +3247,7 @@ function mlxEmbed(text) {
     const req = httpRequest(parsed, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      timeout: 10000, // 10s — MLX is fast (~30-100ms) but first call may load model
+      timeout: 60000, // 60s — MLX is fast but system under swap pressure may delay
     }, (res) => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
