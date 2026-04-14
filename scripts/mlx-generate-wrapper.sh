@@ -16,4 +16,5 @@ exec python3 -m mlx_lm server \
   --model "${MODEL}" \
   --port "${PORT}" \
   --host "${HOST}" \
-  --max-tokens 2048
+  --max-tokens 2048 \
+  --prompt-cache-size 0
