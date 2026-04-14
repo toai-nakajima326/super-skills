@@ -2757,6 +2757,8 @@ origin: auto-generated
 - First gotcha`;
 
     const generated = await ollamaGenerate(model, genPrompt, { maxTokens: 500, temperature: 0.3 });
+    // Wait after LLM call to reduce memory pressure
+    await new Promise(r => setTimeout(r, 30000));
     if (!generated || generated.length < 50) return;
 
     // Parse skill name from output
