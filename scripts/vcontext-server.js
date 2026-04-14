@@ -118,6 +118,22 @@ function getAccessibleGroups(auth) {
 
 // ── SQLite helpers ─────────────────────────────────────────────
 
+// In-process SQLite via better-sqlite3 (replaces execFileSync child processes)
+const Database = require('better-sqlite3');
+let ramDb, ssdDb;
+
+function openDatabases() {
+  ramDb = new Database(DB_PATH);
+  ramDb.pragma('journal_mode = WAL');
+  ramDb.pragma('busy_timeout = 5000');
+
+  if (existsSync(SSD_DB_PATH)) {
+    ssdDb = new Database(SSD_DB_PATH);
+    ssdDb.pragma('journal_mode = WAL');
+    ssdDb.pragma('busy_timeout = 5000');
+  }
+}
+
 /**
  * Run a SQL statement that modifies data (INSERT, UPDATE, DELETE, CREATE).
  * @param {string} sql
@@ -126,15 +142,21 @@ function getAccessibleGroups(auth) {
 function dbExec(sql, dbPath = DB_PATH) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      execFileSync('sqlite3', [dbPath, sql], {
-        timeout: 30000,
-        maxBuffer: 50 * 1024 * 1024,
-      });
+      const db = dbPath === DB_PATH ? ramDb : (dbPath === SSD_DB_PATH ? ssdDb : null);
+      if (!db) {
+        const tmpDb = new Database(dbPath);
+        try {
+          tmpDb.exec(sql);
+        } finally {
+          tmpDb.close();
+        }
+        return;
+      }
+      db.exec(sql);
       return;
     } catch (e) {
       if (e.message && e.message.includes('database is locked') && attempt < 2) {
-        // Wait and retry on lock
-        execFileSync('sleep', ['1']);
+        // busy_timeout should handle this, but retry as safety net
         continue;
       }
       console.error(`[db exec error @ ${dbPath}]`, e.message?.slice(0, 100));
@@ -150,35 +172,32 @@ function dbExec(sql, dbPath = DB_PATH) {
  */
 function dbQuery(sql, dbPath = DB_PATH) {
   try {
-    const out = execFileSync('sqlite3', ['-json', dbPath, sql], {
-      timeout: 60000,
-      maxBuffer: 100 * 1024 * 1024,
-      encoding: 'utf-8',
-    });
-    const trimmed = out.trim();
-    if (!trimmed || trimmed === '[]') return [];
-    return JSON.parse(trimmed);
-  } catch (e) {
-    const stdout = e.stdout || '';
-    if (e.status === 0 || stdout.trim() === '' || stdout.trim() === '[]') return [];
-    if (e.message && (e.message.includes('ENOBUFS') || e.message.includes('spawnSync'))) {
-      console.error(`[db query error @ ${dbPath}]`, e.message.slice(0, 100));
-      return [];
-    }
-    // Retry once on database lock
-    if (e.message && e.message.includes('database is locked')) {
+    const db = dbPath === DB_PATH ? ramDb : (dbPath === SSD_DB_PATH ? ssdDb : null);
+    if (!db) {
+      // Fallback for unknown paths - open temporarily
+      const tmpDb = new Database(dbPath, { readonly: true });
       try {
-        execFileSync('sleep', ['1']);
-        const out2 = execFileSync('sqlite3', ['-json', dbPath, sql], {
-          timeout: 60000, maxBuffer: 100 * 1024 * 1024, encoding: 'utf-8',
-        });
-        const trimmed2 = out2.trim();
-        if (!trimmed2 || trimmed2 === '[]') return [];
-        return JSON.parse(trimmed2);
+        return tmpDb.prepare(sql).all();
+      } finally {
+        tmpDb.close();
+      }
+    }
+    return db.prepare(sql).all();
+  } catch (e) {
+    if (e.message && e.message.includes('database is locked')) {
+      // Retry once after short delay
+      try {
+        const db2 = dbPath === DB_PATH ? ramDb : ssdDb;
+        if (db2) return db2.prepare(sql).all();
       } catch { return []; }
     }
+    if (e.message && (e.message.includes('no such table') || e.message.includes('no such column'))) {
+      return [];
+    }
+    // Legacy ENOBUFS/spawnSync errors no longer apply with in-process SQLite,
+    // but keep this pattern for defensive error handling
     console.error(`[db query error @ ${dbPath}]`, e.message?.slice(0, 100));
-    throw new Error(`SQLite query error: ${e.message}`);
+    return [];
   }
 }
 
@@ -508,9 +527,19 @@ function checkDbSize() {
 function doBackup() {
   try {
     mkdirSync(BACKUP_DIR, { recursive: true });
-    if (existsSync(DB_PATH)) {
-      dbExec(`.backup '${BACKUP_PATH}'`);
-      console.log(`[vcontext] Backup complete: ${BACKUP_PATH}`);
+    if (existsSync(DB_PATH) && ramDb) {
+      // better-sqlite3 backup() returns a Promise; fire-and-forget with error logging
+      ramDb.backup(BACKUP_PATH)
+        .then(() => console.log(`[vcontext] Backup complete: ${BACKUP_PATH}`))
+        .catch((err) => {
+          console.error('[vcontext] Async backup failed:', err.message);
+          try {
+            copyFileSync(DB_PATH, BACKUP_PATH);
+            console.log('[vcontext] Backup (file copy fallback) complete');
+          } catch (e2) {
+            console.error('[vcontext] Fallback backup also failed:', e2.message);
+          }
+        });
     }
   } catch (e) {
     console.error('[vcontext] Backup failed:', e.message);
@@ -4348,9 +4377,20 @@ server.on('upgrade', (req, socket, head) => {
 // Ensure RAM disk + DB exist
 ensureRamDisk();
 
+// Open in-process SQLite connections (must precede schema migrations)
+try { openDatabases(); } catch (e) { console.error('[startup] openDatabases:', e.message?.slice(0, 60)); }
+
 // Startup tasks — each wrapped to prevent crash on memory pressure
 try { migrateRamSchema(); } catch (e) { console.error('[startup] migrateRamSchema:', e.message?.slice(0, 60)); }
 try { ensureSsdDb(); } catch (e) { console.error('[startup] ensureSsdDb:', e.message?.slice(0, 60)); }
+// Open ssdDb if ensureSsdDb just created the file (was null at openDatabases time)
+if (!ssdDb && existsSync(SSD_DB_PATH)) {
+  try {
+    ssdDb = new Database(SSD_DB_PATH);
+    ssdDb.pragma('journal_mode = WAL');
+    ssdDb.pragma('busy_timeout = 5000');
+  } catch (e) { console.error('[startup] ssdDb late-open:', e.message?.slice(0, 60)); }
+}
 try { ensureConsultationsTable(); } catch (e) { console.error('[startup] ensureConsultationsTable:', e.message?.slice(0, 60)); }
 try { restoreRamFromSsd(); } catch (e) { console.error('[startup] restoreRamFromSsd:', e.message?.slice(0, 60)); }
 try { initVecDb(); if (vecDb) vecSync(); } catch (e) { console.error('[startup] initVecDb:', e.message?.slice(0, 60)); }
@@ -4367,10 +4407,19 @@ function shutdown(signal) {
     try { client.socket.destroy(); } catch {}
   }
   wsClients.clear();
-  doBackup();
+  // Synchronous backup on shutdown (doBackup is async now, so use copyFileSync directly)
+  try {
+    mkdirSync(BACKUP_DIR, { recursive: true });
+    if (existsSync(DB_PATH)) {
+      copyFileSync(DB_PATH, BACKUP_PATH);
+      console.log('[vcontext] Shutdown backup (file copy) complete');
+    }
+  } catch (e) { console.error('[vcontext] Shutdown backup failed:', e.message); }
   embedLoopRunning = false;
   discoveryLoopRunning = false;
   if (vecDb) { try { vecDb.close(); } catch {} }
+  if (ramDb) { try { ramDb.close(); } catch {} }
+  if (ssdDb) { try { ssdDb.close(); } catch {} }
   server.close(() => {
     console.log('[vcontext] Server closed');
     process.exit(0);

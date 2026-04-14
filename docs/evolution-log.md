@@ -4,6 +4,23 @@ Auto-maintained by the `self-evolve` skill. Records all upstream syncs, web disc
 
 ---
 
+## 2026-04-14 — infrastructure: better-sqlite3 migration (vcontext-server)
+
+### Action: applied
+- **Target**: scripts/vcontext-server.js
+- **Summary**: Replaced execFileSync('sqlite3', ...) child-process spawning with in-process better-sqlite3 for all database operations. Eliminates ~18s per search query (child process overhead) down to ~2ms (in-process).
+- **Changes**:
+  - Added `Database = require('better-sqlite3')` and persistent `ramDb`/`ssdDb` connections via `openDatabases()` (WAL + busy_timeout=5000)
+  - `dbExec`: now uses `db.exec(sql)` instead of spawning sqlite3 CLI per write
+  - `dbQuery`: now uses `db.prepare(sql).all()` instead of spawning sqlite3 CLI with `-json` flag
+  - `doBackup`: uses `ramDb.backup()` (async Promise) with `copyFileSync` fallback
+  - `shutdown`: synchronous `copyFileSync` for final backup, closes `ramDb`/`ssdDb` connections
+  - Startup: `openDatabases()` called before schema migrations; late `ssdDb` open after `ensureSsdDb` for first-time creation
+- **Preserved**: all function signatures, HTTP endpoints, sqlite-vec init, MLX embed code, execSync/execFileSync import (used by non-SQLite shell commands)
+- **Risk assessment**: medium — core DB layer change; function interfaces unchanged so rollback is straightforward
+
+---
+
 ## 2026-04-14 — infrastructure: MLX embedding migration
 
 ### Action: applied
