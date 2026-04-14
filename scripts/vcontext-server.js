@@ -2539,6 +2539,10 @@ async function startDiscoveryLoop() {
       try {
         await runOnePrediction();
       } catch {}
+      // Auto-create skill from suggestions (max once per 6 hours)
+      try {
+        await autoCreateSkill();
+      } catch {}
     }
 
     // Wait 5 min before next search
@@ -2658,6 +2662,121 @@ Output ONLY the suggestion in 2-3 sentences. Be specific about what the skill wo
       } catch {}
     }
   } catch {}
+}
+
+// ── Auto skill creation from suggestions ──────────────────────
+let lastSkillCreation = 0;
+const SKILL_CREATION_INTERVAL_MS = 6 * 60 * 60 * 1000; // max once per 6 hours
+
+async function autoCreateSkill() {
+  if (Date.now() - lastSkillCreation < SKILL_CREATION_INTERVAL_MS) return;
+  if (!ollamaAvailable) return;
+
+  try {
+    const model = pickModel('summarize');
+    if (!model) return;
+
+    // Get latest unprocessed suggestion
+    const suggestions = dbQuery(`SELECT id, content FROM entries WHERE type = 'skill-suggestion' AND tags NOT LIKE '%skill-created%' ORDER BY id DESC LIMIT 1;`);
+    if (suggestions.length === 0) return;
+
+    const suggestion = suggestions[0];
+    let suggestionText = '';
+    try { suggestionText = JSON.parse(suggestion.content).suggestion || ''; } catch { suggestionText = suggestion.content; }
+    if (suggestionText.length < 20) return;
+
+    // Get existing skill names to avoid duplicates
+    const skillsDir = join(process.env.HOME, 'skills', 'skills');
+    let existingSkills = [];
+    try { existingSkills = readdirSync(skillsDir).filter(d => statSync(join(skillsDir, d)).isDirectory()); } catch {}
+
+    // Ask Ollama to generate a skill name and SKILL.md content
+    const genPrompt = `Create a new AI workflow skill based on this suggestion:
+"${suggestionText.slice(0, 300)}"
+
+Existing skills (do NOT duplicate): ${existingSkills.join(', ')}
+
+Output in this EXACT format (nothing else):
+SKILL_NAME: kebab-case-name
+---
+name: kebab-case-name
+description: "One line description starting with Use when..."
+origin: auto-generated
+---
+
+## Rules
+
+1. First rule
+2. Second rule
+
+## Workflow
+
+1. First step
+2. Second step
+
+## Gotchas
+
+- First gotcha`;
+
+    const generated = await ollamaGenerate(model, genPrompt, { maxTokens: 500, temperature: 0.3 });
+    if (!generated || generated.length < 50) return;
+
+    // Parse skill name from output
+    const nameMatch = generated.match(/SKILL_NAME:\s*([a-z0-9-]+)/);
+    if (!nameMatch) return;
+    const skillName = nameMatch[1];
+
+    // Check duplicate
+    if (existingSkills.includes(skillName)) {
+      console.log(`[vcontext:skill] Skipped "${skillName}" — already exists`);
+      return;
+    }
+
+    // Extract SKILL.md content (everything after first ---)
+    const skillContent = generated.slice(generated.indexOf('---'));
+    if (!skillContent || skillContent.length < 50) return;
+
+    // Write SKILL.md
+    const skillDir = join(skillsDir, skillName);
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, 'SKILL.md'), skillContent, 'utf-8');
+
+    // Build all targets
+    try {
+      execSync(`node ${join(process.env.HOME, 'skills', 'scripts', 'build-all.js')}`, {
+        cwd: join(process.env.HOME, 'skills'),
+        timeout: 30000,
+        encoding: 'utf-8',
+      });
+    } catch (e) {
+      console.error(`[vcontext:skill] Build failed: ${e.message?.slice(0, 80)}`);
+    }
+
+    // Mark suggestion as processed
+    try {
+      const currentTags = dbQuery(`SELECT tags FROM entries WHERE id = ${suggestion.id};`);
+      if (currentTags[0]) {
+        let tags = JSON.parse(currentTags[0].tags || '[]');
+        tags.push('skill-created');
+        dbExec(`UPDATE entries SET tags = ${esc(JSON.stringify(tags))} WHERE id = ${suggestion.id};`);
+      }
+    } catch {}
+
+    // Record the creation
+    const record = JSON.stringify({
+      skill_name: skillName,
+      source_suggestion_id: suggestion.id,
+      created_at: new Date().toISOString(),
+    });
+    try {
+      dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES ('skill-created', ${esc(record)}, '["skill-created","auto"]', 'system', ${estimateTokens(record)}, datetime('now'), 0, 'ram');`);
+    } catch {}
+
+    lastSkillCreation = Date.now();
+    console.log(`[vcontext:skill] Auto-created skill: ${skillName}`);
+  } catch (e) {
+    console.error(`[vcontext:skill] Error: ${e.message?.slice(0, 80)}`);
+  }
 }
 
 // ── RAM → SSD catch-up sync (fills gaps from failed write-through) ─
