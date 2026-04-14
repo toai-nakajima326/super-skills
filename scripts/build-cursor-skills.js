@@ -46,6 +46,10 @@ function build() {
     }
     for (const w of warnings) console.warn(`  WARN: ${w}`);
 
+    // Only deploy super-skills to file system — rest lives in vcontext
+    const DEPLOY_ONLY = ['super-skills'];
+    if (!DEPLOY_ONLY.includes(dir)) continue;
+
     ensureDir(OUT);
     writeFileSync(join(OUT, `${dir}.mdc`), toMdc(meta, body));
     built++;
