@@ -3189,12 +3189,13 @@ async function checkMlx() {
       req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
       req.end();
     });
-    mlxAvailable = data && data.status === 'ok';
+    // MLX server returns status='healthy', legacy CoreML returns status='ok'
+    mlxAvailable = data && (data.status === 'healthy' || data.status === 'ok');
     coremlAvailable = mlxAvailable; // back-compat
     if (mlxAvailable) {
       mlxEmbedDim = data.embedding_dim || 0;
-      mlxModelName = data.model || '';
-      console.log(`[mlx-embed] Available: ${data.backend || 'mlx'} model=${mlxModelName} (dim=${mlxEmbedDim}, seq=${data.max_seq_len})`);
+      mlxModelName = data.model_name || data.model || '';
+      console.log(`[mlx-embed] Available: model=${mlxModelName} (dim=${mlxEmbedDim})`);
     }
   } catch {
     mlxAvailable = false;
