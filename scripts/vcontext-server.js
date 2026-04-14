@@ -833,13 +833,27 @@ async function handleStore(req, res) {
     });
   }
 
-  // Generate embedding with local AI (night window only)
-  if (ollamaAvailable && isNightWindow()) {
+  // Generate embedding with MLX (always — fast ~30-100ms on Apple Silicon GPU)
+  // Falls back to Ollama if MLX unavailable (night window only)
+  if (mlxAvailable || (ollamaAvailable && isNightWindow())) {
     setImmediate(async () => {
       try {
-        const model = pickModel('embed');
-        if (!model) return;
-        const embedding = await ollamaEmbed(model, content.slice(0, 1000));
+        let embedding = null;
+        // Try MLX first (fast, always available, no night-window restriction)
+        if (mlxAvailable) {
+          try {
+            embedding = await mlxEmbed(content.slice(0, 1000));
+          } catch (e) {
+            console.log(`[store] MLX embed failed, trying Ollama fallback: ${e.message}`);
+          }
+        }
+        // Fallback to Ollama (night window only)
+        if ((!embedding || embedding.length === 0) && ollamaAvailable && isNightWindow()) {
+          const model = pickModel('embed');
+          if (model) {
+            embedding = await ollamaEmbed(model, content.slice(0, 1000));
+          }
+        }
         if (embedding && embedding.length > 0) {
           const embJson = esc(JSON.stringify(embedding));
           dbExec(`UPDATE entries SET embedding = ${embJson} WHERE id = ${entry.id};`);
@@ -1387,12 +1401,13 @@ function handleHealth(req, res) {
     cloud_configured: cloudStore.isConfigured(),
     local_ai: ollamaAvailable,
     local_ai_model: ollamaPreferredModel,
-    coreml_available: coremlAvailable,
+    mlx_available: mlxAvailable,
+    coreml_available: mlxAvailable,
     ws_clients: wsClients.size,
     uptime_seconds: Math.floor(process.uptime()),
     features: {
-      semantic_search: ollamaAvailable || coremlAvailable,
-      coreml_embed: coremlAvailable,
+      semantic_search: ollamaAvailable || mlxAvailable,
+      mlx_embed: mlxAvailable,
       usage_analytics: true,
     },
   });
@@ -2374,7 +2389,7 @@ function isNightWindow() {
   return hour >= 22 || hour < 8;
 }
 
-// ── Streaming embed (runs only during night window) ──────────
+// ── Streaming embed (MLX: always, Ollama fallback: night only) ──
 let embedLoopRunning = false;
 
 async function startEmbedLoop() {
@@ -2382,15 +2397,19 @@ async function startEmbedLoop() {
   embedLoopRunning = true;
 
   while (embedLoopRunning) {
-    // Wait for night window
-    if (!isNightWindow()) {
+    // MLX runs always; Ollama-only falls back to night window
+    if (!mlxAvailable && !isNightWindow()) {
       await new Promise(r => setTimeout(r, 5 * 60 * 1000)); // check every 5 min
       continue;
     }
 
+    // Ensure at least one embed backend is available
+    if (!mlxAvailable) { checkMlx(); }
     if (!ollamaAvailable) { checkOllama(); }
-    const model = pickModel('embed');
-    if (!model) { await new Promise(r => setTimeout(r, 60000)); continue; }
+    if (!mlxAvailable && !ollamaAvailable) {
+      await new Promise(r => setTimeout(r, 60000));
+      continue;
+    }
 
     // Pause if flag file exists
     if (existsSync('/tmp/vcontext-embed-pause')) {
@@ -2404,7 +2423,22 @@ async function startEmbedLoop() {
         continue;
       }
       const row = rows[0];
-      const embedding = await ollamaEmbed(model, String(row.content).slice(0, 1000));
+      let embedding = null;
+      // Try MLX first (fast, always available)
+      if (mlxAvailable) {
+        try {
+          embedding = await mlxEmbed(String(row.content).slice(0, 1000));
+        } catch (e) {
+          console.log(`[embed-loop] MLX failed for id=${row.id}: ${e.message}`);
+        }
+      }
+      // Fallback to Ollama (night window only)
+      if ((!embedding || embedding.length === 0) && ollamaAvailable && isNightWindow()) {
+        const model = pickModel('embed');
+        if (model) {
+          embedding = await ollamaEmbed(model, String(row.content).slice(0, 1000));
+        }
+      }
       if (embedding && embedding.length > 0) {
         const embJson = esc(JSON.stringify(embedding));
         dbExec(`UPDATE entries SET embedding = ${embJson} WHERE id = ${row.id};`);
@@ -2412,8 +2446,8 @@ async function startEmbedLoop() {
         vecUpsert(row.id, embedding);
         try { dbExec(`UPDATE entry_index SET has_embedding = 1 WHERE entry_id = ${row.id};`); } catch {}
       }
-      // Wait between entries to avoid memory pressure
-      await new Promise(r => setTimeout(r, 30000));
+      // Wait between entries — 30s for Ollama (heavy), 5s for MLX (lightweight)
+      await new Promise(r => setTimeout(r, mlxAvailable ? 5000 : 30000));
     } catch {
       await new Promise(r => setTimeout(r, 60000));
     }
@@ -2441,7 +2475,7 @@ function doBackupAndMigrate() {
   try { backfillIndex(200); } catch {}
   // Recheck AI availability
   checkOllama();
-  checkCoreml(); // lightweight CoreML embed server for daytime search
+  checkMlx(); // MLX embed server for daytime search
   // Ensure embed loop is running (self-healing — restarts if stopped)
   if (ollamaAvailable && !embedLoopRunning) {
     startEmbedLoop().catch(() => {});
@@ -3113,7 +3147,7 @@ function wsBroadcast(eventType, entry) {
 
 // ── sqlite-vec (optional, for fast vector search) ────────────
 let vecDb = null; // better-sqlite3 instance with vec0 extension
-let EMBED_DIM = 2048; // auto-detected from first embedding
+let EMBED_DIM = 4096; // Qwen3-Embedding-8B (auto-detected from first embedding if available)
 
 function initVecDb() {
   try {
@@ -3171,17 +3205,22 @@ function vecSync() {
   } catch {}
 }
 
-// ── CoreML Embedding Server (lightweight, NPU-accelerated) ────
-const COREML_EMBED_URL = process.env.COREML_EMBED_URL || 'http://127.0.0.1:3161';
+// ── MLX Embedding Server (Apple Silicon GPU-accelerated) ──────
+const MLX_EMBED_URL = process.env.MLX_EMBED_URL || process.env.COREML_EMBED_URL || 'http://127.0.0.1:3161';
+let mlxAvailable = false;
+let mlxEmbedDim = 0;    // auto-detected from health check
+let mlxModelName = '';   // e.g. 'mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ'
+// Back-compat alias
 let coremlAvailable = false;
 
 /**
- * Check if CoreML embed server is running on port 3161.
- * This is a lightweight server (no Ollama/GPU needed) for search-time query embedding.
+ * Check if MLX embed server is running on port 3161.
+ * Tries /api/health (new MLX server) then /health (legacy CoreML).
+ * This is a fast local server (no Ollama needed) for search-time query embedding.
  */
-async function checkCoreml() {
+async function checkMlx() {
   try {
-    const parsed = new URL(`${COREML_EMBED_URL}/health`);
+    const parsed = new URL(`${MLX_EMBED_URL}/api/health`);
     const data = await new Promise((resolve, reject) => {
       const req = httpRequest(parsed, { method: 'GET', timeout: 2000 }, (res) => {
         const chunks = [];
@@ -3195,27 +3234,37 @@ async function checkCoreml() {
       req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
       req.end();
     });
-    coremlAvailable = data && data.status === 'ok';
-    if (coremlAvailable) {
-      console.log(`[coreml] Available: ${data.backend || 'coreml'} (dim=${data.embedding_dim}, seq=${data.max_seq_len})`);
+    mlxAvailable = data && data.status === 'ok';
+    coremlAvailable = mlxAvailable; // back-compat
+    if (mlxAvailable) {
+      mlxEmbedDim = data.embedding_dim || 0;
+      mlxModelName = data.model || '';
+      console.log(`[mlx-embed] Available: ${data.backend || 'mlx'} model=${mlxModelName} (dim=${mlxEmbedDim}, seq=${data.max_seq_len})`);
     }
   } catch {
+    mlxAvailable = false;
     coremlAvailable = false;
   }
 }
+// Back-compat alias
+const checkCoreml = checkMlx;
 
 /**
- * Generate embedding via CoreML server (Ollama-compatible /api/embeddings).
- * Returns 384-dim normalized embedding or null on failure.
+ * Generate embedding via MLX server (/api/embeddings, Ollama-compatible).
+ * Returns N-dim normalized embedding array or null on failure.
+ * NOT subject to night-window restrictions (runs on Apple Silicon GPU, not Ollama).
+ * Default model: Qwen3-Embedding-8B-4bit-DWQ (4096-dim, ~30-100ms per embed).
  */
-function coremlEmbed(text) {
+const MLX_DEFAULT_MODEL = process.env.MLX_EMBED_MODEL || 'mlx-community/Qwen3-Embedding-8B-4bit-DWQ';
+
+function mlxEmbed(text) {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ model: 'bge-small-en-v1.5', prompt: text });
-    const parsed = new URL(`${COREML_EMBED_URL}/api/embeddings`);
+    const body = JSON.stringify({ model: MLX_DEFAULT_MODEL, prompt: text });
+    const parsed = new URL(`${MLX_EMBED_URL}/api/embeddings`);
     const req = httpRequest(parsed, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      timeout: 5000, // 5s — CoreML is fast, no need for long timeout
+      timeout: 10000, // 10s — MLX is fast (~30-100ms) but first call may load model
     }, (res) => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
@@ -3227,11 +3276,13 @@ function coremlEmbed(text) {
       });
     });
     req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('coreml embed timeout')); });
+    req.on('timeout', () => { req.destroy(); reject(new Error('mlx embed timeout')); });
     req.write(body);
     req.end();
   });
 }
+// Back-compat alias
+const coremlEmbed = mlxEmbed;
 
 // ── Local AI (Ollama, optional) ───────────────────────────────
 
@@ -3369,10 +3420,11 @@ function handleAiStatus(req, res) {
     ollama_available: ollamaAvailable,
     ollama_url: OLLAMA_URL,
     models: ollamaModels,
-    coreml_available: coremlAvailable,
-    coreml_url: COREML_EMBED_URL,
-    coreml_model: 'bge-small-en-v1.5',
-    coreml_dim: 384,
+    coreml_available: mlxAvailable,
+    mlx_available: mlxAvailable,
+    mlx_url: MLX_EMBED_URL,
+    mlx_model: mlxModelName,
+    mlx_dim: mlxEmbedDim,
     embedding_count: embeddingCount,
     preferred: {
       summarize: pickModel('summarize'),
@@ -3384,7 +3436,7 @@ function handleAiStatus(req, res) {
       auto_summarize: ollamaAvailable,
       auto_embed: ollamaAvailable,
       auto_conflict_resolve: ollamaAvailable,
-      semantic_search: ollamaAvailable || coremlAvailable,
+      semantic_search: ollamaAvailable || mlxAvailable,
     },
   });
 }
@@ -3443,7 +3495,7 @@ async function handleSemanticSearch(req, res) {
   if (!q) return sendJson(res, 400, { error: 'Missing query parameter: q' });
 
   // No embedding source at all → immediate FTS fallback
-  if (!ollamaAvailable && !coremlAvailable) {
+  if (!ollamaAvailable && !mlxAvailable) {
     const limit = Math.min(parseInt(params.limit) || 10, 50);
     const ftsResults = dbQuery(`SELECT id, type, content, tags, created_at, reasoning FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(q)} LIMIT ${limit});`);
     parseTags(ftsResults);
@@ -3455,29 +3507,29 @@ async function handleSemanticSearch(req, res) {
   const auth = validateApiKey(req);
   if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
 
-  // Generate query embedding — try CoreML first (fast, no Ollama needed), then Ollama, then FTS
+  // Generate query embedding — try MLX first (fast ~30ms, no Ollama needed), then Ollama, then FTS
   let queryEmbed;
   let embedSource = null;
 
-  // Strategy 1: CoreML (fast ~3ms, 384-dim, no Ollama process needed)
-  // Only usable for semantic search if stored embeddings match CoreML dimension (384)
-  if (coremlAvailable) {
+  // Strategy 1: MLX (fast ~30ms, no Ollama process needed, no night-window restriction)
+  // Only usable for vector search if MLX embedding dimension matches stored embeddings
+  if (mlxAvailable) {
     try {
-      const coremlResult = await coremlEmbed(q);
-      if (coremlResult && coremlResult.length > 0) {
-        // Check if CoreML embedding dimension matches stored embeddings
-        if (coremlResult.length === EMBED_DIM) {
-          queryEmbed = coremlResult;
-          embedSource = 'coreml';
+      const mlxResult = await mlxEmbed(q);
+      if (mlxResult && mlxResult.length > 0) {
+        // Check if MLX embedding dimension matches stored embeddings
+        if (mlxResult.length === EMBED_DIM) {
+          queryEmbed = mlxResult;
+          embedSource = 'mlx';
         } else {
-          // Dimension mismatch — CoreML=384 but stored=2048 (qwen3-embedding)
-          // Can't use for vector search, but CoreML is confirmed working
+          // Dimension mismatch — MLX dim differs from stored embeddings
+          // Can't use for vector search, but MLX is confirmed working
           // Fall through to Ollama or FTS
         }
       }
     } catch (e) {
-      // CoreML failed — fall through to Ollama
-      console.log(`[search/semantic] CoreML embed failed: ${e.message}`);
+      // MLX failed — fall through to Ollama
+      console.log(`[search/semantic] MLX embed failed: ${e.message}`);
     }
   }
 
@@ -3505,13 +3557,13 @@ async function handleSemanticSearch(req, res) {
       engine: 'fts-fallback',
       model_used: null,
       threshold,
-      _note: coremlAvailable
-        ? 'CoreML available but dim mismatch with stored embeddings; Ollama unavailable; fell back to FTS'
+      _note: mlxAvailable
+        ? `MLX available (dim=${mlxEmbedDim}) but mismatch with stored embeddings (dim=${EMBED_DIM}); Ollama unavailable; fell back to FTS`
         : 'No embedding source available, fell back to FTS keyword search',
     });
   }
 
-  const model_used = embedSource === 'coreml' ? 'bge-small-en-v1.5 (coreml)' : pickModel('embed');
+  const model_used = embedSource === 'mlx' ? `${mlxModelName} (mlx)` : pickModel('embed');
 
   const results = [];
 
@@ -4361,7 +4413,7 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 // Check local AI availability + start background loops
 checkOllama();
-checkCoreml(); // Lightweight CoreML embed server (port 3161) for daytime search
+checkMlx(); // MLX embed server (port 3161) for daytime semantic search — no night-window restriction
 if (ollamaAvailable) {
   startEmbedLoop().catch(() => {});
   startDiscoveryLoop().catch(() => {});
