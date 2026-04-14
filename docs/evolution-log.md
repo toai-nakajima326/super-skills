@@ -4,6 +4,28 @@ Auto-maintained by the `self-evolve` skill. Records all upstream syncs, web disc
 
 ---
 
+## 2026-04-14 — infrastructure: MLX generate migration (replace Ollama text generation)
+
+### Action: applied
+- **Target**: scripts/vcontext-server.js
+- **Summary**: Replaced Ollama text generation with MLX generate server (Qwen3-8B-4bit at port 3162, OpenAI-compatible API). Ollama fully removed — MLX now handles both embedding (port 3161) and text generation (port 3162) 24/7 on Apple Silicon GPU.
+- **Changes**:
+  - Added `MLX_GENERATE_URL` (`:3162`), `MLX_GENERATE_MODEL`, `mlxGenerateAvailable` constants
+  - Added `checkMlxGenerate()` — checks `/v1/models` endpoint
+  - Added `mlxGenerate(prompt, options)` — OpenAI-compatible `/v1/chat/completions`
+  - Replaced all ~12 `ollamaGenerate(model, prompt, options)` call sites with `mlxGenerate(prompt, options)`
+  - Removed `ollamaGenerate`, `ollamaEmbed`, `checkOllama`, `pickModel`, `isNightWindow`, `MODEL_PREFS`
+  - Removed `OLLAMA_URL`, `ollamaAvailable`, `ollamaModels`, `ollamaPreferredModel` variables
+  - Removed all night-window gates on text generation (MLX runs 24/7)
+  - Removed Ollama model unload block (`keep_alive: 0`) in discovery loop
+  - Simplified embed loop: MLX-only, removed Ollama embed fallback
+  - Updated `/health` and `/ai/status` endpoints to report MLX generate status
+  - Updated `handleAiSummarize`, completion check, predictive search, discovery loop, auto-skill creation
+- **Ollama retained for**: nothing (fully removed)
+- **Risk assessment**: medium — all generation now depends on MLX server at port 3162; if unavailable, generation features degrade gracefully (availability checks gate all calls)
+
+---
+
 ## 2026-04-14 — infrastructure: better-sqlite3 migration (vcontext-server)
 
 ### Action: applied

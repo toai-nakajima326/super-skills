@@ -845,13 +845,11 @@ async function handleStore(req, res) {
     console.error('[write-through] SSD sync failed:', e.message);
   }
 
-  // Auto-summarize with local AI (night window only)
-  if (ollamaAvailable && isNightWindow() && content.length > 200) {
+  // Auto-summarize with MLX generate (24/7)
+  if (mlxGenerateAvailable && content.length > 200) {
     setImmediate(async () => {
       try {
-        const model = pickModel('summarize');
-        if (!model) return;
-        const summary = await ollamaGenerate(model,
+        const summary = await mlxGenerate(
           `Summarize this in one sentence (max 50 words). Output ONLY the summary, nothing else:\n\n${content.slice(0, 2000)}`,
           { maxTokens: 100 }
         );
@@ -863,25 +861,14 @@ async function handleStore(req, res) {
   }
 
   // Generate embedding with MLX (always — fast ~30-100ms on Apple Silicon GPU)
-  // Falls back to Ollama if MLX unavailable (night window only)
-  if (mlxAvailable || (ollamaAvailable && isNightWindow())) {
+  if (mlxAvailable) {
     setImmediate(async () => {
       try {
         let embedding = null;
-        // Try MLX first (fast, always available, no night-window restriction)
-        if (mlxAvailable) {
-          try {
-            embedding = await mlxEmbed(content.slice(0, 1000));
-          } catch (e) {
-            console.log(`[store] MLX embed failed, trying Ollama fallback: ${e.message}`);
-          }
-        }
-        // Fallback to Ollama (night window only)
-        if ((!embedding || embedding.length === 0) && ollamaAvailable && isNightWindow()) {
-          const model = pickModel('embed');
-          if (model) {
-            embedding = await ollamaEmbed(model, content.slice(0, 1000));
-          }
+        try {
+          embedding = await mlxEmbed(content.slice(0, 1000));
+        } catch (e) {
+          console.log(`[store] MLX embed failed: ${e.message}`);
         }
         if (embedding && embedding.length > 0) {
           const embJson = esc(JSON.stringify(embedding));
@@ -959,13 +946,11 @@ async function handleStore(req, res) {
             consultations.set(consultId, consultation);
             entry._auto_consultation = consultId;
 
-            // If local AI available, auto-resolve immediately
-            if (ollamaAvailable) {
+            // If MLX generate available, auto-resolve immediately
+            if (mlxGenerateAvailable) {
               setImmediate(async () => {
                 try {
-                  const aiModel = pickModel('judge');
-                  if (!aiModel) return;
-                  const aiResponse = await ollamaGenerate(aiModel, basePrompt, { maxTokens: 200, temperature: 0.1 });
+                  const aiResponse = await mlxGenerate(basePrompt, { maxTokens: 200, temperature: 0.1 });
                   if (aiResponse) {
                     try {
                       const aiParsed = JSON.parse(aiResponse);
@@ -975,11 +960,11 @@ async function handleStore(req, res) {
                         reasoning: aiParsed.reasoning || aiResponse.slice(0, 200),
                         confidence: aiParsed.confidence || 'medium',
                         responded_at: new Date().toISOString(),
-                        model_used: aiModel,
+                        model_used: MLX_GENERATE_MODEL,
                       };
                       // Add 'local' to models if not there
                       if (!consultation.models.includes('local')) consultation.models.push('local');
-                      console.log(`[ollama] Auto-resolved consultation ${consultId}: chose ${aiParsed.chosen}`);
+                      console.log(`[mlx-generate] Auto-resolved consultation ${consultId}: chose ${aiParsed.chosen}`);
                       wsBroadcast('consultation_updated', { consultation_id: consultId, local_response: consultation.responses['local'] });
                     } catch {
                       // Response wasn't valid JSON, store raw
@@ -1428,14 +1413,14 @@ function handleHealth(req, res) {
     database: dbOk,
     ssd_database: ssdExists,
     cloud_configured: cloudStore.isConfigured(),
-    local_ai: ollamaAvailable,
-    local_ai_model: ollamaPreferredModel,
+    mlx_generate_available: mlxGenerateAvailable,
+    mlx_generate_model: mlxGenerateAvailable ? MLX_GENERATE_MODEL : null,
     mlx_available: mlxAvailable,
     coreml_available: mlxAvailable,
     ws_clients: wsClients.size,
     uptime_seconds: Math.floor(process.uptime()),
     features: {
-      semantic_search: mlxAvailable,  // MLX only — Ollama no longer used for embeddings
+      semantic_search: mlxAvailable,  // MLX embed only
       mlx_embed: mlxAvailable,
       usage_analytics: true,
     },
@@ -2412,13 +2397,7 @@ function formatBytes(bytes) {
   return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i];
 }
 
-// ── Night window: Ollama tasks only run 22:00-08:00 ──────────
-function isNightWindow() {
-  const hour = new Date().getHours();
-  return hour >= 22 || hour < 8;
-}
-
-// ── Streaming embed (MLX: always, Ollama fallback: night only) ──
+// ── Streaming embed (MLX: always-on, GPU-accelerated) ──────────
 let embedLoopRunning = false;
 
 async function startEmbedLoop() {
@@ -2426,18 +2405,13 @@ async function startEmbedLoop() {
   embedLoopRunning = true;
 
   while (embedLoopRunning) {
-    // MLX runs always; Ollama-only falls back to night window
-    if (!mlxAvailable && !isNightWindow()) {
-      await new Promise(r => setTimeout(r, 5 * 60 * 1000)); // check every 5 min
-      continue;
-    }
-
-    // Ensure at least one embed backend is available
-    if (!mlxAvailable) { checkMlx(); }
-    if (!ollamaAvailable) { checkOllama(); }
-    if (!mlxAvailable && !ollamaAvailable) {
-      await new Promise(r => setTimeout(r, 60000));
-      continue;
+    // Ensure MLX embed backend is available
+    if (!mlxAvailable) {
+      checkMlx();
+      if (!mlxAvailable) {
+        await new Promise(r => setTimeout(r, 60000));
+        continue;
+      }
     }
 
     // Pause if flag file exists
@@ -2453,19 +2427,12 @@ async function startEmbedLoop() {
       }
       const row = rows[0];
       let embedding = null;
-      // Try MLX first (fast, always available)
+      // MLX embed (fast, always available on Apple Silicon)
       if (mlxAvailable) {
         try {
           embedding = await mlxEmbed(String(row.content).slice(0, 1000));
         } catch (e) {
           console.log(`[embed-loop] MLX failed for id=${row.id}: ${e.message}`);
-        }
-      }
-      // Fallback to Ollama (night window only)
-      if ((!embedding || embedding.length === 0) && ollamaAvailable && isNightWindow()) {
-        const model = pickModel('embed');
-        if (model) {
-          embedding = await ollamaEmbed(model, String(row.content).slice(0, 1000));
         }
       }
       if (embedding && embedding.length > 0) {
@@ -2475,8 +2442,8 @@ async function startEmbedLoop() {
         vecUpsert(row.id, embedding);
         try { dbExec(`UPDATE entry_index SET has_embedding = 1 WHERE entry_id = ${row.id};`); } catch {}
       }
-      // Wait between entries — 5s for MLX (memory-friendly pacing), 30s for Ollama (heavy)
-      await new Promise(r => setTimeout(r, mlxAvailable ? 5000 : 30000));
+      // Wait between entries — 1s for MLX (fast GPU-accelerated)
+      await new Promise(r => setTimeout(r, 1000));
     } catch {
       await new Promise(r => setTimeout(r, 60000));
     }
@@ -2503,10 +2470,10 @@ function doBackupAndMigrate() {
   // Incremental index backfill
   try { backfillIndex(200); } catch {}
   // Recheck AI availability
-  checkOllama();
+  checkMlxGenerate();
   checkMlx(); // MLX embed server (always-on embedding)
   // Ensure embed loop is running (self-healing — restarts if stopped)
-  if ((mlxAvailable || ollamaAvailable) && !embedLoopRunning) {
+  if (mlxAvailable && !embedLoopRunning) {
     startEmbedLoop().catch(() => {});
   }
   // Quick migration check
@@ -2523,7 +2490,7 @@ function doBackupAndMigrate() {
     console.error('[vcontext:auto] Auto-migration SSD→Cloud failed:', e.message);
   }
   // Ensure discovery loop is running (self-healing)
-  if (ollamaAvailable && !discoveryLoopRunning) {
+  if (mlxGenerateAvailable && !discoveryLoopRunning) {
     startDiscoveryLoop().catch(() => {});
   }
   // Anomaly detection
@@ -2585,12 +2552,12 @@ async function startDiscoveryLoop() {
   discoveryLoopRunning = true;
 
   while (discoveryLoopRunning) {
-    // Wait for night window (22:00-08:00)
-    if (!isNightWindow()) {
+    // Ensure MLX generate is available
+    if (!mlxGenerateAvailable) { checkMlxGenerate(); }
+    if (!mlxGenerateAvailable) {
       await new Promise(r => setTimeout(r, 5 * 60 * 1000));
       continue;
     }
-    if (!ollamaAvailable) { checkOllama(); }
     if (existsSync('/tmp/vcontext-embed-pause')) {
       await new Promise(r => setTimeout(r, 60000));
       continue;
@@ -2605,30 +2572,10 @@ async function startDiscoveryLoop() {
       try {
         await runOnePrediction();
       } catch {}
-      // Auto-create skill (embedding is now MLX — no Ollama contention for embeddings)
-      {
-        // No need to unload Ollama embed model — embedding is handled by MLX server
-        try {
-          await autoCreateSkill();
-        } catch {}
-        // Unload summarize model after skill creation
-        try {
-          const sumModel = pickModel('summarize');
-          if (sumModel) {
-            const body = JSON.stringify({ model: sumModel, keep_alive: 0 });
-            await new Promise((resolve) => {
-              const req = httpRequest(new URL(`${OLLAMA_URL}/api/generate`), {
-                method: 'POST', timeout: 5000,
-                headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-              }, () => resolve());
-              req.on('error', () => resolve());
-              req.on('timeout', () => { req.destroy(); resolve(); });
-              req.write(body);
-              req.end();
-            });
-          }
-        } catch {}
-      }
+      // Auto-create skill (MLX generate — no model unload needed)
+      try {
+        await autoCreateSkill();
+      } catch {}
     }
 
     // Wait 5 min before next search
@@ -2643,8 +2590,7 @@ async function runOneDiscovery() {
   try {
     // Generate search topic from recent user activity
     let topic = 'AI agent workflow best practices 2026'; // fallback
-    const model = pickModel('summarize');
-    if (model) {
+    if (mlxGenerateAvailable) {
       try {
         const recentActivity = dbQuery(`SELECT tool_name, type FROM entry_index WHERE created_at >= datetime('now', '-6 hours') AND tool_name IS NOT NULL ORDER BY entry_id DESC LIMIT 20;`);
         const recentPrompts = dbQuery(`SELECT substr(content, 1, 200) as c FROM entries WHERE type = 'user-prompt' AND created_at >= datetime('now', '-6 hours') ORDER BY id DESC LIMIT 5;`);
@@ -2660,7 +2606,7 @@ Recent tools: ${activityStr || 'Bash, Edit, Read'}
 Recent questions: ${sanitizeForExternalSearch(promptStr || 'general development')}
 
 Search query:`;
-        const generated = await ollamaGenerate(model, topicPrompt, { maxTokens: 30, temperature: 0.7 });
+        const generated = await mlxGenerate(topicPrompt, { maxTokens: 30, temperature: 0.7 });
         if (generated && generated.length > 5) {
           topic = sanitizeForExternalSearch(generated.trim().split('\n')[0]);
         }
@@ -2710,8 +2656,7 @@ Search query:`;
 
 async function runOnePrediction() {
   try {
-    const model = pickModel('summarize');
-    if (!model) return;
+    if (!mlxGenerateAvailable) return;
 
     // Get recent activity patterns
     const recentTools = dbQuery(`SELECT tool_name, COUNT(*) as cnt FROM entry_index WHERE tool_name IS NOT NULL AND created_at >= datetime('now', '-24 hours') GROUP BY tool_name ORDER BY cnt DESC LIMIT 10;`);
@@ -2748,7 +2693,7 @@ Focus on gaps: what patterns appear in the activity that NO existing skill cover
 Do NOT suggest skills similar to never-used ones (they were not useful).
 Output ONLY the suggestion in 2-3 sentences. Be specific.`;
 
-    const suggestion = await ollamaGenerate(model, prompt, { maxTokens: 150, temperature: 0.5 });
+    const suggestion = await mlxGenerate(prompt, { maxTokens: 150, temperature: 0.5 });
     if (suggestion && suggestion.length > 20) {
       const content = JSON.stringify({
         activity: activitySummary,
@@ -2766,11 +2711,9 @@ Output ONLY the suggestion in 2-3 sentences. Be specific.`;
 // ── Auto skill creation from suggestions ──────────────────────
 
 async function autoCreateSkill() {
-  if (!ollamaAvailable) return;
+  if (!mlxGenerateAvailable) return;
 
   try {
-    const model = pickModel('summarize');
-    if (!model) return;
 
     // Get ALL unprocessed suggestions
     const suggestions = dbQuery(`SELECT id, content FROM entries WHERE type = 'skill-suggestion' AND tags NOT LIKE '%skill-created%' ORDER BY id ASC LIMIT 10;`);
@@ -2820,7 +2763,7 @@ origin: auto-generated
 
 - First gotcha`;
 
-      const generated = await ollamaGenerate(model, genPrompt, { maxTokens: 500, temperature: 0.3 });
+      const generated = await mlxGenerate(genPrompt, { maxTokens: 500, temperature: 0.3 });
       await new Promise(r => setTimeout(r, 30000));
       if (!generated || generated.length < 50) continue;
 
@@ -3227,7 +3170,7 @@ let coremlAvailable = false;
 /**
  * Check if MLX embed server is running on port 3161.
  * Tries /api/health (new MLX server) then /health (legacy CoreML).
- * This is a fast local server (no Ollama needed) for search-time query embedding.
+ * This is a fast local server for search-time query embedding.
  */
 async function checkMlx() {
   try {
@@ -3262,9 +3205,9 @@ async function checkMlx() {
 const checkCoreml = checkMlx;
 
 /**
- * Generate embedding via MLX server (/api/embeddings, Ollama-compatible).
+ * Generate embedding via MLX server (/api/embeddings).
  * Returns N-dim normalized embedding array or null on failure.
- * NOT subject to night-window restrictions (runs on Apple Silicon GPU, not Ollama).
+ * Runs on Apple Silicon GPU (24/7, no restrictions).
  * Default model: Qwen3-Embedding-8B-4bit-DWQ (4096-dim, ~30-100ms per embed).
  */
 const MLX_DEFAULT_MODEL = process.env.MLX_EMBED_MODEL || 'mlx-community/Qwen3-Embedding-8B-4bit-DWQ';
@@ -3296,57 +3239,26 @@ function mlxEmbed(text) {
 // Back-compat alias
 const coremlEmbed = mlxEmbed;
 
-// ── Local AI (Ollama, optional) ───────────────────────────────
+// ── MLX Generate Server (Apple Silicon, 24/7) ────────────────
 
-const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
-let ollamaAvailable = false;
-let ollamaModels = [];
-let ollamaPreferredModel = null;
+const MLX_GENERATE_URL = process.env.MLX_GENERATE_URL || 'http://127.0.0.1:3162';
+const MLX_GENERATE_MODEL = process.env.MLX_GENERATE_MODEL || 'mlx-community/Qwen3-8B-4bit';
+let mlxGenerateAvailable = false;
 
-// Model preference order for different tasks
-const MODEL_PREFS = {
-  summarize: ['llama3.1', 'qwen2.5-coder', 'glm-4.7-flash', 'gemma'],
-  embed: ['qwen3-embedding', 'nomic-embed-text', 'bge-m3', 'gemma', 'llama3.1'],
-  judge: ['llama3.1', 'glm-4.7-flash', 'qwen2.5-coder'],
-  code: ['qwen2.5-coder', 'llama3.1'],
-};
-
-async function checkOllama() {
+async function checkMlxGenerate() {
   try {
-    const data = await httpGet(`${OLLAMA_URL}/api/tags`);
-    const parsed = JSON.parse(data);
-    ollamaModels = (parsed.models || []).map(m => m.name);
-    ollamaAvailable = ollamaModels.length > 0;
-    // Pick preferred model (first match in preference order)
-    ollamaPreferredModel = null;
-    for (const pref of MODEL_PREFS.summarize) {
-      const match = ollamaModels.find(m => m.startsWith(pref));
-      if (match) { ollamaPreferredModel = match; break; }
-    }
-    if (!ollamaPreferredModel && ollamaModels.length > 0) {
-      ollamaPreferredModel = ollamaModels[0];
-    }
-    if (ollamaAvailable) {
-      console.log(`[ollama] Available: ${ollamaModels.join(', ')} (preferred: ${ollamaPreferredModel})`);
+    const data = await httpGet(`${MLX_GENERATE_URL}/v1/models`);
+    const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+    mlxGenerateAvailable = parsed && parsed.data && parsed.data.length > 0;
+    if (mlxGenerateAvailable) {
+      console.log(`[mlx-generate] Available: ${MLX_GENERATE_MODEL}`);
     }
   } catch {
-    ollamaAvailable = false;
-    ollamaModels = [];
-    ollamaPreferredModel = null;
+    mlxGenerateAvailable = false;
   }
 }
 
-function pickModel(task) {
-  if (!ollamaAvailable) return null;
-  const prefs = MODEL_PREFS[task] || MODEL_PREFS.summarize;
-  for (const pref of prefs) {
-    const match = ollamaModels.find(m => m.startsWith(pref));
-    if (match) return match;
-  }
-  return ollamaPreferredModel;
-}
-
-// Simple HTTP GET helper (for Ollama API)
+// Simple HTTP GET helper
 function httpGet(url) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
@@ -3361,58 +3273,33 @@ function httpGet(url) {
   });
 }
 
-// Call Ollama generate API
-function ollamaGenerate(model, prompt, options = {}) {
+// Call MLX generate server (OpenAI-compatible chat completions)
+function mlxGenerate(prompt, options = {}) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
-      model,
-      prompt,
-      stream: false,
-      options: { temperature: options.temperature || 0.3, num_predict: options.maxTokens || 256 },
+      model: MLX_GENERATE_MODEL,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: options.maxTokens || 500,
+      temperature: options.temperature || 0.3,
     });
-    const parsed = new URL(`${OLLAMA_URL}/api/generate`);
+    const parsed = new URL(`${MLX_GENERATE_URL}/v1/chat/completions`);
     const req = httpRequest(parsed, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      timeout: 300000, // 5 min — cold start + swap can be very slow
+      timeout: 120000,
     }, (res) => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
       res.on('end', () => {
         try {
           const data = JSON.parse(Buffer.concat(chunks).toString());
-          resolve(data.response || '');
+          const content = data.choices?.[0]?.message?.content || '';
+          resolve(content.trim());
         } catch (e) { reject(e); }
       });
     });
     req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('ollama timeout')); });
-    req.write(body);
-    req.end();
-  });
-}
-
-// Call Ollama embeddings API
-function ollamaEmbed(model, text) {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ model, prompt: text });
-    const parsed = new URL(`${OLLAMA_URL}/api/embeddings`);
-    const req = httpRequest(parsed, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      timeout: 300000, // 5 min — cold start + swap can be very slow
-    }, (res) => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => {
-        try {
-          const data = JSON.parse(Buffer.concat(chunks).toString());
-          resolve(data.embedding || []);
-        } catch (e) { reject(e); }
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('ollama embed timeout')); });
+    req.on('timeout', () => { req.destroy(); reject(new Error('mlx generate timeout')); });
     req.write(body);
     req.end();
   });
@@ -3429,9 +3316,9 @@ function handleAiStatus(req, res) {
   } catch {}
 
   sendJson(res, 200, {
-    ollama_available: ollamaAvailable,
-    ollama_url: OLLAMA_URL,
-    models: ollamaModels,
+    mlx_generate_available: mlxGenerateAvailable,
+    mlx_generate_url: MLX_GENERATE_URL,
+    mlx_generate_model: MLX_GENERATE_MODEL,
     coreml_available: mlxAvailable,
     mlx_available: mlxAvailable,
     mlx_url: MLX_EMBED_URL,
@@ -3439,39 +3326,38 @@ function handleAiStatus(req, res) {
     mlx_dim: mlxEmbedDim,
     embedding_count: embeddingCount,
     preferred: {
-      summarize: pickModel('summarize'),
-      embed: mlxAvailable ? `${mlxModelName} (mlx)` : null,  // MLX is sole embed provider
-      judge: pickModel('judge'),
-      code: pickModel('code'),
+      summarize: mlxGenerateAvailable ? MLX_GENERATE_MODEL : null,
+      embed: mlxAvailable ? `${mlxModelName} (mlx)` : null,
+      judge: mlxGenerateAvailable ? MLX_GENERATE_MODEL : null,
+      code: mlxGenerateAvailable ? MLX_GENERATE_MODEL : null,
     },
     features: {
-      auto_summarize: ollamaAvailable,
-      auto_embed: mlxAvailable,           // MLX is sole embedding provider (24/7)
-      auto_conflict_resolve: ollamaAvailable,
-      semantic_search: mlxAvailable,       // MLX only — Ollama no longer used for embeddings
+      auto_summarize: mlxGenerateAvailable,
+      auto_embed: mlxAvailable,
+      auto_conflict_resolve: mlxGenerateAvailable,
+      semantic_search: mlxAvailable,
     },
   });
 }
 
-// POST /ai/summarize — Summarize entries using local AI
+// POST /ai/summarize — Summarize entries using MLX generate
 async function handleAiSummarize(req, res) {
-  if (!ollamaAvailable) {
-    return sendJson(res, 503, { error: 'Local AI not available. Install Ollama: brew install ollama' });
+  if (!mlxGenerateAvailable) {
+    return sendJson(res, 503, { error: 'MLX generate server not available at ' + MLX_GENERATE_URL });
   }
   const body = await readBody(req);
   const ids = body.ids || [];
-  const model = pickModel('summarize');
 
   if (ids.length === 0) {
     // Summarize all entries older than 24h that don't have a summary
     const rows = dbQuery(`SELECT id, content FROM entries WHERE reasoning IS NULL AND created_at < datetime('now', '-1 day') LIMIT 20;`);
     for (const row of rows) {
       try {
-        const summary = await ollamaGenerate(model, `Summarize in one sentence (max 50 words):\n\n${row.content.slice(0, 2000)}`, { maxTokens: 100 });
+        const summary = await mlxGenerate(`Summarize in one sentence (max 50 words):\n\n${row.content.slice(0, 2000)}`, { maxTokens: 100 });
         if (summary) dbExec(`UPDATE entries SET reasoning = ${esc(summary.trim())} WHERE id = ${row.id};`);
       } catch {}
     }
-    return sendJson(res, 200, { summarized: rows.length, model });
+    return sendJson(res, 200, { summarized: rows.length, model: MLX_GENERATE_MODEL });
   }
 
   // Summarize specific entries
@@ -3480,12 +3366,12 @@ async function handleAiSummarize(req, res) {
     const rows = dbQuery(`SELECT content FROM entries WHERE id = ${id};`);
     if (rows[0]) {
       try {
-        const summary = await ollamaGenerate(model, `Summarize in one sentence (max 50 words):\n\n${rows[0].content.slice(0, 2000)}`, { maxTokens: 100 });
+        const summary = await mlxGenerate(`Summarize in one sentence (max 50 words):\n\n${rows[0].content.slice(0, 2000)}`, { maxTokens: 100 });
         if (summary) { dbExec(`UPDATE entries SET reasoning = ${esc(summary.trim())} WHERE id = ${id};`); count++; }
       } catch {}
     }
   }
-  sendJson(res, 200, { summarized: count, model });
+  sendJson(res, 200, { summarized: count, model: MLX_GENERATE_MODEL });
 }
 
 // ── Cosine similarity for semantic search ─────────────────────
@@ -3507,7 +3393,7 @@ async function handleSemanticSearch(req, res) {
   if (!q) return sendJson(res, 400, { error: 'Missing query parameter: q' });
 
   // No embedding source at all → immediate FTS fallback
-  // MLX is the sole embedding provider; Ollama no longer used for embeddings
+  // MLX is the sole embedding provider
   if (!mlxAvailable) {
     const limit = Math.min(parseInt(params.limit) || 10, 50);
     const ftsResults = dbQuery(`SELECT id, type, content, tags, created_at, reasoning FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(q)} LIMIT ${limit});`);
@@ -3520,11 +3406,11 @@ async function handleSemanticSearch(req, res) {
   const auth = validateApiKey(req);
   if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
 
-  // Generate query embedding — try MLX first (fast ~30ms, no Ollama needed), then Ollama, then FTS
+  // Generate query embedding — try MLX (fast ~30ms), then FTS fallback
   let queryEmbed;
   let embedSource = null;
 
-  // Strategy 1: MLX (fast ~30ms, no Ollama process needed, no night-window restriction)
+  // Strategy 1: MLX (fast ~30ms on Apple Silicon GPU)
   // Only usable for vector search if MLX embedding dimension matches stored embeddings
   if (mlxAvailable) {
     try {
@@ -3537,16 +3423,16 @@ async function handleSemanticSearch(req, res) {
         } else {
           // Dimension mismatch — MLX dim differs from stored embeddings
           // Can't use for vector search, but MLX is confirmed working
-          // Fall through to Ollama or FTS
+          // Fall through to FTS
         }
       }
     } catch (e) {
-      // MLX failed — fall through to Ollama
+      // MLX failed — fall through to FTS
       console.log(`[search/semantic] MLX embed failed: ${e.message}`);
     }
   }
 
-  // Ollama embedding removed — MLX is sole provider
+  // MLX is sole embedding provider
   // Strategy 2: FTS fallback if MLX embedding could not be generated
   if (!queryEmbed || queryEmbed.length === 0) {
     const ftsResults = dbQuery(`SELECT id, type, content, tags, created_at, reasoning FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(q)} LIMIT ${limit});`);
@@ -3767,7 +3653,7 @@ function sanitizeForExternalSearch(text) {
 /**
  * POST /predictive-search
  * Body: { prompt }
- * Extracts keywords from user prompt (via Ollama, local only),
+ * Extracts keywords from user prompt (via MLX generate, local only),
  * sanitizes for privacy, searches the web, stores results in vcontext.
  * Fully async — returns immediately, results stored in background.
  */
@@ -3790,9 +3676,9 @@ async function handleCompletionCheck(req, res) {
     return sendJson(res, 200, { checked: false, reason: 'no completion claim detected' });
   }
 
-  // Completion check uses Ollama — night window only
-  if (!isNightWindow()) {
-    return sendJson(res, 200, { checked: true, analyzing: false, reason: 'outside night window (22:00-08:00)' });
+  // Completion check uses MLX generate (24/7)
+  if (!mlxGenerateAvailable) {
+    return sendJson(res, 200, { checked: true, analyzing: false, reason: 'MLX generate not available' });
   }
 
   sendJson(res, 202, { checked: true, analyzing: true });
@@ -3800,8 +3686,6 @@ async function handleCompletionCheck(req, res) {
   // Background: analyze recent work for gaps
   setImmediate(async () => {
     try {
-      const model = pickModel('summarize');
-      if (!model) return;
 
       // Gather recent session activity
       const recentWork = dbQuery(`SELECT type, tool_name, substr(content,1,200) as preview FROM entry_index WHERE session = ${esc(session)} AND created_at >= datetime('now', '-1 hour') ORDER BY entry_id DESC LIMIT 30;`);
@@ -3854,7 +3738,7 @@ ${latestPractices ? `Latest best practices from web (2026):\n${latestPractices}\
 List ONLY the violations found (omissions). If none, say "NONE".
 Be specific about what was missed.`;
 
-      const violations = await ollamaGenerate(model, checkPrompt, { maxTokens: 300, temperature: 0.2 });
+      const violations = await mlxGenerate(checkPrompt, { maxTokens: 300, temperature: 0.2 });
       if (!violations || violations.trim() === 'NONE' || violations.length < 10) {
         console.log('[vcontext:check] Completion check passed');
         return;
@@ -3873,7 +3757,7 @@ Be specific about what was missed.`;
       const rulePrompt = `Based on this violation, write a short MANDATORY RULE (1-2 sentences) to prevent it from happening again. Output ONLY the rule text.
 
 Violation: ${violations.trim().slice(0, 300)}`;
-      const newRule = await ollamaGenerate(model, rulePrompt, { maxTokens: 100, temperature: 0.2 });
+      const newRule = await mlxGenerate(rulePrompt, { maxTokens: 100, temperature: 0.2 });
       if (newRule && newRule.length > 20) {
         // Check if a similar rule already exists
         const existing = dbQuery(`SELECT id FROM entries WHERE type = 'decision' AND content LIKE ${esc('%' + newRule.trim().slice(0, 30) + '%')} AND tags LIKE '%global-rule%' LIMIT 1;`);
@@ -3900,9 +3784,9 @@ async function handlePredictiveSearch(req, res) {
     return sendJson(res, 200, { status: 'skipped', reason: 'prompt too short' });
   }
 
-  // Predictive search uses Ollama — night window only
-  if (!isNightWindow()) {
-    return sendJson(res, 200, { status: 'skipped', reason: 'outside night window (22:00-08:00)' });
+  // Predictive search uses MLX generate (24/7)
+  if (!mlxGenerateAvailable) {
+    return sendJson(res, 200, { status: 'skipped', reason: 'MLX generate not available' });
   }
 
   // Return immediately — do work in background
@@ -3910,19 +3794,16 @@ async function handlePredictiveSearch(req, res) {
 
   setImmediate(async () => {
     try {
-      if (!ollamaAvailable) return;
+      if (!mlxGenerateAvailable) return;
 
-      // Step 1: Extract search keywords using local Ollama (no external call)
-      const model = pickModel('summarize');
-      if (!model) return;
-
+      // Step 1: Extract search keywords using MLX generate (no external call)
       const keywordPrompt = `Extract 2-3 search keywords from this user request. Output ONLY the keywords separated by spaces, nothing else. No explanation.
 
 Request: ${prompt.slice(0, 500)}
 
 Keywords:`;
 
-      const keywords = await ollamaGenerate(model, keywordPrompt, { maxTokens: 30, temperature: 0.1 });
+      const keywords = await mlxGenerate(keywordPrompt, { maxTokens: 30, temperature: 0.1 });
       if (!keywords || keywords.length < 3) return;
       // Take only first line to avoid LLM chattering
       const keywordsClean = keywords.trim().split('\n')[0].trim();
@@ -3933,7 +3814,7 @@ Keywords:`;
       console.log(`[vcontext:predict] Keywords: "${keywordsClean}" → sanitized: "${sanitized}"`);
 
       // Step 3: Multi-source search with rate limiting
-      // Sources: (a) vcontext FTS, (b) DuckDuckGo, (c) Ollama, (d) Wikipedia
+      // Sources: (a) vcontext FTS, (b) SearXNG, (c) MLX generate, (d) Wikipedia
       const parts = [];
       const searchWords = sanitized.split(' ').filter(w => w.length > 2);
 
@@ -3982,11 +3863,11 @@ Keywords:`;
         console.log(`[vcontext:predict] SearXNG error: ${e.message}`);
       }
 
-      // 3c: Generate background knowledge with Ollama (local, no external call)
+      // 3c: Generate background knowledge with MLX (local, no external call)
       try {
         const bgPrompt = `List 3 key technical facts or best practices about: ${sanitized}
 Output as a numbered list. Be specific and actionable. Max 100 words.`;
-        const bgKnowledge = await ollamaGenerate(model, bgPrompt, { maxTokens: 200, temperature: 0.3 });
+        const bgKnowledge = await mlxGenerate(bgPrompt, { maxTokens: 200, temperature: 0.3 });
         if (bgKnowledge && bgKnowledge.length > 20) {
           parts.push(`[knowledge] ${bgKnowledge.trim()}`);
         }
@@ -4022,7 +3903,7 @@ Output as a numbered list. Be specific and actionable. Max 100 words.`;
         query: sanitized,
         original_keywords: keywords.trim(),
         results: parts,
-        source: 'vcontext+ollama+wikipedia',
+        source: 'vcontext+mlx+wikipedia',
         fetched_at: new Date().toISOString(),
       });
 
@@ -4252,7 +4133,7 @@ const ENDPOINTS_LIST = [
   'GET    /consult/:id       — check consultation status and aggregated results',
   'GET    /consult/pending?model= — list pending consultations for a model',
   'POST   /consult/auto-respond — batch respond to pending consultations {model, responses[]}',
-  'GET    /ai/status         — local AI (Ollama) status and capabilities',
+  'GET    /ai/status         — local AI (MLX) status and capabilities',
   'POST   /ai/summarize      — summarize entries using local AI {ids?:[]}',
   'GET    /search/semantic?q= — semantic similarity search (&limit=10&threshold=0.5)',
   'POST   /analytics/track   — track usage event {event_type, skill_name?, session?, metadata?}',
@@ -4432,14 +4313,14 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
 // Check local AI availability + start background loops
-checkOllama();
+checkMlxGenerate();
 checkMlx().then(() => {
   // Start embed loop after MLX check completes (was race condition — mlxAvailable still false at sync check)
-  if (mlxAvailable || ollamaAvailable) {
+  if (mlxAvailable) {
     startEmbedLoop().catch(() => {});
   }
 }).catch(() => {});
-if (ollamaAvailable) {
+if (mlxGenerateAvailable) {
   startDiscoveryLoop().catch(() => {});
 }
 
