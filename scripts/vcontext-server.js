@@ -2603,33 +2603,56 @@ async function startDiscoveryLoop() {
 async function runOneDiscovery() {
   detectSearxngUrl(); // re-detect port in case Docker restarted
 
-  // ── 1. Skill discovery: dynamic topic from user activity ──
+  // ── 1. Skill discovery: multi-direction search ──
+  // Rotate through categories + activity-based topic each cycle
+  const DISCOVERY_CATEGORIES = [
+    'Claude Code skills best practices',
+    'AI coding agent workflow patterns',
+    'MCP server new tools',
+    'agentic orchestration patterns',
+    'AI agent quality assurance',
+    'AI pair programming techniques',
+  ];
   try {
-    // Generate search topic from recent user activity
-    let topic = 'AI agent workflow best practices 2026'; // fallback
-    if (mlxGenerateAvailable) {
-      try {
-        const recentActivity = dbQuery(`SELECT tool_name, type FROM entry_index WHERE created_at >= datetime('now', '-6 hours') AND tool_name IS NOT NULL ORDER BY entry_id DESC LIMIT 20;`);
-        const recentPrompts = dbQuery(`SELECT substr(content, 1, 200) as c FROM entries WHERE type = 'user-prompt' AND created_at >= datetime('now', '-6 hours') ORDER BY id DESC LIMIT 5;`);
+    // Pick category by rotation (cycle through all directions)
+    const cycleIndex = Math.floor(Date.now() / DISCOVERY_INTERVAL_MS) % (DISCOVERY_CATEGORIES.length + 1);
+    let topic;
 
-        const activityStr = recentActivity.map(r => r.tool_name).filter(Boolean).join(', ');
-        const promptStr = recentPrompts.map(r => {
-          try { const d = JSON.parse(r.c); return d.prompt || d.content || ''; } catch { return r.c || ''; }
-        }).filter(s => s.length > 5).join('; ');
+    if (cycleIndex < DISCOVERY_CATEGORIES.length) {
+      // Fixed category rotation
+      topic = DISCOVERY_CATEGORIES[cycleIndex] + ' 2026';
+    } else {
+      // Activity-based dynamic topic
+      topic = 'AI agent workflow best practices 2026'; // fallback
+      if (mlxGenerateAvailable) {
+        try {
+          const recentActivity = dbQuery(`SELECT tool_name, type FROM entry_index WHERE created_at >= datetime('now', '-6 hours') AND tool_name IS NOT NULL ORDER BY entry_id DESC LIMIT 20;`);
+          const recentPrompts = dbQuery(`SELECT substr(content, 1, 200) as c FROM entries WHERE type = 'user-prompt' AND created_at >= datetime('now', '-6 hours') ORDER BY id DESC LIMIT 5;`);
+          const agentTasks = dbQuery(`SELECT substr(content, 1, 200) as c FROM entries WHERE type = 'subagent-start' AND created_at >= datetime('now', '-6 hours') ORDER BY id DESC LIMIT 10;`);
 
-        const topicPrompt = `Based on this developer's recent work, generate ONE search query to find the most useful new tool, library, or best practice for them. Output ONLY the search query, nothing else.
+          const activityStr = recentActivity.map(r => r.tool_name).filter(Boolean).join(', ');
+          const promptStr = recentPrompts.map(r => {
+            try { const d = JSON.parse(r.c); return d.prompt || d.content || ''; } catch { return r.c || ''; }
+          }).filter(s => s.length > 5).join('; ');
+          const agentStr = agentTasks.map(r => {
+            try { const d = JSON.parse(r.c); return d.description || ''; } catch { return ''; }
+          }).filter(Boolean).join('; ');
+
+          const topicPrompt = `Based on this developer and their AI agents' recent work, generate ONE search query to find the most useful new tool, library, or best practice. Output ONLY the search query, nothing else.
 
 Recent tools: ${activityStr || 'Bash, Edit, Read'}
 Recent questions: ${sanitizeForExternalSearch(promptStr || 'general development')}
+Agent tasks: ${sanitizeForExternalSearch(agentStr || 'code review, testing')}
 
 Search query:`;
-        const generated = await mlxGenerate(topicPrompt, { maxTokens: 30, temperature: 0.7 });
-        if (generated && generated.length > 5) {
-          topic = sanitizeForExternalSearch(generated.trim().split('\n')[0]);
-        }
-      } catch {}
+          const generated = await mlxGenerate(topicPrompt, { maxTokens: 30, temperature: 0.7 });
+          if (generated && generated.length > 5) {
+            topic = sanitizeForExternalSearch(generated.trim().split('\n')[0]);
+          }
+        } catch {}
+      }
     }
-    console.log(`[vcontext:discover] Topic: "${topic}"`);
+    console.log(`[vcontext:discover] Topic: "${topic}" (cycle ${cycleIndex}/${DISCOVERY_CATEGORIES.length})`);
 
     // Dedup: skip if we already searched this exact topic
     const existing = dbQuery(`SELECT id FROM entries WHERE type = 'skill-discovery' AND content LIKE ${esc('%' + topic.slice(0, 30) + '%')} LIMIT 1;`);
