@@ -382,6 +382,11 @@ async function handleSubagentStart() {
       process.stdout.write(lines.join('\n') + '\n');
     }
   } catch {}
+
+  // 4. Predictive search — agent gathers background info to self-navigate
+  if (prompt.length >= 15) {
+    post('/predictive-search', { prompt: prompt.slice(0, 500), session: sessionId, source: 'agent' }).catch(() => {});
+  }
 }
 
 // ── Session recall ───────────────────────────────────────────────
