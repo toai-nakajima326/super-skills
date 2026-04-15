@@ -209,6 +209,12 @@ function esc(str) {
   return "'" + String(str).replace(/'/g, "''") + "'";
 }
 
+/** Sanitize query for FTS5 MATCH — strip chars that cause syntax errors */
+function ftsQuery(q) {
+  // Remove FTS5 operators and special chars, keep alphanumeric + spaces + CJK
+  return String(q).replace(/[<>\/\\(),;:!@#$%^&*+=\[\]{}|~`"]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 // ── RAM disk check ─────────────────────────────────────────────
 function ensureRamDisk() {
   if (!existsSync(MOUNT_POINT)) {
@@ -637,7 +643,7 @@ function migrateRamToSsd() {
         `INSERT INTO entries (type, content, tags, session, token_estimate, created_at, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status)
          VALUES (${esc(row.type)}, ${esc(row.content)}, ${esc(row.tags)}, ${esc(row.session)}, ${row.token_estimate || 0},
                  ${esc(row.created_at)}, ${esc(row.last_accessed)}, ${row.access_count || 0}, 'ssd',
-                 ${esc(row.reasoning || null)}, ${esc(row.conditions || null)}, ${row.supersedes != null ? row.supersedes : 'NULL'}, ${esc(row.confidence || 'medium')}, ${esc(row.status || 'active')});`,
+                 ${esc(row.reasoning || null)}, ${esc(row.conditions || null)}, ${row.supersedes != null ? (parseInt(row.supersedes) || 'NULL') : 'NULL'}, ${esc(row.confidence || 'medium')}, ${esc(row.status || 'active')});`,
         SSD_DB_PATH,
       );
     }
@@ -704,7 +710,7 @@ function promoteToRam(rows, sourceTier) {
         `INSERT INTO entries (type, content, tags, session, token_estimate, created_at, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status)
          VALUES (${esc(row.type)}, ${esc(row.content)}, ${esc(row.tags)}, ${esc(row.session)}, ${row.token_estimate || 0},
                  ${esc(row.created_at)}, datetime('now'), ${(row.access_count || 0) + 1}, 'ram',
-                 ${esc(row.reasoning || null)}, ${esc(row.conditions || null)}, ${row.supersedes != null ? row.supersedes : 'NULL'}, ${esc(row.confidence || 'medium')}, ${esc(row.status || 'active')});`,
+                 ${esc(row.reasoning || null)}, ${esc(row.conditions || null)}, ${row.supersedes != null ? (parseInt(row.supersedes) || 'NULL') : 'NULL'}, ${esc(row.confidence || 'medium')}, ${esc(row.status || 'active')});`,
       );
     }
     console.log(`[vcontext:tier] Promoted ${rows.length} entries from ${sourceTier} → RAM`);
@@ -894,7 +900,7 @@ async function handleStore(req, res) {
         const existing = dbQuery(
           `SELECT e.id, e.content, e.conditions, e.status, e.confidence
            FROM entries_fts fts JOIN entries e ON e.id = fts.rowid
-           WHERE entries_fts MATCH ${esc(keywords)}
+           WHERE entries_fts MATCH ${esc(ftsQuery(keywords))}
            AND e.type = 'decision' AND e.status = 'active' AND e.id != ${entry.id}
            LIMIT 5;`
         );
@@ -1115,7 +1121,7 @@ function searchTier(dbPath, q, type, limit, namespace, userFilter, accessibleGro
   const ftsSql = `SELECT e.*, rank
     FROM entries_fts fts
     JOIN entries e ON e.id = fts.rowid
-    WHERE entries_fts MATCH ${esc(q)}${typeFilter}${nsFilter}${userFlt}${groupFilter}
+    WHERE entries_fts MATCH ${esc(ftsQuery(q))}${typeFilter}${nsFilter}${userFlt}${groupFilter}
     ORDER BY rank * 0.7 + (julianday(e.created_at) - julianday('2024-01-01')) * 0.3
     LIMIT ${limit};`;
 
@@ -2654,10 +2660,10 @@ Search query:`;
     }
     console.log(`[vcontext:discover] Topic: "${topic}" (cycle ${cycleIndex}/${DISCOVERY_CATEGORIES.length})`);
 
-    // Dedup: skip if we already searched this exact topic
-    const existing = dbQuery(`SELECT id FROM entries WHERE type = 'skill-discovery' AND content LIKE ${esc('%' + topic.slice(0, 30) + '%')} LIMIT 1;`);
+    // Dedup: skip if we searched this topic in the last 24 hours
+    const existing = dbQuery(`SELECT id FROM entries WHERE type = 'skill-discovery' AND content LIKE ${esc('%' + topic.slice(0, 30) + '%')} AND created_at >= datetime('now', '-24 hours') LIMIT 1;`);
     if (existing.length > 0) {
-      console.log(`[vcontext:discover] Skipped (already searched)`);
+      console.log(`[vcontext:discover] Skipped (searched in last 24h)`);
     } else {
 
     const searchResult = await new Promise((resolve) => {
@@ -3447,7 +3453,7 @@ async function handleSemanticSearch(req, res) {
   // MLX is the sole embedding provider
   if (!mlxAvailable) {
     const limit = Math.min(parseInt(params.limit) || 10, 50);
-    const ftsResults = dbQuery(`SELECT id, type, content, tags, created_at, reasoning FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(q)} LIMIT ${limit});`);
+    const ftsResults = dbQuery(`SELECT id, type, content, tags, created_at, reasoning FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(ftsQuery(q))} LIMIT ${limit});`);
     parseTags(ftsResults);
     return sendJson(res, 200, { results: ftsResults, count: ftsResults.length, engine: 'fts-fallback', model_used: null, threshold: 0 });
   }
@@ -3486,7 +3492,7 @@ async function handleSemanticSearch(req, res) {
   // MLX is sole embedding provider
   // Strategy 2: FTS fallback if MLX embedding could not be generated
   if (!queryEmbed || queryEmbed.length === 0) {
-    const ftsResults = dbQuery(`SELECT id, type, content, tags, created_at, reasoning FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(q)} LIMIT ${limit});`);
+    const ftsResults = dbQuery(`SELECT id, type, content, tags, created_at, reasoning FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(ftsQuery(q))} LIMIT ${limit});`);
     parseTags(ftsResults);
     return sendJson(res, 200, {
       results: ftsResults,
@@ -3871,7 +3877,7 @@ Keywords:`;
 
       // 3a: Search own vcontext for related entries
       try {
-        const related = dbQuery(`SELECT id, type, content, created_at FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(sanitized)} LIMIT 5);`);
+        const related = dbQuery(`SELECT id, type, content, created_at FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(ftsQuery(sanitized))} LIMIT 5);`);
         for (const r of related) {
           parts.push(`[past:${r.type}] ${String(r.content).slice(0, 200)}`);
         }
