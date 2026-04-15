@@ -103,21 +103,44 @@ while true; do
     check_searxng
   fi
 
-  # MLX Generate memory check every 10 minutes (every 10th iteration)
-  # Restart if footprint exceeds 8GB (model=5GB + 3GB buffer)
+  # MLX Generate health check every 10 minutes (every 10th iteration)
+  # Restart if: memory > 8GB, unresponsive, or calls > 200 (prevents hang)
   if [[ $((SEARXNG_CHECK_COUNTER % 10)) -eq 0 ]]; then
-    GEN_PID=$(pgrep -f "mlx_lm server" | head -1)
+    GEN_PID=$(pgrep -f "mlx-generate-server" | head -1)
+    NEED_RESTART=false
+    REASON=""
+
     if [[ -n "$GEN_PID" ]]; then
+      # Memory check
       GEN_MB=$(footprint -p "$GEN_PID" 2>/dev/null | grep Footprint | grep -o '[0-9]* MB' | grep -o '[0-9]*')
       if [[ -n "$GEN_MB" ]] && [[ "$GEN_MB" -gt 8000 ]]; then
-        log "MLX Generate memory ${GEN_MB}MB > 8GB, restarting..."
-        launchctl unload ~/Library/LaunchAgents/com.vcontext.mlx-generate.plist 2>/dev/null
-        sleep 1
-        kill -9 "$GEN_PID" 2>/dev/null
-        sleep 1
-        launchctl load ~/Library/LaunchAgents/com.vcontext.mlx-generate.plist 2>/dev/null
-        log "MLX Generate restarted"
+        NEED_RESTART=true; REASON="memory ${GEN_MB}MB > 8GB"
       fi
+
+      # Responsiveness check (3s timeout)
+      GEN_HEALTH=$(curl -s --max-time 3 http://127.0.0.1:3162/health 2>/dev/null)
+      if [[ -z "$GEN_HEALTH" ]]; then
+        NEED_RESTART=true; REASON="unresponsive (health timeout)"
+      fi
+
+      # Call count check (prevents gradual hang)
+      GEN_CALLS=$(echo "$GEN_HEALTH" | python3 -c "import sys,json;print(json.load(sys.stdin).get('calls',0))" 2>/dev/null)
+      if [[ -n "$GEN_CALLS" ]] && [[ "$GEN_CALLS" -gt 200 ]]; then
+        NEED_RESTART=true; REASON="calls=${GEN_CALLS} > 200"
+      fi
+    else
+      NEED_RESTART=true; REASON="process not found"
+    fi
+
+    if $NEED_RESTART; then
+      log "MLX Generate restart: $REASON"
+      launchctl unload ~/Library/LaunchAgents/com.vcontext.mlx-generate.plist 2>/dev/null
+      sleep 1
+      [[ -n "$GEN_PID" ]] && kill -9 "$GEN_PID" 2>/dev/null
+      lsof -ti :3162 | xargs kill -9 2>/dev/null
+      sleep 1
+      launchctl load ~/Library/LaunchAgents/com.vcontext.mlx-generate.plist 2>/dev/null
+      log "MLX Generate restarted"
     fi
   fi
 
