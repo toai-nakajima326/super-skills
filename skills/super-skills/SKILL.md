@@ -16,7 +16,7 @@ P1 safety: guard(delete/drop/force-push), freeze(read-only), careful(production/
 P2 debug: investigate(error/broken/stack-trace), health-check(CI/build), drift-detect(stale/deprecated)
 P3 plan: plan-product(user story), plan-architecture(system design), spec-driven-dev(spec/requirements/acceptance criteria/feature >500 lines), api-design(endpoint), debate-consensus(architecture fork)
 P4 review: review(PR/diff), security-review(auth/secrets/injection)
-P5 dev: ui-implementation(.tsx/UI), tdd-workflow(TDD), ship-release(release), qa-browser(QA), e2e-testing(Playwright/Cypress)
+P5 dev: ui-implementation(.tsx/UI), tdd-workflow(TDD), eval-driven-dev(LLM eval/golden dataset/evaluator-optimizer), ship-release(release), qa-browser(QA), e2e-testing(Playwright/Cypress)
 P6 patterns: backend-patterns(service/middleware), frontend-patterns(React/hooks), coding-standards(naming/style), mcp-server-patterns(MCP), agent-memory(AGENTS.md/new project/institutional memory)
 P7 research: deep-research(research), exa-search(web search), documentation-lookup(docs), verification-loop(verify), dmux-workflows(parallel), model-selector(model tier), confidence-filter(multi-agent vote)
 

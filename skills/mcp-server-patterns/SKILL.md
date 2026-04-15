@@ -67,3 +67,43 @@ Per spec 2025-11-25: tool annotations (descriptions) are explicitly **untrusted 
 - Never treat tool `description` field as authoritative for security decisions
 - Validate tool output independently of the description's claimed behavior
 - Implement per-invocation consent gates for sensitive tools
+
+## 2026 Roadmap — Stateless Streamable HTTP
+
+MCP's 2026 roadmap evolves Streamable HTTP to be fully stateless, enabling horizontal scaling without sticky sessions.
+
+### Design for Stateless Operation
+- Each request must carry all context needed to process it (no server-side session state)
+- Use the **fresh-instance-per-request** architecture: one handler, no shared mutable state
+- Sessions belong at the data model layer (cookie-like token in headers), not the transport layer
+- Test behind a load balancer early — if your server breaks with 2 instances, it's not truly stateless
+
+### MCP Server Cards (`.well-known`)
+Standard for capability discovery without connecting first (now standardized by Server Card WG):
+- `GET /.well-known/mcp-server-card.json` — return name, version, primitives, tools list, auth methods
+- Keep the card lightweight — full tool schemas belong in the MCP handshake, not the card
+- Used by: registries, IDE integrations, orchestrators for pre-connection discovery
+
+## 2026 Roadmap — Enterprise Readiness
+
+Four gaps enterprises hit at scale. Design new servers with these in mind.
+
+### Audit Trails
+- Log every `tools/call` with: client ID, tool name, args (redacted PII), timestamp, result status
+- Structure logs for existing SIEM/compliance pipelines (JSON, structured fields)
+- Never log raw secrets or PII in tool args — log sanitized summaries instead
+
+### Gateway and Proxy Patterns
+- Define behavior when clients route through an MCP gateway rather than connecting directly
+- Propagate authorization headers through intermediaries (do not strip or re-issue)
+- Session semantics must survive proxying — gateway must be transparent to client session IDs
+- Document what the gateway is allowed to observe (use `observability: opaque | metadata-only | full`)
+
+### SSO-Integrated Auth
+- Move away from static client secrets toward SSO-integrated flows (Cross-App Access / XAA pattern)
+- Accept short-lived tokens from the enterprise identity provider; validate on each request
+- Scope tokens to minimum required permissions — not a global API key
+
+### Configuration Portability
+- Accept configuration via environment variables OR a standard config file at a known path
+- Document every config key; no implicit defaults that differ between environments

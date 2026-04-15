@@ -4,6 +4,52 @@ Auto-maintained by the `self-evolve` skill. Records all upstream syncs, web disc
 
 ---
 
+## 2026-04-15 — web-discovery
+
+**Search window**: 2026-04-14 → 2026-04-15
+**Queries executed**: 7
+**New sources checked**: 14 (WebFetch deep dives: 6 pages)
+**Candidates found**: 5 | **Adopted**: 2 | **Skipped**: 3 | **Flagged**: 0
+
+### Upstream Sync: skipped
+- **Source**: takurot/super-skills upstream/main (commits 4ea4b21, 80f8c72)
+- **Reasoning**: Upstream restructured to filesystem-based skill deployment (all skills in `.agents/skills/` with `openai.yaml`). Our vcontext-based architecture intentionally restricts `.agents/skills/` to `super-skills` only. Full merge would: (1) add redundant `.agents/skills/` filesystem copies of all skills, (2) add simplified `.claude/skills/` builds that conflict with our build process, (3) revert `mcp-server-patterns` to remove our valuable MCP spec content. No upstream adoption.
+- **New scripts available**: `check-drift.js`, `install-status.mjs` — evaluated, not adopted (conflict with our build system)
+
+### Action: improved — mcp-server-patterns
+- **Source**: MCP official roadmap (modelcontextprotocol.io/development/roadmap, updated 2026-03-05); MCP blog post on stateless HTTP
+- **Reasoning**: 2026 roadmap introduces stateless Streamable HTTP design, enterprise readiness patterns (audit trails, SSO, gateway), and Server Cards standard. Our existing skill covers 2025-11-25 spec but was missing 2026 enterprise and transport evolution content.
+- **Changes**: Added two new sections — "2026 Roadmap — Stateless Streamable HTTP" (fresh-instance-per-request, session at data model layer, `.well-known` Server Cards) and "2026 Roadmap — Enterprise Readiness" (audit trails, gateway/proxy patterns, SSO-integrated auth, configuration portability)
+- **Risk assessment**: low — additive content, no removal of existing patterns
+
+### Action: created — eval-driven-dev
+- **Source**: awesome-copilot/skills "Agentic Eval" and "Eval-Driven Dev" patterns; International AI Safety Report 2026 (evaluation gap finding); Addy Osmani LLM coding workflow
+- **Reasoning**: Novel gap — none of our existing skills cover LLM output evaluation pipelines. `quality-gate` covers general output review; `tdd-workflow` covers code testing; but no skill addresses: golden dataset creation, evaluator-optimizer pipelines, self-critique loops, or CI eval gates for AI-powered apps. Pattern found in 3+ independent sources. Proven in production AI app development workflows.
+- **Changes**: Created `skills/eval-driven-dev/SKILL.md` with workflows for golden dataset creation, evaluator-optimizer pipeline, self-critique loops, and CI gates. Added to `install-components.json`. Added to `super-skills` routing at P5 (dev).
+- **Risk assessment**: low — new skill, does not modify existing skills
+
+### Skipped: agent-governance
+- **Reasoning**: Covers trust scoring and audit trails for long-running agent deployments. Interesting concept but not actionable as a SKILL.md workflow — too abstract, no concrete step-by-step process. Enterprise audit trail guidance added to `mcp-server-patterns` instead.
+
+### Skipped: graph-based-agents
+- **Reasoning**: 3-layer knowledge graph architecture (code/logs/knowledge) for self-improving agents. Novel pattern but requires deep infrastructure changes to implement. Not expressible as a practical SKILL.md workflow at this time.
+
+### Skipped: teams-of-teams (supervisor-worker enhancement)
+- **Reasoning**: Addy Osmani's "feature lead spawns specialists" hierarchical delegation is already implicit in our `supervisor-worker` skill's architecture. Adding explicit documentation would be marginally useful but adds noise; the pattern is supported already.
+
+### Step 3: Local AI Model Maintenance
+- **MLX generate**: Qwen3-8B-4bit running at port 3162 — confirmed available and healthy
+- **MLX embed**: Qwen3-Embedding-8B-4bit-DWQ running at port 3161 — 22,551 embeddings in DB
+- **Model research**: Qwen3-14B-4bit and Qwen3-Coder noted as potentially better options (research sources: sitepoint.com, toolhalla.ai)
+- **Decision**: No model changes this run — current Qwen3-8B-4bit is stable and performant; upgrade to 14B would require memory budget evaluation. Flagged for manual review.
+
+### Step 4: Hook Auto-Setup
+- **Detected tools**: Claude Code, Codex, Cursor, Kiro
+- **Hooks installed**: All tools already configured; Codex hooks.json refreshed (backed up previous)
+- **No new tools detected** since last run
+
+---
+
 ## 2026-04-14 — infrastructure: MLX generate migration (replace Ollama text generation)
 
 ### Action: applied

@@ -38,6 +38,7 @@
     { "name": "model-selector", "type": "skill", "source": "skills/model-selector" },
     { "name": "confidence-filter", "type": "skill", "source": "skills/confidence-filter" },
     { "name": "agent-memory", "type": "skill", "source": "skills/agent-memory" },
-    { "name": "spec-driven-dev", "type": "skill", "source": "skills/spec-driven-dev" }
+    { "name": "spec-driven-dev", "type": "skill", "source": "skills/spec-driven-dev" },
+    { "name": "eval-driven-dev", "type": "skill", "source": "skills/eval-driven-dev" }
   ]
 }
