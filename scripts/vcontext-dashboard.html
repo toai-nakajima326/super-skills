@@ -333,10 +333,6 @@ async function refresh() {
     } catch { alertBar.style.display = 'none'; }
   } else { alertBar.style.display = 'none'; }
 
-  // Night window check (shared by Health + Storage cards)
-  var nowHour = new Date().getHours();
-  var isNight = nowHour >= 22 || nowHour < 8;
-
   // Health
   if (health) {
     const si = document.getElementById('status-indicator');

@@ -3224,8 +3224,8 @@ function vecSearch(queryEmbedding, limit = 10) {
 function vecSync() {
   if (!vecDb) return;
   try {
-    const vecCount = vecDb.prepare('SELECT count(*) as c FROM vec_entries').get().c;
-    const rows = dbQuery(`SELECT id, embedding FROM entries WHERE embedding IS NOT NULL AND id > ${vecCount} ORDER BY id;`);
+    const maxVecId = vecDb.prepare('SELECT COALESCE(MAX(rowid), 0) as m FROM vec_entries').get().m;
+    const rows = dbQuery(`SELECT id, embedding FROM entries WHERE embedding IS NOT NULL AND id > ${maxVecId} ORDER BY id LIMIT 1000;`);
     let synced = 0;
     for (const row of rows) {
       try {
