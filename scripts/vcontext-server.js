@@ -2697,16 +2697,27 @@ Event types: ${recentTopics.map(r => `${r.type}(${r.cnt})`).join(', ')}`;
     const topSkills = Object.entries(usageCounts).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([n, c]) => `${n}(${c})`).join(', ');
     const neverUsed = (existingSkills ? existingSkills.split(', ') : []).filter(s => !usageCounts[s]).slice(0, 5).join(', ');
 
-    const prompt = `Based on this user's activity and skill effectiveness data, suggest 1-2 NEW skills that would help them.
+    // Agent activity analysis
+    const agentActivity = dbQuery(`SELECT content FROM entries WHERE type = 'subagent-start' AND created_at >= datetime('now', '-24 hours') ORDER BY id DESC LIMIT 20;`);
+    const agentTasks = agentActivity.map(r => {
+      try { const d = JSON.parse(r.content); return d.description || ''; } catch { return ''; }
+    }).filter(Boolean).slice(0, 10);
+    const agentErrors = dbQuery(`SELECT COUNT(*) as cnt FROM entries WHERE type = 'tool-error' AND tags LIKE '%agent%' AND created_at >= datetime('now', '-24 hours');`);
 
-Activity (24h):
+    const prompt = `Based on user AND agent activity, suggest 1-2 NEW skills.
+
+User activity (24h):
 ${activitySummary}
+
+Agent tasks (24h): ${agentTasks.join('; ') || 'none'}
+Agent errors: ${agentErrors[0]?.cnt || 0}
 
 Most used skills: ${topSkills || 'none yet'}
 Never used skills: ${neverUsed || 'none'}
 Existing skills: ${existingSkills || 'standard set'}
 
-Focus on gaps: what patterns appear in the activity that NO existing skill covers?
+Focus on gaps: what patterns in user OR agent activity does NO existing skill cover?
+Consider: what skills would help agents work more autonomously?
 Do NOT suggest skills similar to never-used ones (they were not useful).
 Output ONLY the suggestion in 2-3 sentences. Be specific.`;
 
