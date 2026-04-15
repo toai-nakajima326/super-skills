@@ -148,8 +148,16 @@ async function recordEvent(eventName) {
       const data = JSON.parse(input);
       const prompt = data.prompt || data.content || data.message || '';
       if (prompt.length >= 5) {
-        // Skill routing: search vcontext for matching skills
-        const matched = await get(`/recall?q=${encodeURIComponent(prompt.slice(0, 100))}&type=skill-registry&limit=2`);
+        // Skill routing: hybrid search (FTS + semantic) for matching skills
+        let matched = await get(`/recall?q=${encodeURIComponent(prompt.slice(0, 100))}&type=skill-registry&limit=2`);
+        // Fallback to semantic search if FTS found nothing
+        if (!matched.results || matched.results.length === 0) {
+          matched = await get(`/search/semantic?q=${encodeURIComponent(prompt.slice(0, 200))}&limit=5&threshold=0.3`);
+          // Filter to skill-registry entries only
+          if (matched.results) {
+            matched.results = matched.results.filter(r => r.type === 'skill-registry');
+          }
+        }
         if (matched.results && matched.results.length > 0) {
           const lines = ['[super-skills] Matched skills:'];
           const matchedNames = [];
@@ -355,7 +363,11 @@ async function handleSubagentStart() {
   const prompt = description;
   if (prompt.length >= 5) {
     try {
-      const matched = await get(`/recall?q=${encodeURIComponent(prompt.slice(0, 100))}&type=skill-registry&limit=2`);
+      let matched = await get(`/recall?q=${encodeURIComponent(prompt.slice(0, 100))}&type=skill-registry&limit=2`);
+      if (!matched.results || matched.results.length === 0) {
+        matched = await get(`/search/semantic?q=${encodeURIComponent(prompt.slice(0, 200))}&limit=5&threshold=0.3`);
+        if (matched.results) matched.results = matched.results.filter(r => r.type === 'skill-registry');
+      }
       if (matched.results && matched.results.length > 0) {
         const lines = ['[super-skills:agent] Matched skills:'];
         for (const r of matched.results.slice(0, 2)) {

@@ -1016,7 +1016,7 @@ async function handleStore(req, res) {
  * GET /recall?q=keyword&type=conversation&limit=10
  * Searches all tiers: RAM → SSD → Cloud (if configured)
  */
-function handleRecall(req, res) {
+async function handleRecall(req, res) {
   const _startTime = Date.now();
   const auth = validateApiKey(req);
   if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
@@ -1084,6 +1084,31 @@ function handleRecall(req, res) {
     if (promoted.length > 0) {
       promoteToRam(promoted, 'cloud');
     }
+  }
+
+  // --- Semantic boost: if FTS returned few results, supplement with vector search ---
+  if (allResults.length < limit && mlxAvailable && vecDb) {
+    try {
+      const queryEmbed = await mlxEmbed(q.slice(0, 500));
+      if (queryEmbed && queryEmbed.length > 0) {
+        const vecResults = vecSearch(queryEmbed, limit * 2);
+        const vecIds = vecResults
+          .filter(v => v.distance < 2.0) // reasonable threshold
+          .map(v => v.rowid)
+          .filter(id => !allResults.some(r => r.id === id));
+        if (vecIds.length > 0) {
+          const needed = limit - allResults.length;
+          const idList = vecIds.slice(0, needed).join(',');
+          const typeFilter2 = type && isValidType(type) ? ` AND type = ${esc(type)}` : '';
+          const semanticRows = dbQuery(`SELECT *, 'semantic' as _match FROM entries WHERE id IN (${idList})${typeFilter2};`);
+          for (const row of semanticRows) {
+            row._tier = 'ram';
+            row._semantic = true;
+            allResults.push(row);
+          }
+        }
+      }
+    } catch {} // Non-fatal: semantic is a bonus
   }
 
   parseTags(allResults);
@@ -4220,7 +4245,7 @@ const server = createServer(async (req, res) => {
     if (method === 'POST' && path === '/store') {
       await handleStore(req, res);
     } else if (method === 'GET' && path === '/recall') {
-      handleRecall(req, res);
+      await handleRecall(req, res);
     } else if (method === 'GET' && path === '/recent') {
       handleRecent(req, res);
     } else if (method === 'GET' && path.startsWith('/session/')) {
