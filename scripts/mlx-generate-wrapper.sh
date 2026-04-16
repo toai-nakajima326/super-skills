@@ -1,18 +1,20 @@
 #!/bin/bash
-# MLX Generate Server wrapper — launched by launchd (com.vcontext.mlx-generate)
-# Custom server with clear_cache() every 5 calls + 6GB Metal cache limit
-# OpenAI-compatible API on port 3162
+# MLX Generate Server wrapper — vllm-mlx (replaces custom mlx-generate-server.py)
+# OpenAI-compatible API on port 3162 with continuous batching + Qwen3 reasoning parser
 
 set -euo pipefail
 
 export PATH="/Users/mitsuru_nakajima/.pyenv/versions/3.13.2/bin:$PATH"
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SERVER_PY="${SCRIPT_DIR}/mlx-generate-server.py"
-
 MODEL="${MLX_GENERATE_MODEL:-mlx-community/Qwen3-8B-4bit}"
 PORT="${MLX_GENERATE_PORT:-3162}"
 HOST="127.0.0.1"
 
-echo "[mlx-generate-wrapper] Starting MLX generate server: model=${MODEL} port=${PORT}"
-exec python3 "${SERVER_PY}" --model "${MODEL}" --port "${PORT}" --host "${HOST}" --cache-clear-interval 5
+echo "[mlx-generate-wrapper] Starting vllm-mlx: model=${MODEL} port=${PORT}"
+exec python3 -m vllm_mlx.server \
+  --model "${MODEL}" \
+  --port "${PORT}" \
+  --host "${HOST}" \
+  --reasoning-parser qwen3 \
+  --max-tokens 500 \
+  --continuous-batching
