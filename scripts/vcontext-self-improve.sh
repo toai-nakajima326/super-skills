@@ -15,6 +15,13 @@ cd "$SKILLS_DIR" || exit 1
 
 log "=== self-improve cycle ==="
 
+# Night window only (23:00-07:00) — avoid disrupting user during day
+HOUR=$(date +%H)
+if [[ "$HOUR" -lt 23 ]] && [[ "$HOUR" -ge 7 ]]; then
+  log "Daytime ($HOUR:00) — skipping (night window 23:00-07:00)"
+  exit 0
+fi
+
 # Exit if a previous proposal is still pending (one at a time)
 PENDING=$(sqlite3 "$RAM_DB" "SELECT COUNT(*) FROM entries WHERE type='pending-patch' AND json_extract(content,'\$.status') IN ('pending-review','testing');" 2>/dev/null)
 if [[ "${PENDING:-0}" -gt 0 ]]; then
@@ -22,7 +29,7 @@ if [[ "${PENDING:-0}" -gt 0 ]]; then
   exit 0
 fi
 
-# 1. Detect problems
+# 1. Find improvement opportunity (regression OR top-N slowest operation)
 REGRESSION=$(sqlite3 "$RAM_DB" "
 SELECT operation||':'||ROUND(AVG(latency_ms),0)||'ms' FROM api_metrics
 WHERE created_at > datetime('now','-1 hour')
@@ -30,8 +37,14 @@ GROUP BY operation
 HAVING AVG(latency_ms) > (SELECT AVG(latency_ms)*1.3 FROM api_metrics WHERE operation=api_metrics.operation AND created_at BETWEEN datetime('now','-7 days') AND datetime('now','-1 day'));
 " 2>/dev/null)
 
-[[ -z "$REGRESSION" ]] && log "No regressions detected" && exit 0
-log "Regression detected: $REGRESSION"
+# Even without regression, propose improvements for the slowest operation
+if [[ -z "$REGRESSION" ]]; then
+  SLOWEST=$(sqlite3 "$RAM_DB" "SELECT operation||':'||ROUND(AVG(latency_ms),0)||'ms' FROM api_metrics WHERE created_at > datetime('now','-6 hours') GROUP BY operation ORDER BY AVG(latency_ms) DESC LIMIT 1;" 2>/dev/null)
+  REGRESSION="$SLOWEST (proactive optimization)"
+  log "No regression — proactive mode, targeting: $SLOWEST"
+else
+  log "Regression detected: $REGRESSION"
+fi
 
 # 2. Research latest best practices
 SEARXNG_PORT=$(docker port searxng 8080 2>/dev/null | head -1 | cut -d: -f2)
