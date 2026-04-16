@@ -3727,19 +3727,12 @@ function handleAiStatus(req, res) {
   let embeddingBacklog = 0;       // 24h-recent eligible rows still missing embedding
   let embeddingEligibleTotal = 0; // total ELIGIBLE rows (denominator)
   try {
-    // Use SSD as the "complete catalog" denominator — every entry
-    // eventually migrates to SSD (it's the permanent store) so SSD
-    // count is the unique universe. Numerator = SSD embedded (since
-    // RAM rows also sync their embeddings to SSD on write).
-    const r2s = dbQuery(`SELECT count(*) as c FROM entries;`, SSD_DB_PATH);
-    embeddingEligibleTotal = r2s[0]?.c || 0;
-    const r1s = dbQuery(`SELECT count(*) as c FROM entries WHERE embedding IS NOT NULL;`, SSD_DB_PATH);
-    embeddingCount = r1s[0]?.c || 0;
-    // Backlog: all rows across both tiers still waiting on an embedding.
-    // (Not time-limited — "backlog" means everything unprocessed.)
-    const r3 = dbQuery(`SELECT count(*) as c FROM entries WHERE embedding IS NULL;`);
-    const r3s = dbQuery(`SELECT count(*) as c FROM entries WHERE embedding IS NULL;`, SSD_DB_PATH);
-    embeddingBacklog = (r3[0]?.c || 0) + (r3s[0]?.c || 0);
+    // Use RAM for speed — SSD queries are slow (63K+ rows)
+    const r1 = dbQuery(`SELECT count(*) as c FROM entries;`);
+    embeddingEligibleTotal = r1[0]?.c || 0;
+    const r2 = dbQuery(`SELECT count(*) as c FROM entries WHERE embedding IS NOT NULL;`);
+    embeddingCount = r2[0]?.c || 0;
+    embeddingBacklog = embeddingEligibleTotal - embeddingCount;
   } catch {}
 
   sendJson(res, 200, {
