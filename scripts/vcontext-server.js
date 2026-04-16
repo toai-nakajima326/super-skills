@@ -4930,6 +4930,81 @@ const server = createServer(async (req, res) => {
           });
         } finally { probe.close(); }
       } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'GET' && path === '/admin/pending-patches') {
+      // List pending patches awaiting user approval
+      try {
+        const rows = dbQuery(`SELECT id, content, created_at FROM entries WHERE type='pending-patch' AND tags LIKE '%pending-patch%' ORDER BY id DESC LIMIT 50;`);
+        const patches = rows.map(r => { try { return { id: r.id, created_at: r.created_at, ...JSON.parse(r.content) }; } catch { return { id: r.id }; } });
+        sendJson(res, 200, { patches, count: patches.length });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'POST' && path === '/admin/approve-patch') {
+      // Apply patch → test → reload. Auto-rollback on failure.
+      const body = await readBody(req);
+      const patchId = parseInt(body.id);
+      if (!patchId) return sendJson(res, 400, { error: 'id required' });
+      try {
+        const rows = dbQuery(`SELECT content FROM entries WHERE id=${patchId} AND type='pending-patch';`);
+        if (rows.length === 0) return sendJson(res, 404, { error: 'patch not found' });
+        const data = JSON.parse(rows[0].content);
+        const proposal = data.proposal || '';
+        // Parse FILE/LINE/BEFORE/AFTER from proposal
+        const fileMatch = proposal.match(/^FILE:\s*(.+)$/m);
+        const beforeMatch = proposal.match(/^BEFORE:\s*(.+)$/m);
+        const afterMatch = proposal.match(/^AFTER:\s*(.+)$/m);
+        if (!fileMatch || !beforeMatch || !afterMatch) {
+          return sendJson(res, 400, { error: 'patch format invalid' });
+        }
+        const fs = require('node:fs');
+        const path = require('node:path');
+        const file = path.join(process.env.HOME, 'skills', fileMatch[1].trim());
+        const before = beforeMatch[1].trim();
+        const after = afterMatch[1].trim();
+        const original = fs.readFileSync(file, 'utf-8');
+        if (!original.includes(before)) {
+          dbExec(`UPDATE entries SET content = ${esc(JSON.stringify({...data, status: 'rejected-no-match'}))} WHERE id = ${patchId};`);
+          return sendJson(res, 400, { error: 'BEFORE text not found in file', file });
+        }
+        // Create git branch, apply, test, reload
+        execSync(`cd ~/skills && git checkout -b patch-${patchId} 2>/dev/null || git checkout patch-${patchId}`, { stdio: 'ignore' });
+        const patched = original.replace(before, after);
+        fs.writeFileSync(file, patched, 'utf-8');
+        // Syntax test
+        let testOk = false;
+        try {
+          execSync(`node -c ${file}`, { stdio: 'ignore' });
+          testOk = true;
+        } catch { testOk = false; }
+        if (!testOk) {
+          fs.writeFileSync(file, original, 'utf-8');
+          execSync(`cd ~/skills && git checkout main && git branch -D patch-${patchId}`, { stdio: 'ignore' });
+          dbExec(`UPDATE entries SET content = ${esc(JSON.stringify({...data, status: 'rejected-test-failed'}))} WHERE id = ${patchId};`);
+          return sendJson(res, 500, { error: 'syntax test failed, rolled back' });
+        }
+        // Commit, merge, reload
+        execSync(`cd ~/skills && git add -A && git commit -m "self-improve: patch ${patchId} (user-approved)" && git checkout main && git merge patch-${patchId} && git branch -d patch-${patchId}`, { stdio: 'ignore' });
+        execSync(`bash ~/skills/scripts/vcontext-reload.sh`, { stdio: 'ignore' });
+        dbExec(`UPDATE entries SET content = ${esc(JSON.stringify({...data, status: 'applied', applied_at: new Date().toISOString()}))} WHERE id = ${patchId};`);
+        sendJson(res, 200, { applied: true, patchId });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'POST' && path === '/admin/reject-patch') {
+      const body = await readBody(req);
+      const patchId = parseInt(body.id);
+      if (!patchId) return sendJson(res, 400, { error: 'id required' });
+      try {
+        const rows = dbQuery(`SELECT content FROM entries WHERE id=${patchId};`);
+        if (rows.length === 0) return sendJson(res, 404, { error: 'not found' });
+        const data = JSON.parse(rows[0].content);
+        dbExec(`UPDATE entries SET content = ${esc(JSON.stringify({...data, status: 'rejected', rejected_at: new Date().toISOString()}))} WHERE id = ${patchId};`);
+        sendJson(res, 200, { rejected: true, patchId });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'POST' && path === '/admin/rollback-last') {
+      // Rollback last self-improve commit
+      try {
+        execSync(`cd ~/skills && git log --oneline -1 | grep -q 'self-improve'`, { stdio: 'ignore' });
+        execSync(`cd ~/skills && git reset --hard HEAD~1`, { stdio: 'ignore' });
+        execSync(`bash ~/skills/scripts/vcontext-reload.sh`, { stdio: 'ignore' });
+        sendJson(res, 200, { rolled_back: true });
+      } catch (e) { sendJson(res, 500, { error: e.message || 'no self-improve commit to rollback' }); }
     } else if (method === 'GET' && path === '/pipeline/health') {
       // Per-feature heartbeat derived from entry recency — in a loosely
       // coupled AI OS, silent degradation is the biggest risk. This
