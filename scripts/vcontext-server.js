@@ -2638,7 +2638,7 @@ async function startEmbedLoop() {
     try {
       // Batch of 10 — uses MLX /embed_batch endpoint. ~10x throughput
       // with only ~80MB peak memory increase.
-      const BATCH = 2; // batch 2 + clear_cache every call
+      const BATCH = 3; // batch 3 + clear_cache every call
       const rows = dbQuery(`SELECT id, content FROM entries WHERE embedding IS NULL ORDER BY id ASC LIMIT ${BATCH};`);
       if (rows.length === 0) {
         await new Promise(r => setTimeout(r, 30000));
