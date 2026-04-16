@@ -2822,12 +2822,22 @@ async function runOneDiscovery() {
   // ── 1. Skill discovery: multi-direction search ──
   // Rotate through categories + activity-based topic each cycle
   const DISCOVERY_CATEGORIES = [
+    // AI developer news & papers (daily check)
+    'Anthropic Claude new release announcement',
+    'OpenAI GPT new model release',
+    'Apple MLX framework update release',
+    'Qwen Alibaba new model release',
+    'arxiv AI agent paper breakthrough',
+    // Technical patterns
     'Claude Code skills best practices',
     'AI coding agent workflow patterns',
     'MCP server new tools',
     'agentic orchestration patterns',
     'AI agent quality assurance',
     'AI pair programming techniques',
+    // Ecosystem
+    'MLX embedding optimization Apple Silicon',
+    'local LLM inference optimization',
   ];
   try {
     // Pick category by rotation (cycle through all directions)
