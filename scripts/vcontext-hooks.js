@@ -1401,6 +1401,51 @@ function summarize(entry) {
 // `eventName` carries the actual hook kind (user-prompt | pre-tool |
 // tool-use | tool-error | subagent-start) so entries keep their real
 // type — previously everything was lumped as 'subagent-start'.
+// ── User prompt: record + skill routing + gap detection from conversation ──
+async function handleUserPrompt() {
+  const input = await readStdin();
+  const sessionId = extractSessionId(input);
+
+  // 1. Record
+  await recordEvent('user-prompt');
+
+  // 2. Parse prompt
+  let prompt = '';
+  try {
+    const data = JSON.parse(input);
+    prompt = data.prompt || data.content || data.message || '';
+  } catch {}
+
+  // 3. Skill routing (same as before)
+  if (prompt.length >= 5) {
+    const { lines, matchedNames } = await routeSkills(prompt, sessionId);
+    if (lines.length > 0) process.stdout.write(lines.join('\n') + '\n');
+  }
+
+  // 4. Predictive search
+  if (prompt.length >= 15) {
+    post('/predictive-search', { prompt: prompt.slice(0, 500), session: sessionId }).catch(() => {});
+  }
+
+  // 5. Conversation-based skill gap detection
+  // Detect user needs/frustrations that indicate missing capabilities
+  const needPatterns = [
+    /できない|できてない|足りない|ない機能|欲しい|追加して|必要|改善/,
+    /can't|missing|need|want|add.*feature|improve|broken|doesn't work/i,
+    /もっと速く|遅い|重い|不安定|ハング|クラッシュ/,
+    /how to|やり方|方法|解決/,
+  ];
+  const hasNeed = needPatterns.some(p => p.test(prompt));
+  if (hasNeed && prompt.length >= 10) {
+    post('/store', {
+      type: 'skill-gap',
+      content: JSON.stringify({ prompt: prompt.slice(0, 500), source: 'conversation', at: new Date().toISOString() }),
+      tags: ['skill-gap', 'conversation-detected'],
+      session: sessionId,
+    }).catch(() => {});
+  }
+}
+
 async function handleSubagentStart(eventName = 'subagent-start') {
   const input = await readStdin();
   const sessionId = extractSessionId(input);
@@ -2322,9 +2367,13 @@ const [command, ...args] = process.argv.slice(2);
 switch (command) {
   // Hook events — all go through the universal recorder
   case 'user-prompt':
+    handleUserPrompt().catch(() => process.exit(0));
+    break;
   case 'pre-tool':
   case 'tool-use':
   case 'tool-error':
+    recordEvent(command).catch(() => process.exit(0));
+    break;
   case 'subagent-start':
     handleSubagentStart(command).catch(() => process.exit(0));
     break;
