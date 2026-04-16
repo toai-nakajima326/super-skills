@@ -1412,7 +1412,7 @@ function handleSession(req, res) {
   if (!sessionId) {
     return sendJson(res, 400, { error: 'Missing session ID' });
   }
-  const limit = Math.min(parseInt(params.limit) || 100, 10000);
+  const limit = Math.min(parseInt(params.limit) || 100, 500);
   const offset = parseInt(params.offset) || 0;
   const type = params.type;
   const typeFilter = type && isValidType(type) ? ` AND type = ${esc(type)}` : '';
