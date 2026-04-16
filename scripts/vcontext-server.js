@@ -3102,6 +3102,8 @@ Existing skills (do NOT duplicate): ${existingSkills.join(', ')}
 
 Output in this EXACT format (nothing else):
 SKILL_NAME: kebab-case-name
+ROUTE_KEYWORDS: keyword1, keyword2, keyword3 (3-5 trigger words for auto-routing)
+ROUTE_PRIORITY: P2-P7 (where it fits in routing: P2=debug, P3=plan, P4=review, P5=dev, P6=patterns, P7=research)
 ---
 name: kebab-case-name
 description: "One line description starting with Use when..."
@@ -3129,6 +3131,10 @@ origin: auto-generated
       const nameMatch = generated.match(/SKILL_NAME:\s*([a-z0-9-]+)/);
       if (!nameMatch) continue;
       const skillName = nameMatch[1];
+      const keywordsMatch = generated.match(/ROUTE_KEYWORDS:\s*(.+)/);
+      const priorityMatch = generated.match(/ROUTE_PRIORITY:\s*(P[0-7])/);
+      const routeKeywords = keywordsMatch ? keywordsMatch[1].trim() : skillName.replace(/-/g, ', ');
+      const routePriority = priorityMatch ? priorityMatch[1] : 'P7';
 
       if (existingSkills.includes(skillName)) {
         console.log(`[vcontext:skill] Skipped "${skillName}" — already exists`);
@@ -3136,17 +3142,16 @@ origin: auto-generated
         continue;
       }
 
-      // All skills are created (usage-based ranking handles quality later)
-      console.log(`[vcontext:skill] Creating "${skillName}"`);
+      console.log(`[vcontext:skill] Creating "${skillName}" route=${routePriority}(${routeKeywords})`);
 
       const skillContent = generated.slice(generated.indexOf('---'));
       if (!skillContent || skillContent.length < 50) continue;
 
-      // Register in vcontext ONLY (no filesystem — super-skills is the only deployed skill)
+      // Register in vcontext with routing info (auto-router compatible)
       const descMatch = skillContent.match(/description:\s*["']?(.*?)(?:["']?\n|$)/s);
       const desc = descMatch ? descMatch[1].trim().slice(0, 200) : '';
       try {
-        dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES ('skill-registry', ${esc(JSON.stringify({ name: skillName, description: desc, full_content: skillContent }))}, ${esc(JSON.stringify(['skill-registry', 'skill:' + skillName]))}, 'system', ${estimateTokens(skillContent)}, datetime('now'), 0, 'ram');`);
+        dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES ('skill-registry', ${esc(JSON.stringify({ name: skillName, description: desc, full_content: skillContent, route_keywords: routeKeywords, route_priority: routePriority }))}, ${esc(JSON.stringify(['skill-registry', 'skill:' + skillName, 'route:' + routePriority]))}, 'system', ${estimateTokens(skillContent)}, datetime('now'), 0, 'ram');`);
       } catch {}
 
       // Mark suggestion as processed
