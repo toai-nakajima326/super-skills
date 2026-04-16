@@ -1437,10 +1437,18 @@ async function handleUserPrompt() {
   ];
   const hasNeed = needPatterns.some(p => p.test(prompt));
   if (hasNeed && prompt.length >= 10) {
+    // Store gap
     post('/store', {
       type: 'skill-gap',
       content: JSON.stringify({ prompt: prompt.slice(0, 500), source: 'conversation', at: new Date().toISOString() }),
       tags: ['skill-gap', 'conversation-detected'],
+      session: sessionId,
+    }).catch(() => {});
+    // Immediately queue skill suggestion (don't wait 30min discovery loop)
+    post('/store', {
+      type: 'skill-suggestion',
+      content: JSON.stringify({ suggestion: prompt.slice(0, 300), source: 'realtime-gap', at: new Date().toISOString() }),
+      tags: ['skill-suggestion', 'auto', 'realtime'],
       session: sessionId,
     }).catch(() => {});
   }
