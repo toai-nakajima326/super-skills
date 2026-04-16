@@ -4,6 +4,43 @@ Auto-maintained by the `self-evolve` skill. Records all upstream syncs, web disc
 
 ---
 
+## 2026-04-16 — web-discovery
+
+**Search window**: 2026-04-15 → 2026-04-16
+**Queries executed**: 11
+**New sources checked**: 18 (WebFetch deep dives: 4 pages)
+**Candidates found**: 4 | **Adopted**: 1 | **Skipped**: 3 | **Flagged**: 0
+
+### Upstream Sync: skipped
+- **Reasoning**: All 19 changed files show our local ahead of upstream (our extensions — MCP 2026 content, eval-driven-dev, etc. — not present in upstream). No upstream content to adopt. Same situation as 2026-04-15.
+
+### Action: created — claude-routines
+- **Source**: Official Anthropic documentation (code.claude.com/docs/en/routines), SiliconAngle/9to5Mac/The Register — all from April 14, 2026 launch
+- **Reasoning**: Brand-new Anthropic platform feature (launched April 14, 2026, research preview). Three trigger types: scheduled (hourly/daily/weekly), API (HTTP POST endpoint with bearer token), GitHub events (pull_request, release). Runs on Anthropic-managed cloud infrastructure — keeps running when laptop is closed. This is distinct from our existing `schedule` skill (which uses CCD session RemoteTrigger/CronCreate tools). No overlap with existing skills. Novel, proven (official docs), safe, actionable as a workflow skill.
+- **Changes**: Created `skills/claude-routines/SKILL.md` with: trigger type comparison table, CLI/web/API creation workflows, autonomous prompt template, 6 use case examples, safety scope checklist, plan limits table. Added to `install-components.json`. Added to `super-skills` routing at P5 (dev): `claude-routines(automate/routine/schedule cloud/GitHub trigger)`. Registered in vcontext skill-registry (id=110202). Also back-registered `eval-driven-dev` (id=110205) which was created yesterday but not in vcontext registry.
+- **Risk assessment**: low — new skill, no modification to existing skills
+
+### Skipped: durable-execution patterns
+- **Reasoning**: Fault-tolerant step-based agent workflows (Cloudflare Workflows v2, Temporal, AWS Durable Functions). Multi-source confirmed but not actionable as a SKILL.md workflow — it's infrastructure guidance for platform engineers. Requires specific platform choices (Temporal, Cloudflare Workers) that are too implementation-specific for a generic skill.
+
+### Skipped: agent-memory improvements
+- **Reasoning**: File-based memory with consolidation, shared learnings.md, episodic-to-semantic conversion patterns. Our existing `agent-memory` skill already covers AGENTS.md-based institutional memory. The new patterns (periodic consolidation, curator-only writes) are interesting but not differentiated enough from what we have to justify a new skill or major update.
+
+### Skipped: Hermes Agent self-evolution
+- **Reasoning**: NousResearch Hermes Agent v0.7.0 (April 15, 2026) — writes reusable SKILL.md files to SQLite after each task, searches memory for similar future tasks. Interesting self-evolution approach, but this is a separate framework pattern, not a SKILL.md workflow applicable to our system. Our vcontext skill-registry already implements a similar recall-and-reuse pattern.
+
+### Step 3: Local AI Model Maintenance
+- **MLX generate**: Qwen3-8B-4bit — confirmed available and healthy (mlx_generate_available: true)
+- **MLX embed**: CoreML available (coreml_available: true)
+- **Decision**: No model changes this run — same status as yesterday, stable
+
+### Step 4: Hook Auto-Setup
+- **Detected tools**: Claude Code, Codex, Cursor, Kiro
+- **Result**: Claude Code already configured; Codex hooks.json refreshed (backed up previous); Cursor and Kiro hooks updated
+- **No new tools detected** since last run
+
+---
+
 ## 2026-04-15 — web-discovery
 
 **Search window**: 2026-04-14 → 2026-04-15
