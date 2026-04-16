@@ -3628,18 +3628,17 @@ function trackMlxUsage(caller, promptTokens, completionTokens) {
 }
 
 function mlxGenerateOnce(prompt, options = {}) {
+  return withMlxLock(() => _mlxGenerateRaw(prompt, options));
+}
+function _mlxGenerateRaw(prompt, options = {}) {
   return new Promise((resolve, reject) => {
-    // Qwen3 emits <think>...</think> before the real answer. When
-    // max_tokens is hit mid-think, the real answer never appears.
-    // Set to Qwen3's full config ceiling (40,960 = prompt 8,192 +
-    // output 32,768) so slow thinking is never truncated.
-    // User explicitly prefers stability over speed.
-    // Reproducibility: caller may pass a seed to force deterministic
-    // generation (debug + replay). Temperature 0 + seed = bitwise repro.
+    // max_tokens capped at 500 — higher values (40960) hog GPU for minutes
+    // and block embed loop. Qwen3 thinking mode uses ~200 tokens for think,
+    // leaving ~300 for actual content. Sufficient for summarization tasks.
     const body = JSON.stringify({
       model: MLX_GENERATE_MODEL,
       messages: [{ role: 'user', content: prompt }],
-      max_tokens: options.maxTokens || 40960,
+      max_tokens: Math.min(options.maxTokens || 500, 1000),
       temperature: options.temperature ?? 0.3,
       ...(options.seed != null ? { seed: options.seed } : {}),
     });
