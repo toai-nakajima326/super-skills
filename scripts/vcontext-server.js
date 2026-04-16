@@ -815,12 +815,32 @@ function readBody(req) {
 }
 
 function sendJson(res, status, data) {
-  const body = JSON.stringify(data, null, 2);
-  res.writeHead(status, {
-    'Content-Type': 'application/json',
-    'Content-Length': Buffer.byteLength(body),
-  });
-  res.end(body);
+  // If data has results array, stream it to avoid building huge string in memory
+  if (data.results && Array.isArray(data.results) && data.results.length > 500) {
+    res.writeHead(status, { 'Content-Type': 'application/json', 'Transfer-Encoding': 'chunked' });
+    // Write opening: everything except results array
+    const { results, ...meta } = data;
+    const metaStr = JSON.stringify(meta);
+    // Insert results array into the JSON stream
+    res.write(metaStr.slice(0, -1) + ',"results":[');
+    for (let i = 0; i < results.length; i++) {
+      if (i > 0) res.write(',');
+      res.write(JSON.stringify(results[i]));
+    }
+    res.write(']}');
+    res.end();
+    return;
+  }
+  // Normal path for small responses
+  try {
+    const body = JSON.stringify(data);
+    res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+    res.end(body);
+  } catch (e) {
+    console.error(`[sendJson] ${e.message?.slice(0, 60)}`);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Serialization failed' }));
+  }
 }
 
 function parseQuery(url) {
@@ -1412,7 +1432,7 @@ function handleSession(req, res) {
   if (!sessionId) {
     return sendJson(res, 400, { error: 'Missing session ID' });
   }
-  const limit = Math.min(parseInt(params.limit) || 100, 500);
+  const limit = parseInt(params.limit) || 100; // no max cap — pagination handles scaling
   const offset = parseInt(params.offset) || 0;
   const type = params.type;
   const typeFilter = type && isValidType(type) ? ` AND type = ${esc(type)}` : '';
@@ -1444,6 +1464,7 @@ function handleSession(req, res) {
     session: sessionId,
     results: allRows,
     count: allRows.length,
+    truncated,
     total,
     limit,
     offset,
