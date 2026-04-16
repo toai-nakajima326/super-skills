@@ -1412,28 +1412,43 @@ function handleSession(req, res) {
   if (!sessionId) {
     return sendJson(res, 400, { error: 'Missing session ID' });
   }
-  const limit = Math.min(parseInt(params.limit) || 100, 500); // default 100, max 500
+  const limit = Math.min(parseInt(params.limit) || 100, 10000);
+  const offset = parseInt(params.offset) || 0;
+  const type = params.type;
+  const typeFilter = type && isValidType(type) ? ` AND type = ${esc(type)}` : '';
 
-  // Search RAM
-  const ramRows = dbQuery(`SELECT * FROM entries WHERE session = ${esc(sessionId)} ORDER BY created_at DESC LIMIT ${limit};`);
+  // Count total for this session (fast — uses idx_entries_session_id)
+  const totalRows = dbQuery(`SELECT COUNT(*) as c FROM entries WHERE session = ${esc(sessionId)}${typeFilter};`);
+  const total = totalRows[0]?.c || 0;
+
+  // Search RAM with pagination
+  const ramRows = dbQuery(`SELECT * FROM entries WHERE session = ${esc(sessionId)}${typeFilter} ORDER BY id DESC LIMIT ${limit} OFFSET ${offset};`);
   for (const r of ramRows) r._tier = 'ram';
-  touchEntries(ramRows.map(r => r.id), DB_PATH);
+  if (ramRows.length > 0) touchEntries(ramRows.map(r => r.id), DB_PATH);
 
-  // Search SSD
+  // SSD only if RAM didn't fill the page
   let ssdRows = [];
-  if (existsSync(SSD_DB_PATH)) {
+  if (ramRows.length < limit && existsSync(SSD_DB_PATH)) {
+    const ssdOffset = Math.max(0, offset - total); // adjust offset for SSD
+    const ssdLimit = limit - ramRows.length;
     try {
-      ssdRows = dbQuery(`SELECT * FROM entries WHERE session = ${esc(sessionId)} ORDER BY created_at DESC LIMIT ${limit};`, SSD_DB_PATH);
+      ssdRows = dbQuery(`SELECT * FROM entries WHERE session = ${esc(sessionId)}${typeFilter} ORDER BY id DESC LIMIT ${ssdLimit} OFFSET ${ssdOffset};`, SSD_DB_PATH);
       for (const r of ssdRows) r._tier = 'ssd';
-      touchEntries(ssdRows.map(r => r.id), SSD_DB_PATH);
-    } catch { /* ignore */ }
+    } catch {}
   }
 
   const allRows = [...ramRows, ...ssdRows];
-  allRows.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
   parseTags(allRows);
 
-  sendJson(res, 200, { session: sessionId, results: allRows, count: allRows.length });
+  sendJson(res, 200, {
+    session: sessionId,
+    results: allRows,
+    count: allRows.length,
+    total,
+    limit,
+    offset,
+    has_more: offset + allRows.length < total,
+  });
 }
 
 /**
