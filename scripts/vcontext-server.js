@@ -980,7 +980,7 @@ async function handleStore(req, res) {
       try {
         const summary = await mlxGenerate(
           `Summarize this in one sentence (max 50 words). Output ONLY the summary, nothing else:\n\n${content.slice(0, 2000)}`,
-          { maxTokens: 4000 }
+          { maxTokens: 40960 }
         );
         if (summary && summary.length > 5) {
           dbExec(`UPDATE entries SET reasoning = ${esc(summary.trim())} WHERE id = ${entry.id} AND reasoning IS NULL;`);
@@ -1089,7 +1089,7 @@ async function handleStore(req, res) {
             if (mlxGenerateAvailable) {
               setImmediate(async () => {
                 try {
-                  const aiResponse = await mlxGenerate(basePrompt, { maxTokens: 4000, temperature: 0.1 });
+                  const aiResponse = await mlxGenerate(basePrompt, { maxTokens: 40960, temperature: 0.1 });
                   if (aiResponse) {
                     try {
                       const aiParsed = JSON.parse(aiResponse);
@@ -2909,7 +2909,7 @@ Recent questions: ${sanitizeForExternalSearch(promptStr || 'general development'
 Agent tasks: ${sanitizeForExternalSearch(agentStr || 'code review, testing')}
 
 Search query:`;
-          const generated = await mlxGenerate(topicPrompt, { maxTokens: 4000, temperature: 0.7 });
+          const generated = await mlxGenerate(topicPrompt, { maxTokens: 40960, temperature: 0.7 });
           if (generated && generated.length > 5) {
             topic = sanitizeForExternalSearch(generated.trim().split('\n')[0]);
           }
@@ -2975,7 +2975,7 @@ async function runOnePrediction() {
         const triggerPrompt = `Given these user prompts that matched NO skill:\n${gaps.map(g => `- "${g}"`).join('\n')}\n\nFor each prompt, output 2-3 Japanese/English keywords (pipe-separated) that would identify similar future prompts. Format: one line per prompt, keywords only.\nExample: 改善|improve|better`;
         // Queue normally — serial queue ensures it runs when MLX is free.
         // No bypass, no retry loop, no fighting for immediate access.
-        const triggerOut = await mlxGenerate(triggerPrompt, { maxTokens: 4000, temperature: 0.2, caller: 'auto-trigger', priority: 0 });
+        const triggerOut = await mlxGenerate(triggerPrompt, { maxTokens: 40960, temperature: 0.2, caller: 'auto-trigger', priority: 0 });
         if (triggerOut && triggerOut.length > 5) {
           const lines = triggerOut.trim().split('\n').filter(l => l.includes('|'));
           for (const line of lines.slice(0, 5)) {
@@ -3052,7 +3052,7 @@ Consider: what skills would help agents work more autonomously?
 Do NOT suggest skills similar to never-used ones (they were not useful).
 Output ONLY the suggestion in 2-3 sentences. Be specific.`;
 
-    const suggestion = await mlxGenerate(prompt, { maxTokens: 4000, temperature: 0.5, caller: 'skill-suggestion', priority: 0 });
+    const suggestion = await mlxGenerate(prompt, { maxTokens: 40960, temperature: 0.5, caller: 'skill-suggestion', priority: 0 });
     if (suggestion && suggestion.length > 20) {
       const content = JSON.stringify({
         activity: activitySummary,
@@ -3122,7 +3122,7 @@ origin: auto-generated
 
 - First gotcha`;
 
-      const generated = await mlxGenerate(genPrompt, { maxTokens: 12000, temperature: 0.3, caller: 'skill-creation', priority: 0 });
+      const generated = await mlxGenerate(genPrompt, { maxTokens: 40960, temperature: 0.3, caller: 'skill-creation', priority: 0 });
       await new Promise(r => setTimeout(r, 30000));
       if (!generated || generated.length < 50) continue;
 
@@ -3849,7 +3849,7 @@ async function handleAiSummarize(req, res) {
     const rows = dbQuery(`SELECT id, content FROM entries WHERE reasoning IS NULL AND created_at < datetime('now', '-1 day') LIMIT 20;`);
     for (const row of rows) {
       try {
-        const summary = await mlxGenerate(`Summarize in one sentence (max 50 words):\n\n${row.content.slice(0, 2000)}`, { maxTokens: 4000 });
+        const summary = await mlxGenerate(`Summarize in one sentence (max 50 words):\n\n${row.content.slice(0, 2000)}`, { maxTokens: 40960 });
         if (summary) dbExec(`UPDATE entries SET reasoning = ${esc(summary.trim())} WHERE id = ${row.id};`);
       } catch {}
     }
@@ -3862,7 +3862,7 @@ async function handleAiSummarize(req, res) {
     const rows = dbQuery(`SELECT content FROM entries WHERE id = ${id};`);
     if (rows[0]) {
       try {
-        const summary = await mlxGenerate(`Summarize in one sentence (max 50 words):\n\n${rows[0].content.slice(0, 2000)}`, { maxTokens: 4000 });
+        const summary = await mlxGenerate(`Summarize in one sentence (max 50 words):\n\n${rows[0].content.slice(0, 2000)}`, { maxTokens: 40960 });
         if (summary) { dbExec(`UPDATE entries SET reasoning = ${esc(summary.trim())} WHERE id = ${id};`); count++; }
       } catch {}
     }
@@ -4275,7 +4275,7 @@ ${latestPractices ? `Latest best practices from web (2026):\n${latestPractices}\
 List ONLY the violations found (omissions). If none, say "NONE".
 Be specific about what was missed.`;
 
-      const violations = await mlxGenerate(checkPrompt, { maxTokens: 4000, temperature: 0.2 });
+      const violations = await mlxGenerate(checkPrompt, { maxTokens: 40960, temperature: 0.2 });
       if (!violations || violations.trim() === 'NONE' || violations.length < 10) {
         console.log('[vcontext:check] Completion check passed');
         return;
@@ -4294,7 +4294,7 @@ Be specific about what was missed.`;
       const rulePrompt = `Based on this violation, write a short MANDATORY RULE (1-2 sentences) to prevent it from happening again. Output ONLY the rule text.
 
 Violation: ${violations.trim().slice(0, 300)}`;
-      const newRule = await mlxGenerate(rulePrompt, { maxTokens: 4000, temperature: 0.2 });
+      const newRule = await mlxGenerate(rulePrompt, { maxTokens: 40960, temperature: 0.2 });
       if (newRule && newRule.length > 20) {
         // Check if a similar rule already exists
         const existing = dbQuery(`SELECT id FROM entries WHERE type = 'decision' AND content LIKE ${esc('%' + newRule.trim().slice(0, 30) + '%')} AND tags LIKE '%global-rule%' LIMIT 1;`);
@@ -4347,7 +4347,7 @@ Keywords:`;
       // to the user's prompt words so the pipeline keeps moving.
       let keywordsRaw = '';
       try {
-        keywordsRaw = await mlxGenerate(keywordPrompt, { maxTokens: 4000, temperature: 0.1 });
+        keywordsRaw = await mlxGenerate(keywordPrompt, { maxTokens: 40960, temperature: 0.1 });
       } catch (e) {
         console.error(`[vcontext:predict] mlxGenerate failed: ${e.message}`);
       }
@@ -4422,7 +4422,7 @@ Keywords:`;
       try {
         const bgPrompt = `List 3 key technical facts or best practices about: ${sanitized}
 Output as a numbered list. Be specific and actionable. Max 100 words.`;
-        const bgKnowledge = await mlxGenerate(bgPrompt, { maxTokens: 4000, temperature: 0.3 });
+        const bgKnowledge = await mlxGenerate(bgPrompt, { maxTokens: 40960, temperature: 0.3 });
         if (bgKnowledge && bgKnowledge.length > 20) {
           parts.push(`[knowledge] ${bgKnowledge.trim()}`);
         }
@@ -4771,7 +4771,7 @@ const server = createServer(async (req, res) => {
         // Different temperature per tier as a stand-in for real model differentiation.
         const tempByTier = { haiku: 0.1, sonnet: 0.3, opus: 0.5 };
         const out = await mlxGenerate(body.prompt || '', {
-          maxTokens: body.maxTokens || 4000,
+          maxTokens: body.maxTokens || 40960,
           temperature: tempByTier[tier] ?? 0.3,
           caller: `federation:${tier}`,
         });
@@ -4785,7 +4785,7 @@ const server = createServer(async (req, res) => {
       const responses = [];
       for (let i = 0; i < n; i++) {
         try {
-          const r = await mlxGenerate(body.prompt || '', { maxTokens: 4000, temperature: 0.4, seed: 1000 + i, caller: 'vote' });
+          const r = await mlxGenerate(body.prompt || '', { maxTokens: 40960, temperature: 0.4, seed: 1000 + i, caller: 'vote' });
           responses.push(r.trim());
         } catch (e) { responses.push(`__error__: ${e.message}`); }
       }
@@ -4875,7 +4875,7 @@ const server = createServer(async (req, res) => {
       // Reproducibility / debug endpoint — calls mlxGenerate with a seed.
       const body = await readBody(req);
       try {
-        const out = await mlxGenerate(body.prompt || '', { maxTokens: 4000, temperature: 0, seed: body.seed, caller: 'repro' });
+        const out = await mlxGenerate(body.prompt || '', { maxTokens: 40960, temperature: 0, seed: body.seed, caller: 'repro' });
         sendJson(res, 200, { content: out, seed: body.seed });
       } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'GET' && path === '/metrics/cost') {
