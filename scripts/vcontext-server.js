@@ -271,6 +271,14 @@ function migrateRamSchema() {
     dbExec("PRAGMA busy_timeout=5000;");
   } catch {}
 
+  // Performance indexes on entries (idempotent, zero downtime)
+  try {
+    dbExec(`CREATE INDEX IF NOT EXISTS idx_entries_embedding_null ON entries(id) WHERE embedding IS NULL;`);
+    dbExec(`CREATE INDEX IF NOT EXISTS idx_entries_type_created ON entries(type, created_at DESC);`);
+    dbExec(`CREATE INDEX IF NOT EXISTS idx_entries_session_id ON entries(session, id DESC);`);
+    dbExec("ANALYZE;");
+  } catch {}
+
   // Add tiered-storage columns if they do not already exist.
   // SQLite does not support ADD COLUMN IF NOT EXISTS, so we check
   // the table_info pragma first.

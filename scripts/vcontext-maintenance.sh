@@ -111,5 +111,32 @@ while [ "${TOTAL_BYTES:-0}" -gt "$CAP_BYTES" ]; do
   TOTAL_BYTES=$(du -sk "$SNAP_DIR" 2>/dev/null | awk '{print $1 * 1024}')
 done
 
+# 9. Auto-tuning — ensure indexes exist, ANALYZE for query planner, periodic VACUUM
+DB_RAM="/Volumes/VContext/vcontext.db"
+DB_SSD="$HOME/skills/data/vcontext-ssd.db"
+for DB in "$DB_RAM" "$DB_SSD"; do
+  [ -f "$DB" ] || continue
+  # Ensure critical indexes (idempotent)
+  sqlite3 "$DB" "
+    CREATE INDEX IF NOT EXISTS idx_entries_embedding_null ON entries(id) WHERE embedding IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_entries_type_created ON entries(type, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_entries_session_id ON entries(session, id DESC);
+  " 2>/dev/null
+  # ANALYZE — update query planner statistics (fast, ~100ms)
+  sqlite3 "$DB" "ANALYZE;" 2>/dev/null
+  log "Auto-tune $(basename $DB): indexes ensured, ANALYZE done"
+done
+# Weekly VACUUM (Sunday only) — reclaim space, defragment
+if [ "$(date +%u)" = "7" ] && [ ! -f "/tmp/vcontext-vacuum-$(date +%Y-%V).done" ]; then
+  for DB in "$DB_RAM" "$DB_SSD"; do
+    [ -f "$DB" ] || continue
+    SIZE_BEFORE=$(stat -f%z "$DB" 2>/dev/null)
+    sqlite3 "$DB" "VACUUM;" 2>/dev/null
+    SIZE_AFTER=$(stat -f%z "$DB" 2>/dev/null)
+    log "VACUUM $(basename $DB): ${SIZE_BEFORE}→${SIZE_AFTER} bytes"
+  done
+  touch "/tmp/vcontext-vacuum-$(date +%Y-%V).done"
+fi
+
 log "=== cycle done ==="
 # hook verification Wed Apr 15 13:21:13 JST 2026
