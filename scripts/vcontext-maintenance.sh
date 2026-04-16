@@ -138,6 +138,28 @@ if [ "$(date +%u)" = "7" ] && [ ! -f "/tmp/vcontext-vacuum-$(date +%Y-%V).done" 
   touch "/tmp/vcontext-vacuum-$(date +%Y-%V).done"
 fi
 
+# 9.5. Performance regression detection
+# Compare last-hour metrics vs 7-day baseline. Alert if >30% slower.
+PERF_LOG="$SKILLS_DIR/data/perf-baseline.jsonl"
+mkdir -p "$(dirname "$PERF_LOG")"
+CURRENT_PERF=$(sqlite3 "$DB_RAM" "SELECT operation, ROUND(AVG(latency_ms),0) FROM api_metrics WHERE created_at > datetime('now','-1 hour') GROUP BY operation;" 2>/dev/null)
+BASELINE_PERF=$(sqlite3 "$DB_RAM" "SELECT operation, ROUND(AVG(latency_ms),0) FROM api_metrics WHERE created_at BETWEEN datetime('now','-7 days') AND datetime('now','-1 day') GROUP BY operation;" 2>/dev/null)
+# Store current snapshot
+echo "$(date +%s)|$CURRENT_PERF" >> "$PERF_LOG"
+# Rotate: keep last 30 days
+tail -720 "$PERF_LOG" > "$PERF_LOG.tmp" && mv "$PERF_LOG.tmp" "$PERF_LOG" 2>/dev/null
+# Compare
+while IFS='|' read -r op cur; do
+  base=$(echo "$BASELINE_PERF" | grep "^${op}|" | cut -d'|' -f2)
+  if [[ -n "$base" ]] && [[ "$base" -gt 10 ]] && [[ -n "$cur" ]]; then
+    ratio=$((cur * 100 / base))
+    if [[ "$ratio" -gt 130 ]]; then
+      log "PERF REGRESSION: $op current=${cur}ms baseline=${base}ms (+${ratio}%)"
+      osascript -e "display notification \"${op} latency ${cur}ms vs baseline ${base}ms\" with title \"⚠️ vcontext perf regression\"" 2>/dev/null
+    fi
+  fi
+done <<< "$CURRENT_PERF"
+
 # 10. Upstream sync (was self-evolve) — check git remote for updates
 SKILLS_DIR="$HOME/skills"
 if [ -d "$SKILLS_DIR/.git" ]; then
@@ -211,3 +233,6 @@ if [ -x "$SKILLS_DIR/scripts/setup-hooks.sh" ]; then
 fi
 
 log "=== cycle done ==="
+
+# 13. Self-improve — detect regressions, research fixes, propose patches for user approval
+bash "$SKILLS_DIR/scripts/vcontext-self-improve.sh" >> "$LOG" 2>&1 || log "Self-improve errored (non-fatal)"
