@@ -374,6 +374,13 @@ async function refresh() {
       var genLabel = ai.mlx_generate_available ? 'MLX Generate ACTIVE' : 'MLX Generate OFF';
       tiersHtml += '<div><span class="status-dot status-' + genStatus + '"></span>' + genLabel + '</div>';
       tiersHtml += '<div style="font-size:11px;">' + escapeHtml(ai.mlx_generate_model || '') + '</div>';
+      var gs = ai.gen_stats || {};
+      tiersHtml += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px;font-size:11px;margin-top:4px;">';
+      tiersHtml += '<div>Summaries: ' + (gs.summaries || 0).toLocaleString() + '</div>';
+      tiersHtml += '<div>Suggestions: ' + (gs.suggestions || 0).toLocaleString() + '</div>';
+      tiersHtml += '<div>Skills created: ' + (gs.skills_created || 0).toLocaleString() + '</div>';
+      tiersHtml += '<div>Discoveries: ' + (gs.discoveries || 0).toLocaleString() + '</div>';
+      tiersHtml += '</div>';
       tiersHtml += '</div>';
       // True backlog = recent (24h) eligible entries still missing
       // embedding. Old display added all NO_EMBED_TYPES NULLs which

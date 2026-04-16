@@ -3808,10 +3808,21 @@ function handleAiStatus(req, res) {
     embeddingBacklog = embeddingEligibleTotal - embeddingCount;
   } catch {}
 
+  // LLM generation stats
+  let genStats = { summaries: 0, suggestions: 0, skills_created: 0, discoveries: 0 };
+  try {
+    const s1 = dbQuery(`SELECT count(*) as c FROM entries WHERE reasoning IS NOT NULL AND reasoning != '';`);
+    const s2 = dbQuery(`SELECT count(*) as c FROM entries WHERE type='skill-suggestion';`);
+    const s3 = dbQuery(`SELECT count(*) as c FROM entries WHERE type='skill-created';`);
+    const s4 = dbQuery(`SELECT count(*) as c FROM entries WHERE type='skill-discovery';`);
+    genStats = { summaries: s1[0]?.c || 0, suggestions: s2[0]?.c || 0, skills_created: s3[0]?.c || 0, discoveries: s4[0]?.c || 0 };
+  } catch {}
+
   sendJson(res, 200, {
     mlx_generate_available: mlxGenerateAvailable,
     mlx_generate_url: MLX_GENERATE_URL,
     mlx_generate_model: MLX_GENERATE_MODEL,
+    gen_stats: genStats,
     coreml_available: mlxAvailable,
     mlx_available: mlxAvailable,
     mlx_url: MLX_EMBED_URL,
