@@ -26,3 +26,6 @@ scripts/__pycache__/
 
 # Large model files
 models/*.data
+.claude/worktrees/
+.claude/worktrees/
+data/snapshots/
