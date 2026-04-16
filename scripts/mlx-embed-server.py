@@ -25,8 +25,8 @@ import mlx
 import mlx.core as mx
 from mlx_lm import load
 
-# Limit Metal GPU cache to 2GB (more room for batch processing)
-mx.metal.set_cache_limit(2 * 1024 * 1024 * 1024)
+# Limit Metal GPU cache to 1GB (512MB too small for batch 10, 2GB wastes RAM)
+mx.metal.set_cache_limit(1 * 1024 * 1024 * 1024)
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
