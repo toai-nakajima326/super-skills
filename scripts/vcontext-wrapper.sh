@@ -3,7 +3,7 @@
 # Watches for SIGHUP to gracefully restart the server
 # Usage: ./scripts/vcontext-wrapper.sh
 
-NODE="/Users/mitsuru_nakajima/.nvm/versions/node/v18.20.7/bin/node"
+NODE="/Users/mitsuru_nakajima/.nvm/versions/node/v24.15.0/bin/node"
 SERVER="/Users/mitsuru_nakajima/skills/scripts/vcontext-server.js"
 PID_FILE="/tmp/vcontext-server.pid"
 

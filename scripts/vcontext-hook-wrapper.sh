@@ -2,7 +2,7 @@
 # Wrapper for vcontext hooks — reads stdin from Claude Code and forwards to node
 # Claude Code passes tool data as JSON on stdin for PostToolUse hooks
 
-NODE="/Users/mitsuru_nakajima/.nvm/versions/node/v18.20.7/bin/node"
+NODE="/Users/mitsuru_nakajima/.nvm/versions/node/v24.15.0/bin/node"
 HOOKS="/Users/mitsuru_nakajima/skills/scripts/vcontext-hooks.js"
 LOG="/tmp/vcontext-hook-debug.log"
 CMD="${1:-tool-use}"

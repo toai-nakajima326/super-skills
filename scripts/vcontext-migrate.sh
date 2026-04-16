@@ -11,7 +11,7 @@ set -euo pipefail
 SKILLS_DIR="$HOME/skills"
 DATA_DIR="$SKILLS_DIR/data"
 EXPORT_DIR="/tmp/vcontext-migration"
-NODE="/Users/mitsuru_nakajima/.nvm/versions/node/v18.20.7/bin/node"
+NODE="/Users/mitsuru_nakajima/.nvm/versions/node/v24.15.0/bin/node"
 
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'

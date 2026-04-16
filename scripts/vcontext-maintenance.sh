@@ -6,7 +6,7 @@
 #   - snapshot: .backup to SSD (once per day, keep last 7)
 set -u
 
-NODE="/Users/mitsuru_nakajima/.nvm/versions/node/v18.20.7/bin/node"
+NODE="/Users/mitsuru_nakajima/.nvm/versions/node/v24.15.0/bin/node"
 HOOK="/Users/mitsuru_nakajima/skills/scripts/vcontext-hooks.js"
 SNAP_DIR="/Users/mitsuru_nakajima/skills/data/snapshots"
 LOG="/tmp/vcontext-maintenance.log"
