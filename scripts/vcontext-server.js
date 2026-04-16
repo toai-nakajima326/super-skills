@@ -2585,7 +2585,7 @@ async function startEmbedLoop() {
     try {
       // Batch of 10 — uses MLX /embed_batch endpoint. ~10x throughput
       // with only ~80MB peak memory increase.
-      const BATCH = 10; // batch 10 — stable with mutex, 20 causes hang
+      const BATCH = 10; // batch 10 + clear_cache every 2 calls = optimal balance
       const rows = dbQuery(`SELECT id, content FROM entries WHERE embedding IS NULL ORDER BY id ASC LIMIT ${BATCH};`);
       if (rows.length === 0) {
         await new Promise(r => setTimeout(r, 30000));
@@ -2612,8 +2612,9 @@ async function startEmbedLoop() {
       }
       // Minimal gap — MLX in RAM (nice -20), 114ms/embed after warmup
       await new Promise(r => setTimeout(r, 5));
-    } catch {
-      await new Promise(r => setTimeout(r, 60000));
+    } catch (e) {
+      console.log(`[embed-loop] error: ${e?.message?.slice(0, 60) || 'unknown'}`);
+      await new Promise(r => setTimeout(r, 5000)); // 5s retry, not 60s
     }
   }
   embedLoopRunning = false;
