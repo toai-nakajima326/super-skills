@@ -25,9 +25,8 @@ import mlx
 import mlx.core as mx
 from mlx_lm import load
 
-# Limit Metal GPU cache to model weights + 1GB working buffer
-# Qwen3-Embedding-8B-4bit: ~5GB weights, 1GB buffer = 6GB total
-mx.metal.set_cache_limit(6 * 1024 * 1024 * 1024)
+# Limit Metal GPU cache to 1GB (model weights are separate, cache is for intermediate tensors)
+mx.metal.set_cache_limit(1 * 1024 * 1024 * 1024)
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware

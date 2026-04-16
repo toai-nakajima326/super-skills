@@ -20,8 +20,8 @@ from typing import Optional, List, Dict, Any
 import mlx.core as mx
 from mlx_lm import load, generate
 
-# Limit Metal GPU cache to 6GB
-mx.metal.set_cache_limit(6 * 1024 * 1024 * 1024)
+# Limit Metal GPU cache to 1GB (model weights are separate, cache is for intermediate tensors)
+mx.metal.set_cache_limit(1 * 1024 * 1024 * 1024)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
