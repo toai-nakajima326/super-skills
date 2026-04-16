@@ -3727,11 +3727,12 @@ function handleAiStatus(req, res) {
   let embeddingBacklog = 0;       // 24h-recent eligible rows still missing embedding
   let embeddingEligibleTotal = 0; // total ELIGIBLE rows (denominator)
   try {
-    // Use RAM for speed — SSD queries are slow (63K+ rows)
-    const r1 = dbQuery(`SELECT count(*) as c FROM entries;`);
-    embeddingEligibleTotal = r1[0]?.c || 0;
-    const r2 = dbQuery(`SELECT count(*) as c FROM entries WHERE embedding IS NOT NULL;`);
-    embeddingCount = r2[0]?.c || 0;
+    // Total = SSD (permanent store, has everything including overflow from RAM)
+    const ssdTotal = dbQuery(`SELECT count(*) as c FROM entries;`, SSD_DB_PATH);
+    embeddingEligibleTotal = ssdTotal[0]?.c || 0;
+    // Embedded = RAM embedded + SSD-only embedded (use RAM count as fast proxy)
+    const ramEmb = dbQuery(`SELECT count(*) as c FROM entries WHERE embedding IS NOT NULL;`);
+    embeddingCount = ramEmb[0]?.c || 0;
     embeddingBacklog = embeddingEligibleTotal - embeddingCount;
   } catch {}
 
