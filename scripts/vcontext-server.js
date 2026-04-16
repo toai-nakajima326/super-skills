@@ -814,7 +814,38 @@ function readBody(req) {
   });
 }
 
+// Mask sensitive info in output (keys, tokens, passwords).
+// Stored raw in DB; masked only at display time for safety.
+const _SECRET_PATTERNS = [
+  { re: /sk-[a-zA-Z0-9]{20,}/g, replace: 'sk-***MASKED***' },                       // OpenAI/Anthropic
+  { re: /sk-ant-[a-zA-Z0-9_-]{20,}/g, replace: 'sk-ant-***MASKED***' },              // Anthropic
+  { re: /ghp_[a-zA-Z0-9]{36,}/g, replace: 'ghp_***MASKED***' },                      // GitHub PAT
+  { re: /gho_[a-zA-Z0-9]{36,}/g, replace: 'gho_***MASKED***' },                      // GitHub OAuth
+  { re: /xox[baprs]-[a-zA-Z0-9-]{10,}/g, replace: 'xox-***MASKED***' },              // Slack
+  { re: /AKIA[0-9A-Z]{16}/g, replace: 'AKIA***MASKED***' },                          // AWS Access Key
+  { re: /AIza[0-9A-Za-z_-]{35}/g, replace: 'AIza***MASKED***' },                     // Google API
+  { re: /eyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}/g, replace: 'eyJ***JWT-MASKED***' }, // JWT
+  { re: /(password|passwd|pwd|secret|token|api[_-]?key)["':\s=]+["']?([a-zA-Z0-9+/=_-]{8,})["']?/gi, replace: '$1=***MASKED***' },
+];
+function maskSecrets(obj) {
+  if (obj == null) return obj;
+  if (typeof obj === 'string') {
+    let s = obj;
+    for (const p of _SECRET_PATTERNS) s = s.replace(p.re, p.replace);
+    return s;
+  }
+  if (Array.isArray(obj)) return obj.map(maskSecrets);
+  if (typeof obj === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) out[k] = maskSecrets(v);
+    return out;
+  }
+  return obj;
+}
+
 function sendJson(res, status, data) {
+  // Mask secrets at output time (storage keeps raw for grep-ability)
+  if (data && typeof data === 'object') data = maskSecrets(data);
   // If data has results array, stream it to avoid building huge string in memory
   if (data.results && Array.isArray(data.results) && data.results.length > 500) {
     res.writeHead(status, { 'Content-Type': 'application/json', 'Transfer-Encoding': 'chunked' });
@@ -4909,26 +4940,62 @@ const server = createServer(async (req, res) => {
         sendJson(res, 200, { ram_deleted: r.changes, ssd_deleted: ssdR.changes, userId });
       } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'POST' && path === '/admin/verify-backup') {
-      // Backup verification: open the latest snapshot read-only and run
-      // integrity_check + a sample SELECT. Catches "I thought we had
-      // backups but they were all corrupt" disasters.
+      // Comprehensive backup verification:
+      // 1. ALL snapshots integrity_check
+      // 2. Latest snapshot: entry count + sample read + schema check
+      // 3. Size & age validation
       try {
         const SNAP_DIR = join(BACKUP_DIR, 'snapshots');
         const fs = require('node:fs');
         const files = fs.readdirSync(SNAP_DIR).filter(f => f.endsWith('.db')).sort().reverse();
         if (files.length === 0) return sendJson(res, 404, { error: 'no snapshots found' });
-        const latest = join(SNAP_DIR, files[0]);
-        const probe = new Database(latest, { readonly: true });
-        try {
-          const ok = probe.prepare('PRAGMA integrity_check').get();
-          const cnt = probe.prepare('SELECT COUNT(*) as c FROM entries').get();
-          sendJson(res, 200, {
-            snapshot: files[0],
-            integrity: ok.integrity_check === 'ok' ? 'ok' : ok.integrity_check,
-            entry_count: cnt.c,
-            verified_at: new Date().toISOString(),
+
+        const results = [];
+        for (const f of files.slice(0, 10)) { // check last 10 snapshots
+          const fullPath = join(SNAP_DIR, f);
+          const stat = fs.statSync(fullPath);
+          const ageHours = (Date.now() - stat.mtimeMs) / 1000 / 3600;
+          let integrity = 'unknown', entryCount = 0, schemaOk = false;
+          try {
+            const probe = new Database(fullPath, { readonly: true });
+            try {
+              const ok = probe.prepare('PRAGMA integrity_check').get();
+              integrity = ok.integrity_check === 'ok' ? 'ok' : ok.integrity_check;
+              const cnt = probe.prepare('SELECT COUNT(*) as c FROM entries').get();
+              entryCount = cnt.c;
+              // Schema check — verify required tables exist
+              const tables = probe.prepare(`SELECT name FROM sqlite_master WHERE type='table'`).all().map(r => r.name);
+              schemaOk = tables.includes('entries') && tables.includes('entries_fts');
+            } finally { probe.close(); }
+          } catch (e) { integrity = 'error: ' + e.message.slice(0, 50); }
+          results.push({
+            snapshot: f,
+            size_mb: Math.round(stat.size / 1024 / 1024),
+            age_hours: Math.round(ageHours * 10) / 10,
+            integrity,
+            entry_count: entryCount,
+            schema_ok: schemaOk,
+            status: (integrity === 'ok' && schemaOk) ? 'pass' : 'fail',
           });
-        } finally { probe.close(); }
+        }
+
+        const failed = results.filter(r => r.status === 'fail');
+        const latest = results[0] || {};
+        const alerts = [];
+        if (failed.length > 0) alerts.push(`${failed.length} snapshot(s) failed verification`);
+        if (latest.age_hours > 48) alerts.push(`Latest snapshot is ${latest.age_hours}h old (>48h threshold)`);
+        if (latest.entry_count < 1000) alerts.push(`Latest snapshot has only ${latest.entry_count} entries (suspicious)`);
+
+        sendJson(res, 200, {
+          checked: results.length,
+          passed: results.length - failed.length,
+          failed: failed.length,
+          integrity: failed.length === 0 ? 'ok' : 'fail',
+          latest: latest.snapshot,
+          alerts,
+          snapshots: results,
+          verified_at: new Date().toISOString(),
+        });
       } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'GET' && path === '/admin/pending-patches') {
       // List pending patches awaiting user approval
