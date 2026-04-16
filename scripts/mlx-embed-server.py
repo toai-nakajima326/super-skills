@@ -831,6 +831,14 @@ async def openai_compat_embeddings(request: OpenAIEmbedRequest):
 
 # ── Lightweight health (Ollama/CoreML-compatible) ──
 
+@app.post("/clear_cache", tags=["Maintenance"])
+async def clear_cache_endpoint():
+    """Force clear MLX Metal GPU cache. Call after batch operations."""
+    if hasattr(mx, 'metal') and hasattr(mx.metal, 'clear_cache'):
+        mx.metal.clear_cache()
+    gc.collect()
+    return {"cleared": True}
+
 @app.get("/api/health", tags=["Compatibility"])
 async def compat_health():
     """
