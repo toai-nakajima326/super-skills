@@ -15,13 +15,6 @@ cd "$SKILLS_DIR" || exit 1
 
 log "=== self-improve cycle ==="
 
-# Night window only (23:00-07:00) — avoid disrupting user during day
-HOUR=$(date +%H)
-if [[ "$HOUR" -lt 23 ]] && [[ "$HOUR" -ge 7 ]]; then
-  log "Daytime ($HOUR:00) — skipping (night window 23:00-07:00)"
-  exit 0
-fi
-
 # Exit if a previous proposal is still pending (one at a time)
 PENDING=$(sqlite3 "$RAM_DB" "SELECT COUNT(*) FROM entries WHERE type='pending-patch' AND json_extract(content,'\$.status') IN ('pending-review','testing');" 2>/dev/null)
 if [[ "${PENDING:-0}" -gt 0 ]]; then
