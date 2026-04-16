@@ -2610,8 +2610,8 @@ async function startEmbedLoop() {
           try { dbExec(`UPDATE entry_index SET has_embedding = 1 WHERE entry_id = ${rows[i].id};`); } catch {}
         }
       }
-      // Gap between batches — 2s to let MLX clear_cache + avoid server hang
-      await new Promise(r => setTimeout(r, 2000));
+      // Minimal gap — MLX in RAM (nice -20), 114ms/embed after warmup
+      await new Promise(r => setTimeout(r, 5));
     } catch {
       await new Promise(r => setTimeout(r, 60000));
     }
