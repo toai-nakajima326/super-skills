@@ -1407,13 +1407,15 @@ function recentFromTier(dbPath, type, limit, namespace, accessibleGroups) {
  */
 function handleSession(req, res) {
   const path = parsePath(req.url);
+  const params = parseQuery(req.url);
   const sessionId = path.replace('/session/', '');
   if (!sessionId) {
     return sendJson(res, 400, { error: 'Missing session ID' });
   }
+  const limit = Math.min(parseInt(params.limit) || 100, 500); // default 100, max 500
 
   // Search RAM
-  const ramRows = dbQuery(`SELECT * FROM entries WHERE session = ${esc(sessionId)} ORDER BY created_at ASC;`);
+  const ramRows = dbQuery(`SELECT * FROM entries WHERE session = ${esc(sessionId)} ORDER BY created_at DESC LIMIT ${limit};`);
   for (const r of ramRows) r._tier = 'ram';
   touchEntries(ramRows.map(r => r.id), DB_PATH);
 
@@ -1421,7 +1423,7 @@ function handleSession(req, res) {
   let ssdRows = [];
   if (existsSync(SSD_DB_PATH)) {
     try {
-      ssdRows = dbQuery(`SELECT * FROM entries WHERE session = ${esc(sessionId)} ORDER BY created_at ASC;`, SSD_DB_PATH);
+      ssdRows = dbQuery(`SELECT * FROM entries WHERE session = ${esc(sessionId)} ORDER BY created_at DESC LIMIT ${limit};`, SSD_DB_PATH);
       for (const r of ssdRows) r._tier = 'ssd';
       touchEntries(ssdRows.map(r => r.id), SSD_DB_PATH);
     } catch { /* ignore */ }
