@@ -305,7 +305,7 @@ function escapeHtml(str) {
 
 async function refresh() {
   // Parallel fetch all data at once
-  const [alertData, health, tiers, ai, recent, allRecent, metrics] = await Promise.all([
+  const [alertData, health, tiers, ai, recent, allRecent, metrics, pipeline] = await Promise.all([
     fetchJson('/recent?n=1&type=anomaly-alert'),
     fetchJson('/health'),
     fetchJson('/tier/stats'),
@@ -313,6 +313,7 @@ async function refresh() {
     fetchJson('/recent?n=15'),
     fetchJson('/recent?n=200'),
     fetchJson('/metrics/report?hours=24'),
+    fetchJson('/pipeline/health'),
   ]);
 
   // Alerts
@@ -360,9 +361,12 @@ async function refresh() {
     // Local AI status inline
     if (ai) {
       var embedCount = ai.embedding_count || 0;
-      var totalCount = Math.max(tiers.ram.entries || 0, embedCount, 1);
+      // Use ELIGIBLE total (excludes NO_EMBED_TYPES) so the % reflects
+      // real coverage, not artificially low due to intentionally
+      // unembedded ephemeral types.
+      var totalCount = Math.max(ai.embedding_eligible_total || tiers.ram.entries || 0, embedCount, 1);
       var embedPctRaw = embedCount / totalCount * 100;
-      var embedPct = embedCount === totalCount ? 100 : Math.min(99, Math.floor(embedPctRaw));
+      var embedPct = embedCount >= totalCount ? 100 : Math.min(99, Math.floor(embedPctRaw));
       tiersHtml += '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--bg-bar);">';
       tiersHtml += '<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">LOCAL AI</div>';
       tiersHtml += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:12px;">';
@@ -371,9 +375,18 @@ async function refresh() {
       tiersHtml += '<div><span class="status-dot status-' + genStatus + '"></span>' + genLabel + '</div>';
       tiersHtml += '<div style="font-size:11px;">' + escapeHtml(ai.mlx_generate_model || '') + '</div>';
       tiersHtml += '</div>';
-      var remaining = totalCount - embedCount;
-      tiersHtml += '<div class="chart-bar" style="margin-top:4px;"><span class="label">Embedding</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + embedPct + '%;background:var(--purple)"></div></div><span style="margin-left:8px;font-size:13px;">' + embedCount + '/' + totalCount + ' (' + embedPct + '%)</span></div>';
-      if (remaining > 0) tiersHtml += '<div style="font-size:11px;color:var(--yellow);margin-top:2px;">' + remaining + ' entries pending</div>';
+      // True backlog = recent (24h) eligible entries still missing
+      // embedding. Old display added all NO_EMBED_TYPES NULLs which
+      // were intentional → misleading "15K pending".
+      var backlog = ai.embedding_backlog || 0;
+      var ramTotal = (tiers.ram && tiers.ram.entries) || 0;
+      var ineligible = Math.max(0, ramTotal - totalCount);
+      tiersHtml += '<div class="chart-bar" style="margin-top:4px;"><span class="label">Semantic index</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + embedPct + '%;background:var(--purple)"></div></div><span style="margin-left:8px;font-size:13px;">' + embedCount + '/' + totalCount + ' (' + embedPct + '%)</span></div>';
+      // Only show the skip-by-design note if there's actually a skip list active
+      if (ineligible > 0) {
+        tiersHtml += '<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">' + ineligible.toLocaleString() + ' rows skip embedding by design.</div>';
+      }
+      if (backlog > 0) tiersHtml += '<div style="font-size:11px;color:var(--yellow);margin-top:2px;">' + backlog.toLocaleString() + ' backlog — MLX worker processing</div>';
       tiersHtml += '<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">' + (ai.models || []).map(function(m){ return escapeHtml(m); }).join(', ') + '</div>';
       tiersHtml += '</div>';
     }
@@ -495,6 +508,38 @@ async function refresh() {
       mhtml += '<span style="color:var(--yellow);">' + idxPct + '% built</span> (' + idx.indexed + '/' + idx.total + ')';
     }
     mhtml += '</div>';
+    // Skill inventory
+    var skills = metrics.skills || {};
+    mhtml += '<div>Skills: <strong>' + (skills.registered || 0) + '</strong> registered';
+    if (skills.auto_created) mhtml += ' <span style="color:var(--text-dim);">(' + skills.auto_created + ' auto-created)</span>';
+    if (skills.usage_in_period) mhtml += ' <span style="color:var(--green);" title="Number of routing matches (one prompt can match several skills)">' + skills.usage_in_period + ' matches/24h</span>';
+    mhtml += '</div>';
+    // AI Pipeline Health — per-feature heartbeat (loose-coupling observability)
+    if (pipeline && pipeline.features) {
+      mhtml += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--bg-bar);font-size:11px;">';
+      mhtml += '<div style="color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">';
+      mhtml += 'AI Pipeline Health';
+      var s = pipeline.summary || {};
+      mhtml += ' <span style="color:var(--green);">' + (s.green||0) + ' ok</span>';
+      if (s.yellow) mhtml += ' <span style="color:var(--yellow);">' + s.yellow + ' stale</span>';
+      if (s.red) mhtml += ' <span style="color:var(--red);">' + s.red + ' down</span>';
+      mhtml += '</div>';
+      mhtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:4px;">';
+      pipeline.features.forEach(function(f) {
+        var dot = f.status === 'green' ? '🟢' :
+                  f.status === 'yellow' ? '🟡' :
+                  f.status === 'red' ? '🔴' :
+                  '⚪'; // idle (condition-driven)
+        var age = f.age_min == null ? 'never' :
+                  f.age_min < 60 ? f.age_min + 'm' :
+                  f.age_min < 1440 ? Math.floor(f.age_min/60) + 'h' :
+                  Math.floor(f.age_min/1440) + 'd';
+        var suffix = f.condition ? 'condition-driven' : (age + ' ago · ' + (f.today||0) + '/24h');
+        mhtml += '<div style="font-size:11px;">' + dot + ' ' + f.label + ' <span style="color:var(--text-dim);">' + suffix + '</span></div>';
+      });
+      mhtml += '</div>';
+      mhtml += '</div>';
+    }
     mhtml += '</div>';
 
     // Effectiveness — period + cumulative

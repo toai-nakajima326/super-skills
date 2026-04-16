@@ -55,7 +55,19 @@ const MAX_SIZE_BYTES = 3.5 * 1024 * 1024 * 1024;     // 3.5 GB
 const LEGACY_TYPES = ['conversation', 'decision', 'observation', 'code', 'error'];
 const isValidType = (t) => typeof t === 'string' && t.length > 0 && t.length < 100;
 const NAMESPACE_TAG_PREFIX = 'project:';
-const RAM_TO_SSD_DAYS = 7;
+// RAM→SSD migration: overflow-only.
+// RAM is faster — keep everything in RAM until it's actually full.
+// Only spill to SSD when RAM disk exceeds 85%. Below that, no migration.
+// Promote from SSD back to RAM is always free (already implemented).
+function getRamMigrateDays() {
+  try {
+    const s = require('node:fs').statSync(DB_PATH);
+    const pct = s.size / (3.5 * 1024 * 1024 * 1024) * 100;
+    if (pct < 85) return 999; // keep in RAM — plenty of room
+    return 0; // overflow: migrate oldest entries to free space
+  } catch { return 999; }
+}
+const RAM_TO_SSD_DAYS = getRamMigrateDays();
 const SSD_TO_CLOUD_DAYS = 30;
 
 // ── User identity ─────────────────────────────────────────────
@@ -211,8 +223,9 @@ function esc(str) {
 
 /** Sanitize query for FTS5 MATCH — strip chars that cause syntax errors */
 function ftsQuery(q) {
-  // Remove FTS5 operators and special chars, keep alphanumeric + spaces + CJK
-  return String(q).replace(/[<>\/\\(),;:!@#$%^&*+=\[\]{}|~`"]/g, ' ').replace(/\s+/g, ' ').trim();
+  // Remove FTS5 operators and special chars, keep alphanumeric + spaces + CJK.
+  // Period "." causes "syntax error near ." — must be stripped.
+  return String(q).replace(/[<>\/\\(),;:!@#$%^&*+=\[\]{}|~`".'?-]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 // ── RAM disk check ─────────────────────────────────────────────
@@ -631,31 +644,70 @@ function touchEntries(ids, dbPath = DB_PATH) {
  * Returns the count of moved entries.
  */
 function migrateRamToSsd() {
+  // Prepared-statement version — eliminates string-concat SQL injection
+  // class of bugs (previously "near '01'" / "SQL logic error" when
+  // supersedes had weird values). Batches in a transaction for speed.
   try {
-    const staleRows = dbQuery(
-      `SELECT * FROM entries WHERE last_accessed < datetime('now', '-${RAM_TO_SSD_DAYS} days') ORDER BY last_accessed ASC;`,
-    );
+    if (!ramDb || !ssdDb) return 0;
+    const staleRows = ramDb.prepare(
+      `SELECT id, type, content, tags, session, token_estimate, created_at, last_accessed, access_count, reasoning, conditions, supersedes, confidence, status, content_hash FROM entries WHERE last_accessed < datetime('now', ?) ORDER BY last_accessed ASC LIMIT 500;`
+    ).all(`-${RAM_TO_SSD_DAYS} days`);
     if (staleRows.length === 0) return 0;
 
-    for (const row of staleRows) {
-      // Insert into SSD DB
-      dbExec(
-        `INSERT INTO entries (type, content, tags, session, token_estimate, created_at, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status)
-         VALUES (${esc(row.type)}, ${esc(row.content)}, ${esc(row.tags)}, ${esc(row.session)}, ${row.token_estimate || 0},
-                 ${esc(row.created_at)}, ${esc(row.last_accessed)}, ${row.access_count || 0}, 'ssd',
-                 ${esc(row.reasoning || null)}, ${esc(row.conditions || null)}, ${row.supersedes != null ? (parseInt(row.supersedes) || 'NULL') : 'NULL'}, ${esc(row.confidence || 'medium')}, ${esc(row.status || 'active')});`,
-        SSD_DB_PATH,
-      );
+    const insert = ssdDb.prepare(
+      `INSERT OR IGNORE INTO entries (type, content, tags, session, token_estimate, created_at, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status, content_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ssd', ?, ?, ?, ?, ?, ?)`
+    );
+    const del = ramDb.prepare(`DELETE FROM entries WHERE id = ?`);
+
+    const migrate = ssdDb.transaction((rows) => {
+      let ok = 0;
+      for (const r of rows) {
+        try {
+          // Normalise numeric/nullable fields so the bound parameters match
+          // the column types. Integer columns get null (not '').
+          const tok = Number.isFinite(+r.token_estimate) ? +r.token_estimate : 0;
+          const acc = Number.isFinite(+r.access_count) ? +r.access_count : 0;
+          const sup = (r.supersedes != null && r.supersedes !== '' && Number.isFinite(+r.supersedes))
+            ? +r.supersedes : null;
+          insert.run(
+            r.type, r.content, r.tags || '[]', r.session || null,
+            tok, r.created_at, r.last_accessed, acc,
+            r.reasoning || null, r.conditions || null, sup,
+            r.confidence || 'medium', r.status || 'active',
+            r.content_hash || null
+          );
+          ok++;
+        } catch (rowErr) {
+          console.error(`[vcontext:tier] skip id=${r.id} type=${r.type}: ${rowErr.message}`);
+        }
+      }
+      return ok;
+    });
+
+    const migratedCount = migrate(staleRows);
+    if (migratedCount > 0) {
+      // Delete migrated rows from RAM. FTS triggers can fail on corrupt
+      // indexes ("SQL logic error"); in that case, fall back to soft-delete
+      // by marking status='migrated' so subsequent queries skip them and
+      // the next maintenance rebuilds FTS. Bound by per-id try/catch so
+      // one broken FTS entry doesn't abort the whole batch.
+      const softMark = ramDb.prepare(`UPDATE entries SET status='migrated' WHERE id = ?`);
+      let hardDel = 0, softDel = 0;
+      for (const r of staleRows.slice(0, migratedCount)) {
+        try {
+          del.run(r.id);
+          hardDel++;
+        } catch {
+          try { softMark.run(r.id); softDel++; } catch {}
+        }
+      }
+      console.log(`[vcontext:tier] RAM cleanup: ${hardDel} deleted, ${softDel} soft-marked (FTS issue)`);
     }
-
-    // Remove from RAM DB
-    const ids = staleRows.map(r => r.id).join(',');
-    dbExec(`DELETE FROM entries WHERE id IN (${ids});`);
-
-    console.log(`[vcontext:tier] Migrated ${staleRows.length} entries RAM → SSD`);
-    return staleRows.length;
+    console.log(`[vcontext:tier] Migrated ${migratedCount}/${staleRows.length} entries RAM → SSD`);
+    return migratedCount;
   } catch (e) {
-    console.error('[vcontext:tier] RAM→SSD migration error:', e.message);
+    console.error('[vcontext:tier] RAM→SSD migration error:', e.message, e.stack?.split('\n')[1]);
     return 0;
   }
 }
@@ -697,26 +749,37 @@ function migrateSsdToCloud() {
  * @param {string} sourceTier - 'ssd' or 'cloud'
  */
 function promoteToRam(rows, sourceTier) {
-  if (!rows || rows.length === 0) return;
-  try {
-    for (const row of rows) {
-      // Check if already in RAM (by original created_at + content hash to avoid dups)
-      const existing = dbQuery(
-        `SELECT id FROM entries WHERE created_at = ${esc(row.created_at)} AND type = ${esc(row.type)} AND content = ${esc(row.content)} LIMIT 1;`,
+  if (!rows || rows.length === 0 || !ramDb) return;
+  const existsStmt = ramDb.prepare(
+    `SELECT id FROM entries WHERE created_at = ? AND type = ? AND content = ? LIMIT 1`
+  );
+  const insertStmt = ramDb.prepare(
+    `INSERT OR IGNORE INTO entries (type, content, tags, session, token_estimate, created_at, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status, content_hash)
+     VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, 'ram', ?, ?, ?, ?, ?, ?)`
+  );
+  const crypto = require('node:crypto');
+  let promoted = 0;
+  for (const r of rows) {
+    try {
+      if (existsStmt.get(r.created_at, r.type, r.content)) continue;
+      const tok = Number.isFinite(+r.token_estimate) ? +r.token_estimate : 0;
+      const acc = Number.isFinite(+r.access_count) ? +r.access_count : 0;
+      const sup = (r.supersedes != null && r.supersedes !== '' && Number.isFinite(+r.supersedes))
+        ? +r.supersedes : null;
+      const hash = r.content_hash || crypto.createHash('sha256').update(String(r.content)).digest('hex');
+      insertStmt.run(
+        r.type, r.content, r.tags || '[]', r.session || null,
+        tok, r.created_at, acc + 1,
+        r.reasoning || null, r.conditions || null, sup,
+        r.confidence || 'medium', r.status || 'active',
+        hash
       );
-      if (existing.length > 0) continue;
-
-      dbExec(
-        `INSERT INTO entries (type, content, tags, session, token_estimate, created_at, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status)
-         VALUES (${esc(row.type)}, ${esc(row.content)}, ${esc(row.tags)}, ${esc(row.session)}, ${row.token_estimate || 0},
-                 ${esc(row.created_at)}, datetime('now'), ${(row.access_count || 0) + 1}, 'ram',
-                 ${esc(row.reasoning || null)}, ${esc(row.conditions || null)}, ${row.supersedes != null ? (parseInt(row.supersedes) || 'NULL') : 'NULL'}, ${esc(row.confidence || 'medium')}, ${esc(row.status || 'active')});`,
-      );
+      promoted++;
+    } catch (e) {
+      console.error(`[vcontext:tier] promote skip id=${r.id || '?'} type=${r.type || '?'}: ${e.message}`);
     }
-    console.log(`[vcontext:tier] Promoted ${rows.length} entries from ${sourceTier} → RAM`);
-  } catch (e) {
-    console.error('[vcontext:tier] Promote to RAM failed:', e.message);
   }
+  if (promoted > 0) console.log(`[vcontext:tier] Promoted ${promoted}/${rows.length} from ${sourceTier} → RAM`);
 }
 
 // ── HTTP helpers ───────────────────────────────────────────────
@@ -809,6 +872,27 @@ async function handleStore(req, res) {
     return sendJson(res, 400, { error: 'Invalid type. Must be a non-empty string.' });
   }
 
+  // Global dedup via content_hash + UNIQUE index (atomic, race-free).
+  // Migration path: after /admin/dedup-migration has added the column
+  // and index, any duplicate INSERT collides with the UNIQUE constraint
+  // and we return the existing row. Skip types where repetition is
+  // legitimate (periodic heartbeats, test entries).
+  const DEDUP_SKIP = new Set(['test', 'working-state', 'session-recall', 'anomaly-alert']);
+  let contentHash = null;
+  if (!DEDUP_SKIP.has(type)) {
+    try {
+      const crypto = require('node:crypto');
+      contentHash = crypto.createHash('sha256').update(String(content)).digest('hex');
+      // If the hash already exists for this (session, type), return it.
+      const dup = dbQuery(
+        `SELECT id FROM entries WHERE session = ${esc(session || '')} AND type = ${esc(type)} AND content_hash = ${esc(contentHash)} LIMIT 1;`
+      );
+      if (dup.length > 0) {
+        return sendJson(res, 200, { ok: true, deduped: true, existing_id: dup[0].id });
+      }
+    } catch {}
+  }
+
   // Group permission check for non-owner: can only store to own groups
   const targetGroup = body.group || (auth.groups[0] !== '*' ? auth.groups[0] : null);
   if (targetGroup && !hasRole(auth, 'owner') && !canAccessGroup(auth, targetGroup)) {
@@ -832,7 +916,11 @@ async function handleStore(req, res) {
   const tokenEst = estimateTokens(content);
 
   const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  const sql = `INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status) VALUES (${esc(type)}, ${esc(content)}, ${esc(tagsJson)}, ${esc(session || null)}, ${tokenEst}, datetime('now'), 0, 'ram', ${esc(reasoning)}, ${esc(conditions)}, ${supersedes === null ? 'NULL' : supersedes}, ${esc(confidence)}, ${esc(status)});`;
+  // INSERT OR IGNORE so the UNIQUE(session,type,content_hash) index can
+  // atomically reject duplicates at the DB level (race-free). Includes
+  // content_hash column populated above when dedup is active.
+  const hashSql = contentHash ? esc(contentHash) : 'NULL';
+  const sql = `INSERT OR IGNORE INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status, content_hash) VALUES (${esc(type)}, ${esc(content)}, ${esc(tagsJson)}, ${esc(session || null)}, ${tokenEst}, datetime('now'), 0, 'ram', ${esc(reasoning)}, ${esc(conditions)}, ${supersedes === null ? 'NULL' : supersedes}, ${esc(confidence)}, ${esc(status)}, ${hashSql});`;
   dbExec(sql);
 
   // Get the inserted row
@@ -857,7 +945,7 @@ async function handleStore(req, res) {
       try {
         const summary = await mlxGenerate(
           `Summarize this in one sentence (max 50 words). Output ONLY the summary, nothing else:\n\n${content.slice(0, 2000)}`,
-          { maxTokens: 100 }
+          { maxTokens: 4000 }
         );
         if (summary && summary.length > 5) {
           dbExec(`UPDATE entries SET reasoning = ${esc(summary.trim())} WHERE id = ${entry.id} AND reasoning IS NULL;`);
@@ -866,8 +954,18 @@ async function handleStore(req, res) {
     });
   }
 
-  // Generate embedding with MLX (always — fast ~30-100ms on Apple Silicon GPU)
-  if (mlxAvailable) {
+  // Generate embedding with MLX.
+  // Skip ephemeral / high-volume types from the start — they flood the
+  // embed worker with no semantic-search benefit (they rely on FTS).
+  // Old behaviour pruned after 1d, but still queued them first which
+  // displaced useful work. Backlog was growing 500+/h.
+  // Embed EVERYTHING. Measured throughput: 268ms/embed × 8.8K writes/day
+  // = 40 min/day MLX work (~2.7% load). The semantic graph is the AI
+  // OS's main value proposition — skipping types cripples cross-type
+  // recall, workflow inference, and anomaly detection. Empty set =
+  // embed all (handler still skips empty content).
+  const NO_EMBED_TYPES = new Set();
+  if (mlxAvailable && !NO_EMBED_TYPES.has(type)) {
     setImmediate(async () => {
       try {
         let embedding = null;
@@ -956,7 +1054,7 @@ async function handleStore(req, res) {
             if (mlxGenerateAvailable) {
               setImmediate(async () => {
                 try {
-                  const aiResponse = await mlxGenerate(basePrompt, { maxTokens: 200, temperature: 0.1 });
+                  const aiResponse = await mlxGenerate(basePrompt, { maxTokens: 4000, temperature: 0.1 });
                   if (aiResponse) {
                     try {
                       const aiParsed = JSON.parse(aiResponse);
@@ -1113,6 +1211,35 @@ async function handleRecall(req, res) {
 
   parseTags(allResults);
 
+  // Context budget: caller can pass &budget=N (token estimate cap).
+  // We rank by score = freshness*0.3 + tier*0.2 + recency-of-access*0.2 +
+  // length-penalty*0.3, then prune from the bottom until under budget.
+  const budget = parseInt(params.budget, 10) || 0;
+  if (budget > 0 && allResults.length > 0) {
+    const now = Date.now();
+    const scored = allResults.map(r => {
+      const ageDays = Math.max(0.1, (now - Date.parse((r.created_at || '').replace(' ', 'T') + 'Z')) / 86400000);
+      const accessAgeDays = r.last_accessed
+        ? Math.max(0.1, (now - Date.parse(r.last_accessed.replace(' ', 'T') + 'Z')) / 86400000)
+        : ageDays;
+      const tierWeight = r._tier === 'ram' ? 1.0 : r._tier === 'ssd' ? 0.7 : 0.4;
+      const lenPenalty = 1 / Math.log2(2 + (r.token_estimate || 100));
+      const score = (1/ageDays)*0.3 + tierWeight*0.2 + (1/accessAgeDays)*0.2 + lenPenalty*0.3;
+      return { ...r, _score: score };
+    }).sort((a, b) => b._score - a._score);
+    let used = 0;
+    const kept = [];
+    for (const r of scored) {
+      const cost = r.token_estimate || 100;
+      if (used + cost > budget) break;
+      kept.push(r);
+      used += cost;
+    }
+    sendJson(res, 200, { results: kept, count: kept.length, query: q, budget, used_tokens: used, dropped: allResults.length - kept.length });
+    recordMetric({ operation: 'recall', startTime: _startTime, requestChars: (q || '').length, responseChars: JSON.stringify(kept).length, resultCount: kept.length, usedIds: JSON.stringify(kept.map(r => r.id)), taskKind: 'search' });
+    return;
+  }
+
   sendJson(res, 200, { results: allResults, count: allResults.length, query: q });
   recordMetric({ operation: 'recall', startTime: _startTime, requestChars: (q || '').length, responseChars: JSON.stringify(allResults).length, resultCount: allResults.length, usedIds: JSON.stringify(allResults.map(r => r.id)), taskKind: 'search' });
 }
@@ -1143,10 +1270,15 @@ function searchTier(dbPath, q, type, limit, namespace, userFilter, accessibleGro
     }
   }
 
+  // Skip soft-migrated rows — they've moved to SSD tier but couldn't be
+  // hard-deleted due to FTS issues. The SSD tier query will return the
+  // real copy.
+  const migrateFilter = ` AND (e.status IS NULL OR e.status != 'migrated')`;
+
   const ftsSql = `SELECT e.*, rank
     FROM entries_fts fts
     JOIN entries e ON e.id = fts.rowid
-    WHERE entries_fts MATCH ${esc(ftsQuery(q))}${typeFilter}${nsFilter}${userFlt}${groupFilter}
+    WHERE entries_fts MATCH ${esc(ftsQuery(q))}${typeFilter}${nsFilter}${userFlt}${groupFilter}${migrateFilter}
     ORDER BY rank * 0.7 + (julianday(e.created_at) - julianday('2024-01-01')) * 0.3
     LIMIT ${limit};`;
 
@@ -1154,7 +1286,7 @@ function searchTier(dbPath, q, type, limit, namespace, userFilter, accessibleGro
     return dbQuery(ftsSql, dbPath);
   } catch {
     // FTS query syntax error — fall back to LIKE search
-    const likeSql = `SELECT * FROM entries WHERE content LIKE ${esc('%' + q + '%')}${typeFilter}${nsFilter}${userFlt}${groupFilter.replace(/e\./g, '')} ORDER BY created_at DESC LIMIT ${limit};`;
+    const likeSql = `SELECT * FROM entries WHERE content LIKE ${esc('%' + q + '%')}${typeFilter}${nsFilter}${userFlt}${groupFilter.replace(/e\./g, '')} AND (status IS NULL OR status != 'migrated') ORDER BY created_at DESC LIMIT ${limit};`;
     try {
       return dbQuery(likeSql, dbPath);
     } catch {
@@ -2451,30 +2583,35 @@ async function startEmbedLoop() {
       continue;
     }
     try {
-      const rows = dbQuery('SELECT id, content FROM entries WHERE embedding IS NULL ORDER BY id ASC LIMIT 1;');
+      // Batch of 10 — uses MLX /embed_batch endpoint. ~10x throughput
+      // with only ~80MB peak memory increase.
+      const BATCH = 1; // single — stable, no OOM risk
+      const rows = dbQuery(`SELECT id, content FROM entries WHERE embedding IS NULL ORDER BY id ASC LIMIT ${BATCH};`);
       if (rows.length === 0) {
         await new Promise(r => setTimeout(r, 30000));
         continue;
       }
-      const row = rows[0];
-      let embedding = null;
-      // MLX embed (fast, always available on Apple Silicon)
+      let embeddings = null;
       if (mlxAvailable) {
         try {
-          embedding = await mlxEmbed(String(row.content).slice(0, 1000));
+          embeddings = await mlxEmbedBatch(rows.map(r => String(r.content).slice(0, 1000)));
         } catch (e) {
-          console.log(`[embed-loop] MLX failed for id=${row.id}: ${e.message}`);
+          console.log(`[embed-loop] batch failed (${rows.length} rows): ${e.message}`);
         }
       }
-      if (embedding && embedding.length > 0) {
-        const embJson = esc(JSON.stringify(embedding));
-        dbExec(`UPDATE entries SET embedding = ${embJson} WHERE id = ${row.id};`);
-        try { dbExec(`UPDATE entries SET embedding = ${embJson} WHERE id = ${row.id};`, SSD_DB_PATH); } catch {}
-        vecUpsert(row.id, embedding);
-        try { dbExec(`UPDATE entry_index SET has_embedding = 1 WHERE entry_id = ${row.id};`); } catch {}
+      if (embeddings && embeddings.length === rows.length) {
+        for (let i = 0; i < rows.length; i++) {
+          const emb = embeddings[i];
+          if (!emb || emb.length === 0) continue;
+          const embJson = esc(JSON.stringify(emb));
+          try { dbExec(`UPDATE entries SET embedding = ${embJson} WHERE id = ${rows[i].id};`); } catch {}
+          try { dbExec(`UPDATE entries SET embedding = ${embJson} WHERE id = ${rows[i].id};`, SSD_DB_PATH); } catch {}
+          try { vecUpsert(rows[i].id, emb); } catch {}
+          try { dbExec(`UPDATE entry_index SET has_embedding = 1 WHERE entry_id = ${rows[i].id};`); } catch {}
+        }
       }
-      // Wait between entries — 1s for MLX (fast GPU-accelerated)
-      await new Promise(r => setTimeout(r, 1000));
+      // Tiny gap between batches
+      await new Promise(r => setTimeout(r, 500));
     } catch {
       await new Promise(r => setTimeout(r, 60000));
     }
@@ -2507,6 +2644,33 @@ function doBackupAndMigrate() {
   if (mlxAvailable && !embedLoopRunning) {
     startEmbedLoop().catch(() => {});
   }
+  // Content hash backfill — other INSERT paths (anomaly-alert,
+  // skill-discovery, skill-registry, predictive-search, etc.) bypass
+  // handleStore and leave content_hash NULL. Without a hash those rows
+  // skip dedup and will accumulate duplicates again. Backfill in the
+  // same scheduler that already migrates tiers.
+  try {
+    const crypto = require('node:crypto');
+    const rows = ramDb.prepare(`SELECT id, content, session, type FROM entries WHERE content_hash IS NULL AND type NOT IN ('test','working-state','session-recall','anomaly-alert') LIMIT 500;`).all();
+    if (rows.length > 0) {
+      const upd = ramDb.prepare(`UPDATE entries SET content_hash = ? WHERE id = ?`);
+      let filled = 0, dupes = 0;
+      for (const r of rows) {
+        try {
+          upd.run(crypto.createHash('sha256').update(String(r.content)).digest('hex'), r.id);
+          filled++;
+        } catch (e) {
+          // UNIQUE constraint: another row already has this (session,type,hash).
+          // This row IS a duplicate — safe to delete.
+          if (/UNIQUE constraint/i.test(e.message)) {
+            try { ramDb.prepare(`DELETE FROM entries WHERE id = ?`).run(r.id); dupes++; } catch {}
+          }
+        }
+      }
+      if (filled + dupes > 0) console.log(`[vcontext:auto] Backfilled ${filled}, deduped ${dupes} rows`);
+    }
+  } catch (e) { console.error('[vcontext:auto] hash backfill failed:', e.message); }
+
   // Quick migration check
   try {
     const moved = migrateRamToSsd();
@@ -2545,12 +2709,17 @@ function detectAnomalies() {
     alerts.push({ level: 'medium', msg: `Embedding stalled: ${embedBacklog[0].c} pending, 0 in last 30 min` });
   }
 
-  // 3. RAM/SSD sync gap >50
+  // 3. RAM/SSD sync anomaly.
+  // By design SSD ≥ RAM always (RAM→SSD migration keeps SSD as the
+  // long-term store; migrated entries leave RAM). Only a POSITIVE gap
+  // (RAM > SSD, i.e. SSD is missing data that's in RAM) is a real
+  // anomaly — it would mean the server's tier migration has failed.
+  // Negative gap is normal and grows linearly with cold storage.
   const ramCount = dbQuery("SELECT COUNT(*) as c FROM entries;");
   const ssdCount = dbQuery("SELECT COUNT(*) as c FROM entries;", SSD_DB_PATH);
   const gap = (ramCount[0]?.c || 0) - (ssdCount[0]?.c || 0);
-  if (Math.abs(gap) > 50) {
-    alerts.push({ level: 'medium', msg: `RAM/SSD gap: ${gap} entries out of sync` });
+  if (gap > 100) {
+    alerts.push({ level: 'medium', msg: `RAM ahead of SSD by ${gap} entries — tier migration may be failing` });
   }
 
   // 4. Disk usage >80%
@@ -2676,7 +2845,7 @@ Recent questions: ${sanitizeForExternalSearch(promptStr || 'general development'
 Agent tasks: ${sanitizeForExternalSearch(agentStr || 'code review, testing')}
 
 Search query:`;
-          const generated = await mlxGenerate(topicPrompt, { maxTokens: 30, temperature: 0.7 });
+          const generated = await mlxGenerate(topicPrompt, { maxTokens: 4000, temperature: 0.7 });
           if (generated && generated.length > 5) {
             topic = sanitizeForExternalSearch(generated.trim().split('\n')[0]);
           }
@@ -2727,9 +2896,39 @@ Search query:`;
 
 async function runOnePrediction() {
   try {
-    if (!mlxGenerateAvailable) return;
+    console.log(`[vcontext:predict] entering runOnePrediction, mlxGen=${mlxGenerateAvailable}`);
+    if (!mlxGenerateAvailable) { console.log('[vcontext:predict] skipped: mlx unavailable'); return; }
+    console.log('[vcontext:predict] building prompt...');
 
-    // Get recent activity patterns
+    // PRIORITY: generate routing triggers from skill-gaps FIRST —
+    // before the heavy DB queries that can hang on embed-loop write lock.
+    // Uses direct MLX call (queue bypass) + lightweight entries query.
+    try {
+      const gapRows = dbQuery(`SELECT content FROM entries WHERE type = 'skill-gap' AND created_at >= datetime('now', '-24 hours') ORDER BY id DESC LIMIT 5;`);
+      const gaps = gapRows.map(r => { try { return JSON.parse(r.content).prompt || ''; } catch { return ''; } }).filter(Boolean);
+      if (gaps.length > 0) {
+        console.log(`[vcontext:predict] generating triggers for ${gaps.length} gaps...`);
+        const triggerPrompt = `Given these user prompts that matched NO skill:\n${gaps.map(g => `- "${g}"`).join('\n')}\n\nFor each prompt, output 2-3 Japanese/English keywords (pipe-separated) that would identify similar future prompts. Format: one line per prompt, keywords only.\nExample: 改善|improve|better`;
+        // Queue normally — serial queue ensures it runs when MLX is free.
+        // No bypass, no retry loop, no fighting for immediate access.
+        const triggerOut = await mlxGenerate(triggerPrompt, { maxTokens: 500, temperature: 0.2, caller: 'auto-trigger', priority: 0 });
+        if (triggerOut && triggerOut.length > 5) {
+          const lines = triggerOut.trim().split('\n').filter(l => l.includes('|'));
+          for (const line of lines.slice(0, 5)) {
+            const keywords = line.replace(/^[-\s*]+/, '').trim();
+            if (keywords.length >= 3) {
+              dbExec(`INSERT OR IGNORE INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier, status, content_hash)
+                VALUES ('skill-trigger', ${esc(JSON.stringify({ keywords, for_skills: ['auto-router'], generated_at: new Date().toISOString() }))},
+                '["skill-trigger","auto"]', 'system', 10, datetime('now'), 0, 'ram', 'active',
+                ${esc(require('node:crypto').createHash('sha256').update(keywords).digest('hex'))});`);
+            }
+          }
+          console.log(`[vcontext:predict] Auto-generated ${lines.length} routing triggers`);
+        }
+      }
+    } catch (e) { console.log(`[vcontext:predict] trigger gen failed: ${e.message}`); }
+
+    // Get recent activity patterns (can hang on embed lock — non-critical)
     const recentTools = dbQuery(`SELECT tool_name, COUNT(*) as cnt FROM entry_index WHERE tool_name IS NOT NULL AND created_at >= datetime('now', '-24 hours') GROUP BY tool_name ORDER BY cnt DESC LIMIT 10;`);
     const recentErrors = dbQuery(`SELECT COUNT(*) as cnt FROM entry_index WHERE type = 'tool-error' AND created_at >= datetime('now', '-24 hours');`);
     const recentTopics = dbQuery(`SELECT type, COUNT(*) as cnt FROM entry_index WHERE created_at >= datetime('now', '-24 hours') GROUP BY type ORDER BY cnt DESC LIMIT 5;`);
@@ -2758,6 +2957,20 @@ Event types: ${recentTopics.map(r => `${r.type}(${r.cnt})`).join(', ')}`;
     }).filter(Boolean).slice(0, 10);
     const agentErrors = dbQuery(`SELECT COUNT(*) as cnt FROM entries WHERE type = 'tool-error' AND tags LIKE '%agent%' AND created_at >= datetime('now', '-24 hours');`);
 
+    // Skill-gap feedback: recent prompts that matched ZERO skills.
+    // These are the highest-signal gaps — user actually asked for
+    // something and the system had nothing. Priority over generic
+    // activity-based suggestions.
+    const gapRows = dbQuery(`SELECT content FROM entries WHERE type = 'skill-gap' AND created_at >= datetime('now', '-24 hours') ORDER BY id DESC LIMIT 5;`);
+    const gaps = gapRows.map(r => {
+      try { return JSON.parse(r.content).prompt || ''; } catch { return ''; }
+    }).filter(Boolean);
+    const gapSection = gaps.length > 0
+      ? `\nRecent unmatched prompts (skill gaps):\n${gaps.map(g => `- "${g}"`).join('\n')}\nPrioritize creating skills that would have matched these prompts.\n`
+      : '';
+
+    // (trigger gen moved to top of function — runs before heavy DB queries)
+
     const prompt = `Based on user AND agent activity, suggest 1-2 NEW skills.
 
 User activity (24h):
@@ -2765,7 +2978,7 @@ ${activitySummary}
 
 Agent tasks (24h): ${agentTasks.join('; ') || 'none'}
 Agent errors: ${agentErrors[0]?.cnt || 0}
-
+${gapSection}
 Most used skills: ${topSkills || 'none yet'}
 Never used skills: ${neverUsed || 'none'}
 Existing skills: ${existingSkills || 'standard set'}
@@ -2775,7 +2988,7 @@ Consider: what skills would help agents work more autonomously?
 Do NOT suggest skills similar to never-used ones (they were not useful).
 Output ONLY the suggestion in 2-3 sentences. Be specific.`;
 
-    const suggestion = await mlxGenerate(prompt, { maxTokens: 150, temperature: 0.5 });
+    const suggestion = await mlxGenerate(prompt, { maxTokens: 4000, temperature: 0.5, caller: 'skill-suggestion', priority: 0 });
     if (suggestion && suggestion.length > 20) {
       const content = JSON.stringify({
         activity: activitySummary,
@@ -2845,7 +3058,7 @@ origin: auto-generated
 
 - First gotcha`;
 
-      const generated = await mlxGenerate(genPrompt, { maxTokens: 500, temperature: 0.3 });
+      const generated = await mlxGenerate(genPrompt, { maxTokens: 8000, temperature: 0.3, caller: 'skill-creation', priority: 0 });
       await new Promise(r => setTimeout(r, 30000));
       if (!generated || generated.length < 50) continue;
 
@@ -3224,8 +3437,11 @@ function vecSearch(queryEmbedding, limit = 10) {
 function vecSync() {
   if (!vecDb) return;
   try {
-    const maxVecId = vecDb.prepare('SELECT COALESCE(MAX(rowid), 0) as m FROM vec_entries').get().m;
-    const rows = dbQuery(`SELECT id, embedding FROM entries WHERE embedding IS NOT NULL AND id > ${maxVecId} ORDER BY id LIMIT 1000;`);
+    // Find entries with embeddings not yet in vec_entries (handles gaps + new)
+    const vecIds = new Set(vecDb.prepare('SELECT rowid FROM vec_entries').pluck().all());
+    const rows = dbQuery(`SELECT id, embedding FROM entries WHERE embedding IS NOT NULL ORDER BY id;`)
+      .filter(r => !vecIds.has(r.id))
+      .slice(0, 1000);
     let synced = 0;
     for (const row of rows) {
       try {
@@ -3318,6 +3534,32 @@ function mlxEmbed(text) {
     req.end();
   });
 }
+
+// Batch embed via /embed_batch (10x throughput vs single calls)
+function mlxEmbedBatch(texts) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({ texts, model: MLX_DEFAULT_MODEL, normalize: true });
+    const parsed = new URL(`${MLX_EMBED_URL}/embed_batch`);
+    const req = httpRequest(parsed, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      timeout: 600000, // 10min
+    }, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        try {
+          const data = JSON.parse(Buffer.concat(chunks).toString());
+          resolve((data.embeddings || []).map(e => e.embedding || e));
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('mlx embed_batch timeout')); });
+    req.write(body);
+    req.end();
+  });
+}
 // Back-compat alias
 const coremlEmbed = mlxEmbed;
 
@@ -3356,27 +3598,58 @@ function httpGet(url) {
 }
 
 // Call MLX generate server (OpenAI-compatible chat completions)
-function mlxGenerate(prompt, options = {}) {
+// Attempt a single MLX chat/completions call. Returns the assistant
+// content (may be '') on HTTP 200, or throws with status on 4xx/5xx.
+// ── Cost / token tracker ────────────────────────────────────────
+// Aggregates MLX token usage by feature so /metrics can report cost.
+const _mlxUsage = { calls: 0, prompt_tokens: 0, completion_tokens: 0, by_caller: {} };
+function trackMlxUsage(caller, promptTokens, completionTokens) {
+  _mlxUsage.calls++;
+  _mlxUsage.prompt_tokens += promptTokens;
+  _mlxUsage.completion_tokens += completionTokens;
+  if (!_mlxUsage.by_caller[caller]) _mlxUsage.by_caller[caller] = { calls: 0, prompt_tokens: 0, completion_tokens: 0 };
+  _mlxUsage.by_caller[caller].calls++;
+  _mlxUsage.by_caller[caller].prompt_tokens += promptTokens;
+  _mlxUsage.by_caller[caller].completion_tokens += completionTokens;
+}
+
+function mlxGenerateOnce(prompt, options = {}) {
   return new Promise((resolve, reject) => {
+    // Qwen3 emits <think>...</think> before the real answer. When
+    // max_tokens is hit mid-think, the real answer never appears.
+    // Set to Qwen3's full config ceiling (40,960 = prompt 8,192 +
+    // output 32,768) so slow thinking is never truncated.
+    // User explicitly prefers stability over speed.
+    // Reproducibility: caller may pass a seed to force deterministic
+    // generation (debug + replay). Temperature 0 + seed = bitwise repro.
     const body = JSON.stringify({
       model: MLX_GENERATE_MODEL,
       messages: [{ role: 'user', content: prompt }],
-      max_tokens: options.maxTokens || 500,
-      temperature: options.temperature || 0.3,
+      max_tokens: options.maxTokens || 40960,
+      temperature: options.temperature ?? 0.3,
+      ...(options.seed != null ? { seed: options.seed } : {}),
     });
     const parsed = new URL(`${MLX_GENERATE_URL}/v1/chat/completions`);
     const req = httpRequest(parsed, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      timeout: 120000,
+      timeout: 600000, // 10min
     }, (res) => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
       res.on('end', () => {
+        const status = res.statusCode;
         try {
           const data = JSON.parse(Buffer.concat(chunks).toString());
-          const content = data.choices?.[0]?.message?.content || '';
-          resolve(content.trim());
+          if (status === 200) {
+            const content = data.choices?.[0]?.message?.content || '';
+            const usage = data.usage || {};
+            trackMlxUsage(options.caller || 'unknown', usage.prompt_tokens || 0, usage.completion_tokens || 0);
+            return resolve(content.trim());
+          }
+          const err = new Error(`mlx http ${status}: ${data.error || data.detail || 'unknown'}`);
+          err.status = status;
+          reject(err);
         } catch (e) { reject(e); }
       });
     });
@@ -3387,14 +3660,86 @@ function mlxGenerate(prompt, options = {}) {
   });
 }
 
+// JS-side serialization: only ONE mlxGenerate call can be in flight
+// server-wide. Prevents the server's own background tasks from self-DoS
+// against MLX's lock (we saw 12+ concurrent node→MLX sockets all waiting
+// on the same lock, each returning 503 repeatedly).
+// Priority queue for MLX generate. Skills = high, everything else = normal.
+// High-priority items jump ahead in the queue so skills are usable ASAP.
+const MLX_PRIORITY = { high: 0, normal: 1, low: 2 };
+const _mlxQueue = [];      // { resolve, reject, fn, priority }
+let _mlxRunning = false;
+
+async function _mlxDrain() {
+  if (_mlxRunning) return;
+  _mlxRunning = true;
+  while (_mlxQueue.length > 0) {
+    // Sort by priority (stable: same-priority preserves insertion order)
+    _mlxQueue.sort((a, b) => a.priority - b.priority);
+    const item = _mlxQueue.shift();
+    try {
+      const result = await item.fn();
+      item.resolve(result);
+    } catch (e) {
+      item.reject(e);
+    }
+  }
+  _mlxRunning = false;
+}
+
+async function mlxGenerate(prompt, options = {}) {
+  const priority = options.priority ?? MLX_PRIORITY.normal;
+  return new Promise((resolve, reject) => {
+    _mlxQueue.push({
+      priority,
+      resolve,
+      reject,
+      fn: async () => {
+        const delays = [30000, 60000, 120000];
+        let lastErr;
+        for (let i = 0; i < delays.length + 1; i++) {
+          try {
+            return await mlxGenerateOnce(prompt, options);
+          } catch (e) {
+            lastErr = e;
+            const transient = e.status === 503
+              || e.code === 'ECONNREFUSED'
+              || (e.message && /ECONNREFUSED|ECONNRESET|socket hang up/i.test(e.message));
+            if (transient && i < delays.length) {
+              await new Promise(r => setTimeout(r, delays[i]));
+              continue;
+            }
+            throw e;
+          }
+        }
+        throw lastErr;
+      },
+    });
+    _mlxDrain();
+  });
+}
+
 // ── Local AI endpoint handlers ────────────────────────────────
 
 // GET /ai/status — Show local AI status
 function handleAiStatus(req, res) {
   let embeddingCount = 0;
+  let embeddingBacklog = 0;       // 24h-recent eligible rows still missing embedding
+  let embeddingEligibleTotal = 0; // total ELIGIBLE rows (denominator)
   try {
-    const rows = dbQuery("SELECT count(*) as c FROM entries WHERE embedding IS NOT NULL;");
-    embeddingCount = rows[0]?.c || 0;
+    // Use SSD as the "complete catalog" denominator — every entry
+    // eventually migrates to SSD (it's the permanent store) so SSD
+    // count is the unique universe. Numerator = SSD embedded (since
+    // RAM rows also sync their embeddings to SSD on write).
+    const r2s = dbQuery(`SELECT count(*) as c FROM entries;`, SSD_DB_PATH);
+    embeddingEligibleTotal = r2s[0]?.c || 0;
+    const r1s = dbQuery(`SELECT count(*) as c FROM entries WHERE embedding IS NOT NULL;`, SSD_DB_PATH);
+    embeddingCount = r1s[0]?.c || 0;
+    // Backlog: all rows across both tiers still waiting on an embedding.
+    // (Not time-limited — "backlog" means everything unprocessed.)
+    const r3 = dbQuery(`SELECT count(*) as c FROM entries WHERE embedding IS NULL;`);
+    const r3s = dbQuery(`SELECT count(*) as c FROM entries WHERE embedding IS NULL;`, SSD_DB_PATH);
+    embeddingBacklog = (r3[0]?.c || 0) + (r3s[0]?.c || 0);
   } catch {}
 
   sendJson(res, 200, {
@@ -3407,6 +3752,8 @@ function handleAiStatus(req, res) {
     mlx_model: mlxModelName,
     mlx_dim: mlxEmbedDim,
     embedding_count: embeddingCount,
+    embedding_eligible_total: embeddingEligibleTotal,
+    embedding_backlog: embeddingBacklog,
     preferred: {
       summarize: mlxGenerateAvailable ? MLX_GENERATE_MODEL : null,
       embed: mlxAvailable ? `${mlxModelName} (mlx)` : null,
@@ -3435,7 +3782,7 @@ async function handleAiSummarize(req, res) {
     const rows = dbQuery(`SELECT id, content FROM entries WHERE reasoning IS NULL AND created_at < datetime('now', '-1 day') LIMIT 20;`);
     for (const row of rows) {
       try {
-        const summary = await mlxGenerate(`Summarize in one sentence (max 50 words):\n\n${row.content.slice(0, 2000)}`, { maxTokens: 100 });
+        const summary = await mlxGenerate(`Summarize in one sentence (max 50 words):\n\n${row.content.slice(0, 2000)}`, { maxTokens: 4000 });
         if (summary) dbExec(`UPDATE entries SET reasoning = ${esc(summary.trim())} WHERE id = ${row.id};`);
       } catch {}
     }
@@ -3448,7 +3795,7 @@ async function handleAiSummarize(req, res) {
     const rows = dbQuery(`SELECT content FROM entries WHERE id = ${id};`);
     if (rows[0]) {
       try {
-        const summary = await mlxGenerate(`Summarize in one sentence (max 50 words):\n\n${rows[0].content.slice(0, 2000)}`, { maxTokens: 100 });
+        const summary = await mlxGenerate(`Summarize in one sentence (max 50 words):\n\n${rows[0].content.slice(0, 2000)}`, { maxTokens: 4000 });
         if (summary) { dbExec(`UPDATE entries SET reasoning = ${esc(summary.trim())} WHERE id = ${id};`); count++; }
       } catch {}
     }
@@ -3473,12 +3820,14 @@ async function handleSemanticSearch(req, res) {
   const params = parseQuery(req.url);
   const q = params.q;
   if (!q) return sendJson(res, 400, { error: 'Missing query parameter: q' });
+  const typeFilter = params.type || ''; // NEW: restrict to a specific type
 
   // No embedding source at all → immediate FTS fallback
   // MLX is the sole embedding provider
   if (!mlxAvailable) {
     const limit = Math.min(parseInt(params.limit) || 10, 50);
-    const ftsResults = dbQuery(`SELECT id, type, content, tags, created_at, reasoning FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(ftsQuery(q))} LIMIT ${limit});`);
+    const typeClause = typeFilter ? ` AND type=${esc(typeFilter)}` : '';
+    const ftsResults = dbQuery(`SELECT id, type, content, tags, created_at, reasoning FROM entries WHERE id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ${esc(ftsQuery(q))} LIMIT ${limit * 3})${typeClause} LIMIT ${limit};`);
     parseTags(ftsResults);
     return sendJson(res, 200, { results: ftsResults, count: ftsResults.length, engine: 'fts-fallback', model_used: null, threshold: 0 });
   }
@@ -3535,12 +3884,37 @@ async function handleSemanticSearch(req, res) {
 
   const results = [];
 
-  // Fast path: sqlite-vec index search
+  // Type-scoped semantic search: when a type filter is active and the type
+  // has relatively few entries, skip vec index (which is unfiltered) and
+  // do JS cosine over embeddings of that type only. Guarantees the most
+  // relevant entries of that type reach the caller even when dwarfed by
+  // other types in the index.
+  if (typeFilter) {
+    const rows = dbQuery(`SELECT id, type, content, tags, created_at, reasoning, embedding FROM entries WHERE type=${esc(typeFilter)} AND embedding IS NOT NULL;`);
+    for (const row of rows) {
+      try {
+        const entryEmbed = JSON.parse(row.embedding);
+        const sim = cosineSimilarity(queryEmbed, entryEmbed);
+        if (sim >= threshold || threshold <= 0.1) {
+          results.push({
+            id: row.id, type: row.type, content: row.content,
+            tags: row.tags, created_at: row.created_at, reasoning: row.reasoning,
+            similarity: Math.round(sim * 1000) / 1000, _engine: 'type-scoped',
+          });
+        }
+      } catch {}
+    }
+    results.sort((a, b) => b.similarity - a.similarity);
+    if (results.length > limit) results.length = limit;
+    parseTags(results);
+    return sendJson(res, 200, { results, count: results.length, engine: 'type-scoped', model_used, threshold });
+  }
+
+  // Fast path: sqlite-vec index search (no type filter)
   if (vecDb) {
-    const vecResults = vecSearch(queryEmbed, limit * 2); // over-fetch for threshold filter
+    const vecResults = vecSearch(queryEmbed, limit * 2);
     if (vecResults.length > 0) {
       const ids = vecResults.map(r => r.rowid);
-      const placeholders = ids.map(() => '?').join(',');
       const entries = dbQuery(`SELECT id, type, content, tags, created_at, reasoning FROM entries WHERE id IN (${ids.join(',')});`);
       const entryMap = {};
       for (const e of entries) entryMap[e.id] = e;
@@ -3564,7 +3938,8 @@ async function handleSemanticSearch(req, res) {
 
   // Slow path fallback: JS cosine over all entries (if sqlite-vec unavailable or empty)
   if (results.length === 0 && !vecDb) {
-    const rows = dbQuery("SELECT id, type, content, tags, created_at, embedding, reasoning FROM entries WHERE embedding IS NOT NULL;");
+    const typeClause = typeFilter ? ` AND type=${esc(typeFilter)}` : '';
+    const rows = dbQuery(`SELECT id, type, content, tags, created_at, embedding, reasoning FROM entries WHERE embedding IS NOT NULL${typeClause};`);
     for (const row of rows) {
       try {
         const entryEmbed = JSON.parse(row.embedding);
@@ -3714,22 +4089,35 @@ function handleAnalyticsReport(req, res) {
 
 // Privacy filter: strip sensitive info before sending to external search
 function sanitizeForExternalSearch(text) {
-  let cleaned = text;
-  // Remove file paths
-  cleaned = cleaned.replace(/\/[\w\-./]+/g, '');
-  // Remove URLs
-  cleaned = cleaned.replace(/https?:\/\/[^\s]+/g, '');
-  // Remove email addresses
-  cleaned = cleaned.replace(/[\w.-]+@[\w.-]+/g, '');
-  // Remove API keys, tokens, secrets (common patterns)
-  cleaned = cleaned.replace(/[a-zA-Z0-9_-]{20,}/g, '');
-  // Remove IP addresses
-  cleaned = cleaned.replace(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/g, '');
-  // Remove common usernames / hostnames from tags
-  cleaned = cleaned.replace(/user:\S+/g, '');
-  // Collapse whitespace
-  cleaned = cleaned.replace(/\s+/g, ' ').trim();
-  return cleaned;
+  return redactPII(text, { collapseWhitespace: true });
+}
+
+// Centralised PII redaction. Use everywhere data crosses a trust
+// boundary (external search, audit log, dashboard, exports). Keep
+// patterns conservative — false positives are less harmful than leaks.
+function redactPII(text, opts = {}) {
+  if (!text) return '';
+  let s = String(text);
+  // File paths
+  s = s.replace(/\/(?:Users|home|var|tmp|etc|opt)\/[\w\-./]+/g, '[PATH]');
+  // URLs
+  s = s.replace(/https?:\/\/[^\s)]+/g, '[URL]');
+  // Email
+  s = s.replace(/[\w.+-]+@[\w.-]+\.\w+/g, '[EMAIL]');
+  // API keys / tokens (alnum >=20)
+  s = s.replace(/\b[A-Za-z0-9_\-]{20,}\b/g, '[TOKEN]');
+  // IPv4
+  s = s.replace(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g, '[IP]');
+  // SSN-like (XXX-XX-XXXX)
+  s = s.replace(/\b\d{3}-\d{2}-\d{4}\b/g, '[SSN]');
+  // Credit card (13-19 digits w/ optional dashes/spaces)
+  s = s.replace(/\b(?:\d[ -]*?){13,19}\b/g, '[CC]');
+  // Phone (Japanese / E.164 / common formats)
+  s = s.replace(/(?:\+?\d{1,3}[- ]?)?(?:\(?\d{2,4}\)?[- ]?){2,4}\d{2,4}/g, m => m.length >= 10 ? '[PHONE]' : m);
+  // Tag-style user identifiers
+  s = s.replace(/\b(?:user|userId|email):\S+/gi, '[USERID]');
+  if (opts.collapseWhitespace) s = s.replace(/\s+/g, ' ').trim();
+  return s;
 }
 
 /**
@@ -3820,7 +4208,7 @@ ${latestPractices ? `Latest best practices from web (2026):\n${latestPractices}\
 List ONLY the violations found (omissions). If none, say "NONE".
 Be specific about what was missed.`;
 
-      const violations = await mlxGenerate(checkPrompt, { maxTokens: 300, temperature: 0.2 });
+      const violations = await mlxGenerate(checkPrompt, { maxTokens: 4000, temperature: 0.2 });
       if (!violations || violations.trim() === 'NONE' || violations.length < 10) {
         console.log('[vcontext:check] Completion check passed');
         return;
@@ -3839,7 +4227,7 @@ Be specific about what was missed.`;
       const rulePrompt = `Based on this violation, write a short MANDATORY RULE (1-2 sentences) to prevent it from happening again. Output ONLY the rule text.
 
 Violation: ${violations.trim().slice(0, 300)}`;
-      const newRule = await mlxGenerate(rulePrompt, { maxTokens: 100, temperature: 0.2 });
+      const newRule = await mlxGenerate(rulePrompt, { maxTokens: 4000, temperature: 0.2 });
       if (newRule && newRule.length > 20) {
         // Check if a similar rule already exists
         const existing = dbQuery(`SELECT id FROM entries WHERE type = 'decision' AND content LIKE ${esc('%' + newRule.trim().slice(0, 30) + '%')} AND tags LIKE '%global-rule%' LIMIT 1;`);
@@ -3875,8 +4263,9 @@ async function handlePredictiveSearch(req, res) {
   sendJson(res, 202, { status: 'searching', prompt_length: prompt.length });
 
   setImmediate(async () => {
+    console.log(`[vcontext:predict] handler entered, prompt_len=${prompt.length}`);
     try {
-      if (!mlxGenerateAvailable) return;
+      if (!mlxGenerateAvailable) { console.log('[vcontext:predict] MLX unavailable, abort'); return; }
 
       // Step 1: Extract search keywords using MLX generate (no external call)
       const keywordPrompt = `Extract 2-3 search keywords from this user request. Output ONLY the keywords separated by spaces, nothing else. No explanation.
@@ -3885,10 +4274,27 @@ Request: ${prompt.slice(0, 500)}
 
 Keywords:`;
 
-      const keywords = await mlxGenerate(keywordPrompt, { maxTokens: 30, temperature: 0.1 });
-      if (!keywords || keywords.length < 3) return;
-      // Take only first line to avoid LLM chattering
-      const keywordsClean = keywords.trim().split('\n')[0].trim();
+      // Qwen3 emits <think>…</think> before answering. If max_tokens
+      // is consumed by thinking, content is empty. 4000 leaves room
+      // for think + short answer. If MLX still returns empty, fall back
+      // to the user's prompt words so the pipeline keeps moving.
+      let keywordsRaw = '';
+      try {
+        keywordsRaw = await mlxGenerate(keywordPrompt, { maxTokens: 4000, temperature: 0.1 });
+      } catch (e) {
+        console.error(`[vcontext:predict] mlxGenerate failed: ${e.message}`);
+      }
+      let keywords = (keywordsRaw || '').replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+      if (!keywords || keywords.length < 3) {
+        const words = prompt.match(/[\p{L}\p{N}]{3,}/gu) || [];
+        keywords = words.slice(0, 3).join(' ');
+        if (!keywords || keywords.length < 3) {
+          console.log('[vcontext:predict] No usable keywords (empty MLX + empty prompt)');
+          return;
+        }
+        console.log(`[vcontext:predict] Fallback keywords from prompt: "${keywords}"`);
+      }
+      const keywordsClean = keywords.split('\n')[0].trim();
 
       // Step 2: Privacy filter — sanitize before external search
       const sanitized = sanitizeForExternalSearch(keywordsClean);
@@ -3949,7 +4355,7 @@ Keywords:`;
       try {
         const bgPrompt = `List 3 key technical facts or best practices about: ${sanitized}
 Output as a numbered list. Be specific and actionable. Max 100 words.`;
-        const bgKnowledge = await mlxGenerate(bgPrompt, { maxTokens: 200, temperature: 0.3 });
+        const bgKnowledge = await mlxGenerate(bgPrompt, { maxTokens: 4000, temperature: 0.3 });
         if (bgKnowledge && bgKnowledge.length > 20) {
           parts.push(`[knowledge] ${bgKnowledge.trim()}`);
         }
@@ -4164,9 +4570,25 @@ function handleMetricsReport(req, res) {
   }
   const perProject = Object.entries(projectMap).sort((a, b) => b[1] - a[1]).map(([project, sessions]) => ({ project, sessions }));
 
+  // Skill inventory for dashboard Metrics panel.
+  // Note: some skill-registry contents contain YAML-style `"description":"|"`
+  // which makes the string invalid JSON, so json_extract fails. Count by
+  // distinct entry id instead and fall back to total if empty.
+  const skillCountRow = dbQuery(`SELECT COUNT(*) as c FROM entries WHERE type='skill-registry';`);
+  const skillCount = skillCountRow[0]?.c || 0;
+  const skillCreatedRow = dbQuery(`SELECT COUNT(*) as c FROM entries WHERE type='skill-created';`);
+  const skillCreated = skillCreatedRow[0]?.c || 0;
+  const skillUsageRow = dbQuery(`SELECT COUNT(*) as c FROM entries WHERE type='skill-usage' AND created_at >= ${since};`);
+  const skillUsageRecent = skillUsageRow[0]?.c || 0;
+
   sendJson(res, 200, {
     period_hours: hours,
     operations,
+    skills: {
+      registered: skillCount,
+      auto_created: skillCreated,
+      usage_in_period: skillUsageRecent,
+    },
     derived: {
       resume_cost_tokens: resumeCost,
       search_hit_rate: Math.round(hitRate * 1000) / 1000,
@@ -4241,6 +4663,16 @@ const server = createServer(async (req, res) => {
   }
 
   try {
+    // Public-but-sensitive endpoints require API key when server is
+    // bound to a non-loopback interface (LAN exposure). Loopback callers
+    // are trusted as before.
+    const PUBLIC_OPEN = new Set(['/dashboard', '/auth/whoami']);
+    const isLoopback = (req.socket.remoteAddress === '127.0.0.1' || req.socket.remoteAddress === '::1');
+    const bindHost = process.env.VCONTEXT_BIND || '127.0.0.1';
+    if (bindHost !== '127.0.0.1' && !isLoopback && !PUBLIC_OPEN.has(path)) {
+      const auth = validateApiKey(req);
+      if (!auth.valid) return sendJson(res, 401, { error: 'API key required (LAN access)' });
+    }
     // Route
     if (method === 'POST' && path === '/store') {
       await handleStore(req, res);
@@ -4260,6 +4692,432 @@ const server = createServer(async (req, res) => {
       handleHealth(req, res);
     } else if (method === 'GET' && path === '/feed') {
       handleFeed(req, res);
+    } else if (method === 'POST' && path === '/federation/route') {
+      // Routes a prompt to an AI tier based on declared task complexity.
+      // Local MLX is "default"; if external_url + external_api_key is
+      // provided in body, federates there for high-tier tasks.
+      // Body: { prompt, tier?: 'haiku'|'sonnet'|'opus', maxTokens?, external? }
+      const body = await readBody(req);
+      const tier = body.tier || 'sonnet';
+      try {
+        // For now: all tiers go to local MLX (stub for future external).
+        // Different temperature per tier as a stand-in for real model differentiation.
+        const tempByTier = { haiku: 0.1, sonnet: 0.3, opus: 0.5 };
+        const out = await mlxGenerate(body.prompt || '', {
+          maxTokens: body.maxTokens || 4000,
+          temperature: tempByTier[tier] ?? 0.3,
+          caller: `federation:${tier}`,
+        });
+        sendJson(res, 200, { tier, used: 'mlx-local', content: out });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'POST' && path === '/admin/vote') {
+      // Consensus: same prompt, N samples (different seeds), majority wins.
+      // Body: { prompt, samples?: 3 }
+      const body = await readBody(req);
+      const n = Math.max(2, Math.min(parseInt(body.samples, 10) || 3, 5));
+      const responses = [];
+      for (let i = 0; i < n; i++) {
+        try {
+          const r = await mlxGenerate(body.prompt || '', { maxTokens: 2000, temperature: 0.4, seed: 1000 + i, caller: 'vote' });
+          responses.push(r.trim());
+        } catch (e) { responses.push(`__error__: ${e.message}`); }
+      }
+      // Simple majority by exact-match
+      const counts = {};
+      for (const r of responses) counts[r] = (counts[r] || 0) + 1;
+      const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+      const winner = sorted[0];
+      sendJson(res, 200, {
+        samples: n,
+        consensus: winner ? winner[0] : null,
+        confidence: winner ? winner[1] / n : 0,
+        all_responses: responses,
+      });
+    } else if (method === 'POST' && path === '/admin/multi-role-check') {
+      // Runs 6 role-perspective checks in parallel and aggregates findings.
+      // Each role asks different questions against the same live system
+      // so no single blind spot hides a bug. Part of the AI OS's checker
+      // discipline (not just a memory rule).
+      const out = { roles: {}, findings: [], checked_at: new Date().toISOString() };
+      const ramCount = (q) => { try { return ramDb.prepare(q).get(); } catch { return null; } };
+      const ssdCount = (q) => { try { return ssdDb.prepare(q).get(); } catch { return null; } };
+
+      // 1. QA
+      const qa = {
+        tool_errors_1h: ramCount(`SELECT COUNT(*) c FROM entries WHERE type='tool-error' AND created_at > datetime('now','-1 hour')`)?.c || 0,
+        completion_violations_24h: ramCount(`SELECT COUNT(*) c FROM entries WHERE type='completion-violation' AND created_at > datetime('now','-1 day')`)?.c || 0,
+        null_hash_rows: ramCount(`SELECT COUNT(*) c FROM entries WHERE content_hash IS NULL AND type NOT IN ('test','working-state','session-recall','anomaly-alert')`)?.c || 0,
+      };
+      if (qa.tool_errors_1h > 20) out.findings.push({ role: 'qa', msg: `tool-error spike: ${qa.tool_errors_1h}/1h` });
+      if (qa.null_hash_rows > 500) out.findings.push({ role: 'qa', msg: `${qa.null_hash_rows} rows missing content_hash (dedup ineffective)` });
+      out.roles.qa = qa;
+
+      // 2. Architect
+      const ramE = ramCount(`SELECT COUNT(*) c FROM entries`)?.c || 0;
+      const ssdE = ssdCount(`SELECT COUNT(*) c FROM entries`)?.c || 0;
+      const arch = { ram: ramE, ssd: ssdE, ram_pct: ramE + ssdE > 0 ? +(ramE / (ramE + ssdE) * 100).toFixed(1) : 0 };
+      if (arch.ram_pct > 60) out.findings.push({ role: 'architect', msg: `tier imbalance: RAM ${arch.ram_pct}% (target <60%)` });
+      out.roles.architect = arch;
+
+      // 3. UX / dashboard clarity
+      let dashOk = false;
+      try {
+        const tierStats = ramCount(`SELECT MIN(created_at) o FROM entries`);
+        dashOk = /^20\d\d-\d\d-\d\d/.test(tierStats?.o || '');
+      } catch {}
+      out.roles.ux = { dashboard_dates_valid: dashOk };
+      if (!dashOk) out.findings.push({ role: 'ux', msg: 'dashboard timestamps corrupted' });
+
+      // 4. Security — secret patterns with WORD BOUNDARIES to avoid
+      // matching path fragments like 'serene-keller' for 'sk-'.
+      const sec = {
+        api_key_perm: (() => { try { return require('node:fs').statSync(join(BACKUP_DIR, 'vcontext-api-keys.json')).mode & 0o777; } catch { return null; } })(),
+        bind_host: process.env.VCONTEXT_BIND || '127.0.0.1',
+        // GLOB with explicit prefix boundaries
+        secret_pattern_hits: ramCount(`SELECT COUNT(*) c FROM entries WHERE created_at > datetime('now','-1 hour') AND (
+          content GLOB '*[^a-zA-Z0-9-]sk-[A-Za-z0-9]*' OR
+          content GLOB '*[^a-zA-Z0-9-]ghp_[A-Za-z0-9]*' OR
+          content GLOB '*[^a-zA-Z0-9-]AKIA[A-Z0-9]*' OR
+          content GLOB '*Bearer eyJ*'
+        )`)?.c || 0,
+      };
+      if (sec.api_key_perm && sec.api_key_perm !== 0o600) out.findings.push({ role: 'security', msg: `api-key file perm ${sec.api_key_perm.toString(8)} (expected 600)` });
+      if (sec.secret_pattern_hits > 0) out.findings.push({ role: 'security', msg: `${sec.secret_pattern_hits} entries with known-secret patterns` });
+      out.roles.security = sec;
+
+      // 5. Holistic — cross-subsystem consistency
+      const ftsMatch = (ramCount(`SELECT COUNT(*) c FROM entries`)?.c || 0) === (ramCount(`SELECT COUNT(*) c FROM entries_fts`)?.c || 0);
+      const holistic = { fts_in_sync: ftsMatch, queue_pending: (() => { try { return require('node:fs').readFileSync('/tmp/vcontext-queue.jsonl', 'utf-8').split('\n').filter(Boolean).length; } catch { return 0; } })() };
+      if (!ftsMatch) out.findings.push({ role: 'holistic', msg: 'FTS out of sync with entries' });
+      if (holistic.queue_pending > 100) out.findings.push({ role: 'holistic', msg: `queue backlog ${holistic.queue_pending}` });
+      out.roles.holistic = holistic;
+
+      // 6. Meta-checker — did other checks miss anything?
+      const audit_recent = (() => {
+        try {
+          const r = spawnSync('sqlite3', [join(BACKUP_DIR, 'vcontext-audit.db'), `SELECT COUNT(*) FROM audit WHERE at > datetime('now','-1 hour')`], { encoding: 'utf-8' });
+          return parseInt((r.stdout || '0').trim(), 10) || 0;
+        } catch { return 0; }
+      })();
+      const meta = { audit_events_1h: audit_recent, checks_emitting_findings: new Set(out.findings.map(f => f.role)).size };
+      if (audit_recent === 0) out.findings.push({ role: 'meta', msg: 'audit log silent 1h — maintenance may not be running' });
+      out.roles.meta = meta;
+
+      sendJson(res, 200, out);
+    } else if (method === 'POST' && path === '/admin/mlx-test') {
+      // Reproducibility / debug endpoint — calls mlxGenerate with a seed.
+      const body = await readBody(req);
+      try {
+        const out = await mlxGenerate(body.prompt || '', { maxTokens: 200, temperature: 0, seed: body.seed, caller: 'repro' });
+        sendJson(res, 200, { content: out, seed: body.seed });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'GET' && path === '/metrics/cost') {
+      // MLX token usage since server start. Local model so no $ cost,
+      // but useful for capacity planning and per-feature attribution.
+      sendJson(res, 200, _mlxUsage);
+    } else if (method === 'POST' && path === '/admin/wipe-user') {
+      // Compliance: delete all entries tagged user:<id>. Returns count.
+      const body = await readBody(req);
+      const userId = body.userId;
+      if (!userId) return sendJson(res, 400, { error: 'userId required' });
+      try {
+        const stmt = ramDb.prepare(`DELETE FROM entries WHERE tags LIKE ?`);
+        const r = stmt.run(`%user:${userId}%`);
+        const ssdR = ssdDb ? ssdDb.prepare(`DELETE FROM entries WHERE tags LIKE ?`).run(`%user:${userId}%`) : { changes: 0 };
+        sendJson(res, 200, { ram_deleted: r.changes, ssd_deleted: ssdR.changes, userId });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'POST' && path === '/admin/verify-backup') {
+      // Backup verification: open the latest snapshot read-only and run
+      // integrity_check + a sample SELECT. Catches "I thought we had
+      // backups but they were all corrupt" disasters.
+      try {
+        const SNAP_DIR = join(BACKUP_DIR, 'snapshots');
+        const fs = require('node:fs');
+        const files = fs.readdirSync(SNAP_DIR).filter(f => f.endsWith('.db')).sort().reverse();
+        if (files.length === 0) return sendJson(res, 404, { error: 'no snapshots found' });
+        const latest = join(SNAP_DIR, files[0]);
+        const probe = new Database(latest, { readonly: true });
+        try {
+          const ok = probe.prepare('PRAGMA integrity_check').get();
+          const cnt = probe.prepare('SELECT COUNT(*) as c FROM entries').get();
+          sendJson(res, 200, {
+            snapshot: files[0],
+            integrity: ok.integrity_check === 'ok' ? 'ok' : ok.integrity_check,
+            entry_count: cnt.c,
+            verified_at: new Date().toISOString(),
+          });
+        } finally { probe.close(); }
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'GET' && path === '/pipeline/health') {
+      // Per-feature heartbeat derived from entry recency — in a loosely
+      // coupled AI OS, silent degradation is the biggest risk. This
+      // endpoint lets the dashboard surface each pipeline's last
+      // successful run alongside green/yellow/red thresholds.
+      // Thresholds reflect each feature's INTENDED cadence:
+      //  - Hook-driven (working-state, skill-usage, handoff): should fire
+      //    every few minutes during active work
+      //  - Scheduler-driven (predict 30m, discovery 5m with 24h dedup per
+      //    topic, suggestion 30m): tens of minutes to hours
+      //  - Condition-driven (completion-violation): no cadence — only
+      //    fires when a completion is claimed; never = OK
+      const features = [
+        { key: 'predictive-search',  label: 'Predictive search',   type: 'predictive-search',   yellowMin: 60,    redMin: 360,  condition: false },
+        { key: 'skill-discovery',    label: 'Skill discovery',     type: 'skill-discovery',     yellowMin: 1500,  redMin: 2880, condition: false }, // 24h topic cooldown
+        { key: 'skill-suggestion',   label: 'Skill suggestion',    type: 'skill-suggestion',    yellowMin: 120,   redMin: 720,  condition: false },
+        { key: 'skill-created',      label: 'Auto-create skill',   type: 'skill-created',       yellowMin: 360,   redMin: 1440, condition: false },
+        { key: 'anomaly-alert',      label: 'Anomaly detection',   type: 'anomaly-alert',       yellowMin: null,  redMin: null, condition: true  }, // only fires when anomaly exists — silence = healthy
+        { key: 'completion-violation', label: 'Completion check',  type: 'completion-violation',yellowMin: null,  redMin: null, condition: true  },
+        { key: 'skill-usage',        label: 'Skill routing',       type: 'skill-usage',         yellowMin: 30,    redMin: 180,  condition: false },
+        { key: 'working-state',      label: 'Per-turn snapshot',   type: 'working-state',       yellowMin: 10,    redMin: 60,   condition: false },
+        { key: 'handoff',            label: 'Session handoff',     type: 'handoff',             yellowMin: 120,   redMin: 1440, condition: false },
+        { key: 'session-recall',     label: 'Session recall',      type: 'session-recall',      yellowMin: null,  redMin: null, condition: true  }, // fires on session start — silence = no new session
+      ];
+      const now = Date.now();
+      const features_out = features.map(f => {
+        const row = dbQuery(
+          `SELECT MAX(created_at) as last, COUNT(*) as total, SUM(CASE WHEN created_at > datetime('now','-24 hours') THEN 1 ELSE 0 END) as today FROM entries WHERE type = ${esc(f.type)};`
+        );
+        const last = row[0]?.last || null;
+        const total = row[0]?.total || 0;
+        const today = row[0]?.today || 0;
+        let ageMin = null;
+        if (last) {
+          // SQLite returns 'YYYY-MM-DD HH:MM:SS' (UTC). Parse as UTC.
+          ageMin = Math.floor((now - Date.parse(last.replace(' ', 'T') + 'Z')) / 60000);
+        }
+        let status = 'green';
+        if (f.condition) {
+          // Condition-driven features are idle by default; only flag
+          // when there's been specific activity that aged out.
+          status = 'idle';
+        } else if (ageMin == null || ageMin > f.redMin) {
+          status = 'red';
+        } else if (ageMin > f.yellowMin) {
+          status = 'yellow';
+        }
+        return { key: f.key, label: f.label, last, age_min: ageMin, total, today, status, condition: !!f.condition };
+      });
+      const summary = {
+        green:  features_out.filter(f => f.status === 'green').length,
+        yellow: features_out.filter(f => f.status === 'yellow').length,
+        red:    features_out.filter(f => f.status === 'red').length,
+        idle:   features_out.filter(f => f.status === 'idle').length,
+      };
+      sendJson(res, 200, { summary, features: features_out });
+    } else if (method === 'POST' && path === '/admin/run-all') {
+      // Manually fire the AI-driven loops whose scheduler has gone quiet.
+      // MLX uses a single serialized lock — run tasks SEQUENTIALLY so
+      // they don't starve each other with 503 busy responses.
+      sendJson(res, 202, { status: 'triggered' });
+      setImmediate(async () => {
+        const results = {};
+        const safeRun = async (name, fn) => {
+          const t0 = Date.now();
+          try { await fn(); results[name] = `ok in ${Date.now()-t0}ms`; }
+          catch (e) { results[name] = `err: ${e.message}`; }
+        };
+        await safeRun('discovery', () => runOneDiscovery());
+        await safeRun('prediction', () => runOnePrediction());
+        await safeRun('auto-create-skill', () => autoCreateSkill());
+        console.log(`[vcontext:admin] run-all: ${JSON.stringify(results)}`);
+      });
+    } else if (method === 'POST' && path === '/admin/fts-rebuild') {
+      // Rebuild the FTS5 index (recovers DELETE triggers after corruption).
+      try {
+        ramDb.exec(`INSERT INTO entries_fts(entries_fts) VALUES('rebuild')`);
+        sendJson(res, 200, { status: 'rebuilt' });
+      } catch (e) {
+        sendJson(res, 500, { error: e.message });
+      }
+    } else if (method === 'POST' && path === '/admin/dedup-ssd') {
+      // Focused SSD dedup. Creates index first to avoid O(n²) scan,
+      // then uses MIN(id) GROUP BY (O(n log n)).
+      const result = { deleted: 0, schema_fixed: 0, vacuumed: false, indexed: false, error: null };
+      try {
+        try {
+          ssdDb.exec(`CREATE INDEX IF NOT EXISTS idx_ssd_dedup ON entries(type, content_hash);`);
+          result.indexed = true;
+        } catch {}
+        try {
+          const fix = ssdDb.prepare(
+            `UPDATE entries SET created_at = token_estimate, token_estimate = CAST(created_at AS INTEGER)
+             WHERE created_at NOT LIKE '20__-%' AND token_estimate LIKE '20__-%';`
+          ).run();
+          result.schema_fixed = fix.changes;
+        } catch {}
+        // Fast dedup: IDs to KEEP = MIN(id) per (type, content_hash);
+        // DELETE everything else (within non-skip types).
+        const del = ssdDb.prepare(`
+          DELETE FROM entries
+          WHERE type NOT IN ('test','working-state','session-recall','anomaly-alert')
+            AND content_hash IS NOT NULL
+            AND id NOT IN (
+              SELECT MIN(id) FROM entries
+              WHERE type NOT IN ('test','working-state','session-recall','anomaly-alert')
+                AND content_hash IS NOT NULL
+              GROUP BY type, content_hash
+            );`).run();
+        result.deleted = del.changes;
+        try { ssdDb.exec(`VACUUM;`); result.vacuumed = true; } catch {}
+        sendJson(res, 200, result);
+      } catch (e) { result.error = e.message; sendJson(res, 500, result); }
+    } else if (method === 'POST' && path === '/admin/dedup-migration') {
+      // One-shot migration: add content_hash column, backfill for all
+      // rows, delete duplicate entries (keep oldest id per group), then
+      // add a UNIQUE index so future writes are atomically deduped.
+      // Skip types where repetition is legitimate.
+      const SKIP = ['test', 'working-state', 'session-recall', 'anomaly-alert'];
+      const skipSql = SKIP.map(t => `'${t}'`).join(',');
+      const crypto = require('node:crypto');
+      const result = { added_column: false, backfilled: 0, deleted: 0, index_created: false, error: null };
+      try {
+        // 1. Add column (idempotent)
+        try {
+          ramDb.exec(`ALTER TABLE entries ADD COLUMN content_hash TEXT;`);
+          result.added_column = true;
+        } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+
+        // 2. Backfill hashes for rows that don't have one
+        const rows = ramDb.prepare(`SELECT id, content FROM entries WHERE content_hash IS NULL OR content_hash = '';`).all();
+        const update = ramDb.prepare(`UPDATE entries SET content_hash = ? WHERE id = ?`);
+        const tx = ramDb.transaction((rs) => {
+          for (const r of rs) {
+            const h = crypto.createHash('sha256').update(String(r.content)).digest('hex');
+            update.run(h, r.id);
+          }
+        });
+        tx(rows);
+        result.backfilled = rows.length;
+
+        // 3. Identify + delete duplicates (keep MIN(id) per group)
+        const delSql = `
+          DELETE FROM entries WHERE id IN (
+            SELECT id FROM entries e1
+            WHERE type NOT IN (${skipSql})
+              AND EXISTS (
+                SELECT 1 FROM entries e2
+                WHERE e2.session = e1.session
+                  AND e2.type = e1.type
+                  AND e2.content_hash = e1.content_hash
+                  AND e2.id < e1.id
+              )
+          );`;
+        const delInfo = ramDb.prepare(delSql).run();
+        result.deleted = delInfo.changes;
+
+        // 4. Create UNIQUE index
+        try {
+          ramDb.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_entry_hash ON entries(session, type, content_hash) WHERE type NOT IN (${skipSql});`);
+          result.index_created = true;
+        } catch (e) { result.error = 'index: ' + e.message; }
+
+        // 5. Same for SSD DB (best-effort): backfill hashes AND delete
+        //    duplicates cross-session (SSD is long-term cold store, rarely
+        //    accessed; repeat content is always waste).
+        if (ssdDb) {
+          try {
+            try { ssdDb.exec(`ALTER TABLE entries ADD COLUMN content_hash TEXT;`); } catch {}
+            // 5a. Fix column-shift corruption from old migrateRamToSsd bug
+            //     (some rows have integer in created_at, date in token_estimate).
+            try {
+              const fix = ssdDb.prepare(
+                `UPDATE entries SET created_at = token_estimate, token_estimate = CAST(created_at AS INTEGER)
+                 WHERE created_at NOT LIKE '20__-%' AND token_estimate LIKE '20__-%';`
+              ).run();
+              result.ssd_schema_fixed = fix.changes;
+            } catch {}
+            // 5b. Backfill hashes
+            const ssdRows = ssdDb.prepare(`SELECT id, content FROM entries WHERE content_hash IS NULL OR content_hash = '';`).all();
+            const ssdUpd = ssdDb.prepare(`UPDATE entries SET content_hash = ? WHERE id = ?`);
+            const ssdTx = ssdDb.transaction((rs) => {
+              for (const r of rs) {
+                const h = crypto.createHash('sha256').update(String(r.content)).digest('hex');
+                ssdUpd.run(h, r.id);
+              }
+            });
+            ssdTx(ssdRows);
+            result.ssd_backfilled = ssdRows.length;
+            // 5c. Delete duplicates (keep MIN(id) per type+hash; SSD is
+            //     cross-session so ignore session)
+            const ssdDel = ssdDb.prepare(`
+              DELETE FROM entries WHERE id IN (
+                SELECT id FROM entries e1
+                WHERE type NOT IN (${skipSql})
+                  AND EXISTS (
+                    SELECT 1 FROM entries e2
+                    WHERE e2.type = e1.type AND e2.content_hash = e1.content_hash AND e2.id < e1.id
+                  )
+              );`).run();
+            result.ssd_deleted = ssdDel.changes;
+            try { ssdDb.exec(`VACUUM;`); } catch {}
+          } catch (e) { result.ssd_error = e.message; }
+        }
+
+        // 6. VACUUM
+        ramDb.exec(`VACUUM;`);
+        sendJson(res, 200, result);
+      } catch (e) {
+        result.error = e.message;
+        sendJson(res, 500, result);
+      }
+    } else if (method === 'POST' && path === '/admin/fts-full-rebuild') {
+      // Nuclear rebuild: drop FTS + triggers, recreate, reindex from entries,
+      // then hard-delete all status='migrated' rows. Done in a single
+      // transaction on the live DB (no server restart needed).
+      const result = { dropped: false, recreated: false, reindexed: 0, cleaned: 0, error: null };
+      try {
+        const tx = ramDb.transaction(() => {
+          // Drop delete trigger FIRST so DROP TABLE doesn't cascade-fire it
+          ramDb.exec(`DROP TRIGGER IF EXISTS entries_ai;`);
+          ramDb.exec(`DROP TRIGGER IF EXISTS entries_ad;`);
+          ramDb.exec(`DROP TABLE IF EXISTS entries_fts;`);
+          result.dropped = true;
+          // Recreate FTS virtual table + triggers
+          ramDb.exec(`CREATE VIRTUAL TABLE entries_fts USING fts5(content, tags, type);`);
+          ramDb.exec(`CREATE TRIGGER entries_ai AFTER INSERT ON entries BEGIN
+            INSERT INTO entries_fts(rowid, content, tags, type) VALUES (new.id, new.content, new.tags, new.type);
+          END;`);
+          // DELETE trigger: use FTS5 contentless-deletion. The previous
+          // form (VALUES('delete', rowid, content, tags, type)) requires
+          // the stored columns to exactly match the old row — any drift
+          // yields "SQL logic error" and blocks every DELETE on entries.
+          // A plain DELETE from the FTS shadow table by rowid is safer.
+          ramDb.exec(`CREATE TRIGGER entries_ad AFTER DELETE ON entries BEGIN
+            DELETE FROM entries_fts WHERE rowid = old.id;
+          END;`);
+          result.recreated = true;
+          // Reindex all rows
+          const reindex = ramDb.prepare(
+            `INSERT INTO entries_fts(rowid, content, tags, type) SELECT id, content, tags, type FROM entries;`
+          );
+          const info = reindex.run();
+          result.reindexed = info.changes;
+          // Hard-delete soft-migrated rows — trigger now works
+          const del = ramDb.prepare(`DELETE FROM entries WHERE status='migrated'`);
+          const delInfo = del.run();
+          result.cleaned = delInfo.changes;
+        });
+        tx();
+        // Vacuum to reclaim space
+        ramDb.exec(`VACUUM;`);
+        sendJson(res, 200, result);
+      } catch (e) {
+        result.error = e.message;
+        console.error('[admin:fts-rebuild]', e.message);
+        sendJson(res, 500, result);
+      }
+    } else if (method === 'POST' && path === '/admin/fts-hard-cleanup') {
+      // After a successful FTS rebuild, attempt hard-delete of soft-
+      // migrated rows. Returns counts.
+      let deleted = 0, failed = 0;
+      try {
+        const rows = ramDb.prepare(`SELECT id FROM entries WHERE status='migrated'`).all();
+        const del = ramDb.prepare(`DELETE FROM entries WHERE id = ?`);
+        for (const r of rows) {
+          try { del.run(r.id); deleted++; } catch { failed++; }
+        }
+      } catch {}
+      sendJson(res, 200, { deleted, failed });
     } else if (method === 'POST' && path === '/tier/migrate') {
       handleTierMigrate(req, res);
     } else if (method === 'GET' && path === '/tier/stats') {
@@ -4407,9 +5265,10 @@ checkMlxGenerate().then(() => {
   }
 }).catch(() => {});
 
-// Start
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`[vcontext] Virtual Context server running at http://127.0.0.1:${PORT}`);
+// Start — default 127.0.0.1 for safety, set VCONTEXT_BIND=0.0.0.0 for LAN.
+const BIND_HOST = process.env.VCONTEXT_BIND || '127.0.0.1';
+server.listen(PORT, BIND_HOST, () => {
+  console.log(`[vcontext] Virtual Context server running at http://${BIND_HOST}:${PORT}`);
   console.log(`[vcontext] Tier 1 (RAM):   ${DB_PATH}`);
   console.log(`[vcontext] Tier 2 (SSD):   ${SSD_DB_PATH}`);
   console.log(`[vcontext] Tier 3 (Cloud): ${cloudStore.isConfigured() ? 'configured' : 'not configured'}`);

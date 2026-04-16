@@ -93,6 +93,20 @@ restore_backup() {
 
 # ── Start: create RAM disk and init DB ─────────────────────────
 cmd_start() {
+  # Clean up stray duplicates (macOS auto-appends " 1", " 2", ... when a
+  # volume named VContext survives from a previous session). Only the
+  # canonical MOUNT_POINT should remain.
+  for stray in "/Volumes/VContext "*; do
+    [ -d "$stray" ] || continue
+    warn "Ejecting stray duplicate: $stray"
+    stray_dev=$(mount | awk -v m="$stray" '$3==m{print $1; exit}')
+    diskutil unmount force "$stray" >/dev/null 2>&1 || true
+    if [ -n "${stray_dev:-}" ]; then
+      parent="/dev/$(basename "$stray_dev" | sed 's/s[0-9]*$//')"
+      hdiutil detach "$parent" -force >/dev/null 2>&1 || true
+    fi
+  done
+
   # Already mounted?
   if mount | grep -q "${MOUNT_POINT}"; then
     warn "RAM disk already mounted at ${MOUNT_POINT}"

@@ -123,9 +123,11 @@ while true; do
     fi
   fi
 
-  # MLX Generate health check every 10 minutes (every 10th iteration)
-  # Restart if: memory > 8GB, unresponsive, or calls > 200 (prevents hang)
-  if [[ $((SEARXNG_CHECK_COUNTER % 10)) -eq 0 ]]; then
+  # MLX Generate health check every 5 minutes (every 5th iteration).
+  # /health responds even when generation hangs — so we probe an ACTUAL
+  # completion with 15s timeout. This is how the 2026-04-14 halt went
+  # undetected for a day: /health was up but generation was dead.
+  if [[ $((SEARXNG_CHECK_COUNTER % 5)) -eq 0 ]]; then
     GEN_PID=$(pgrep -f "mlx-generate-server" | head -1)
     NEED_RESTART=false
     REASON=""
@@ -137,13 +139,25 @@ while true; do
         NEED_RESTART=true; REASON="memory ${GEN_MB}MB > 8GB"
       fi
 
-      # Responsiveness check (3s timeout)
-      GEN_HEALTH=$(curl -s --max-time 3 http://127.0.0.1:3162/health 2>/dev/null)
-      if [[ -z "$GEN_HEALTH" ]]; then
-        NEED_RESTART=true; REASON="unresponsive (health timeout)"
+      # Actual-generation probe. Qwen3 thinks before answering — a
+      # 3-token cap with 15s timeout was killing MLX mid-thought during
+      # legitimate long generations.  Use /v1/models (liveness only) +
+      # /health. A genuine hang shows as both failing.
+      # 503 "busy" on /v1/chat/completions counts as ALIVE.
+      MODELS_CODE=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:3162/v1/models 2>/dev/null)
+      if [[ "$MODELS_CODE" != "200" ]]; then
+        # Fallback: try a tiny generation with larger budget.
+        GEN_CODE=$(curl -s --max-time 90 -o /tmp/vcontext-mlx-probe.out -w '%{http_code}' \
+          -X POST http://127.0.0.1:3162/v1/chat/completions \
+          -H 'Content-Type: application/json' \
+          -d '{"model":"mlx-community/Qwen3-8B-4bit","messages":[{"role":"user","content":"hi"}],"max_tokens":4000}' 2>/dev/null)
+        if [[ "$GEN_CODE" != "200" && "$GEN_CODE" != "503" ]]; then
+          NEED_RESTART=true; REASON="both /v1/models and generation probe failed (models=${MODELS_CODE:-timeout} gen=${GEN_CODE:-timeout})"
+        fi
       fi
 
       # Call count check (prevents gradual hang)
+      GEN_HEALTH=$(curl -s --max-time 3 http://127.0.0.1:3162/health 2>/dev/null)
       GEN_CALLS=$(echo "$GEN_HEALTH" | python3 -c "import sys,json;print(json.load(sys.stdin).get('calls',0))" 2>/dev/null)
       if [[ -n "$GEN_CALLS" ]] && [[ "$GEN_CALLS" -gt 200 ]]; then
         NEED_RESTART=true; REASON="calls=${GEN_CALLS} > 200"

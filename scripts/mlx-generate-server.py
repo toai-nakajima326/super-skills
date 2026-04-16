@@ -168,8 +168,22 @@ class Handler(BaseHTTPRequestHandler):
                 max_tokens = body.get("max_tokens", 500)
                 temperature = body.get("temperature", 0.3)
 
-                with _generate_lock:
+                # Try to acquire the serialization lock with a short timeout.
+                # If another generation is in flight, return 503 Busy instead
+                # of deadlocking (previous behaviour: all requests queued
+                # forever behind a stuck generation → whole server hangs).
+                # A 503 is "alive but busy" — callers can retry.
+                # Wait up to 60s for the lock. With max_tokens=40960, a
+                # single generation can run 30-60s when Qwen3 thinks
+                # heavily. 3s was too tight → legitimate queued callers
+                # (predictive-search etc.) got 503 and dropped.
+                if not _generate_lock.acquire(timeout=60.0):
+                    self._send_json(503, {"error": "busy", "detail": "another generation in progress; retry"})
+                    return
+                try:
                     result = do_generate(messages, max_tokens, temperature)
+                finally:
+                    _generate_lock.release()
                 self._send_json(200, result)
                 logger.info(f"POST /v1/chat/completions - {result['usage']['completion_tokens']} tokens in {result['usage']['prompt_tokens']+result['usage']['completion_tokens']}t")
             except Exception as e:
