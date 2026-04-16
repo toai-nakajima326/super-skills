@@ -138,11 +138,18 @@ function openDatabases() {
   ramDb = new Database(DB_PATH);
   ramDb.pragma('journal_mode = WAL');
   ramDb.pragma('busy_timeout = 5000');
+  ramDb.pragma('cache_size = -64000');     // 64MB (default 2000 pages = 8MB)
+  ramDb.pragma('mmap_size = 268435456');   // 256MB mmap — RAM disk so basically free
+  ramDb.pragma('temp_store = MEMORY');     // temp tables in memory, not file
+  ramDb.pragma('wal_autocheckpoint = 2000'); // checkpoint every 2000 pages (8MB)
 
   if (existsSync(SSD_DB_PATH)) {
     ssdDb = new Database(SSD_DB_PATH);
     ssdDb.pragma('journal_mode = WAL');
     ssdDb.pragma('busy_timeout = 5000');
+    ssdDb.pragma('cache_size = -32000');    // 32MB for SSD
+    ssdDb.pragma('mmap_size = 134217728');  // 128MB mmap
+    ssdDb.pragma('temp_store = MEMORY');
   }
 }
 
