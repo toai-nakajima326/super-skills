@@ -3136,38 +3136,13 @@ origin: auto-generated
         continue;
       }
 
-      // Quality gate — evaluate before creating
-      const evalPrompt = `Evaluate this skill proposal. Answer ONLY "ADOPT" or "SKIP" on the first line, then one sentence why.
-
-Skill name: ${skillName}
-Suggestion: ${suggestionText.slice(0, 200)}
-Existing skills: ${existingSkills.slice(0, 20).join(', ')}
-
-Criteria:
-- SKIP if it overlaps with an existing skill (even partial overlap)
-- SKIP if it's too narrow (only useful for one specific task)
-- SKIP if it's just a wrapper around a single tool (grep, bash, etc.)
-- ADOPT if it covers a genuine gap in the existing skill set`;
-      try {
-        const evalResult = await mlxGenerate(evalPrompt, { maxTokens: 100, temperature: 0.1, caller: 'skill-eval' });
-        const verdict = (evalResult || '').trim().split('\n')[0].toUpperCase();
-        if (verdict.startsWith('SKIP')) {
-          console.log(`[vcontext:skill] Quality gate SKIP "${skillName}": ${(evalResult || '').slice(0, 80)}`);
-          try { const t = dbQuery(`SELECT tags FROM entries WHERE id = ${suggestion.id};`); if (t[0]) { let tags = JSON.parse(t[0].tags || '[]'); tags.push('skill-created', 'quality-skipped'); dbExec(`UPDATE entries SET tags = ${esc(JSON.stringify(tags))} WHERE id = ${suggestion.id};`); } } catch {}
-          continue;
-        }
-        console.log(`[vcontext:skill] Quality gate ADOPT "${skillName}"`);
-      } catch {} // fail-open: if eval fails, proceed with creation
+      // All skills are created (usage-based ranking handles quality later)
+      console.log(`[vcontext:skill] Creating "${skillName}"`);
 
       const skillContent = generated.slice(generated.indexOf('---'));
       if (!skillContent || skillContent.length < 50) continue;
 
-      // Write SKILL.md
-      const skillDir = join(skillsDir, skillName);
-      mkdirSync(skillDir, { recursive: true });
-      writeFileSync(join(skillDir, 'SKILL.md'), skillContent, 'utf-8');
-
-      // Register in vcontext
+      // Register in vcontext ONLY (no filesystem — super-skills is the only deployed skill)
       const descMatch = skillContent.match(/description:\s*["']?(.*?)(?:["']?\n|$)/s);
       const desc = descMatch ? descMatch[1].trim().slice(0, 200) : '';
       try {
