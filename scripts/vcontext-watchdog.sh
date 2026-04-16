@@ -1,6 +1,11 @@
 #!/bin/bash
 # vcontext-watchdog.sh — Monitor vcontext server health
 # Sends macOS notification if server is down. Optionally calls a webhook.
+# Hardened: trap all signals, catch all errors, never crash
+
+set -o pipefail
+trap 'log "Caught signal, continuing..."; sleep 5' HUP INT TERM
+trap 'log "Unexpected error on line $LINENO, continuing..."; sleep 5' ERR
 
 HEALTH_URL="http://localhost:3150/health"
 CHECK_INTERVAL=60
@@ -74,6 +79,7 @@ WAS_DOWN=false
 SEARXNG_CHECK_COUNTER=0
 
 while true; do
+  (  # Subshell — any error inside won't kill the loop
   if check_health; then
     if $WAS_DOWN; then
       send_recovery "Server recovered and is healthy again"
@@ -99,13 +105,13 @@ while true; do
 
   # Check SearXNG every 5 minutes (every 5th iteration)
   SEARXNG_CHECK_COUNTER=$((SEARXNG_CHECK_COUNTER + 1))
-  if [[ $((SEARXNG_CHECK_COUNTER % 5)) -eq 0 ]]; then
+  if [[ $((SEARXNG_CHECK_COUNTER % 1)) -eq 0 ]]; then
     check_searxng
   fi
 
   # MLX Embed health check every 5 minutes (every 5th iteration)
   # Restart if: unresponsive or memory > 10GB (cache 5GB + model 4.5GB = 9.5GB normal)
-  if [[ $((SEARXNG_CHECK_COUNTER % 5)) -eq 0 ]]; then
+  if [[ $((SEARXNG_CHECK_COUNTER % 1)) -eq 0 ]]; then
     EMBED_PID=$(pgrep -f "mlx-embed-server" | head -1)
     if [[ -n "$EMBED_PID" ]]; then
       EMBED_HEALTH=$(curl -s --max-time 5 http://127.0.0.1:3161/health 2>/dev/null)
@@ -127,7 +133,7 @@ while true; do
   # /health responds even when generation hangs — so we probe an ACTUAL
   # completion with 15s timeout. This is how the 2026-04-14 halt went
   # undetected for a day: /health was up but generation was dead.
-  if [[ $((SEARXNG_CHECK_COUNTER % 5)) -eq 0 ]]; then
+  if [[ $((SEARXNG_CHECK_COUNTER % 1)) -eq 0 ]]; then
     GEN_PID=$(pgrep -f "mlx-generate-server" | head -1)
     NEED_RESTART=false
     REASON=""
@@ -178,5 +184,6 @@ while true; do
     fi
   fi
 
+  ) 2>/dev/null || log "Cycle error caught, continuing"
   sleep $CHECK_INTERVAL
 done
