@@ -138,5 +138,42 @@ if [ "$(date +%u)" = "7" ] && [ ! -f "/tmp/vcontext-vacuum-$(date +%Y-%V).done" 
   touch "/tmp/vcontext-vacuum-$(date +%Y-%V).done"
 fi
 
+# 10. Upstream sync (was self-evolve) — check git remote for updates
+SKILLS_DIR="$HOME/skills"
+if [ -d "$SKILLS_DIR/.git" ]; then
+  cd "$SKILLS_DIR"
+  git fetch origin 2>/dev/null
+  BEHIND=$(git rev-list HEAD..origin/main --count 2>/dev/null)
+  if [ "${BEHIND:-0}" -gt 0 ]; then
+    log "Upstream: $BEHIND commits behind origin/main"
+  else
+    log "Upstream: up to date"
+  fi
+fi
+
+# 11. Evolution log — append daily summary to docs/evolution-log.md
+EVOLUTION_LOG="$SKILLS_DIR/docs/evolution-log.md"
+if [ -d "$SKILLS_DIR/docs" ]; then
+  DISCOVERY_COUNT=$(sqlite3 "$DB_RAM" "SELECT COUNT(*) FROM entries WHERE type='skill-discovery' AND created_at >= datetime('now','-24 hours');" 2>/dev/null)
+  SUGGESTION_COUNT=$(sqlite3 "$DB_RAM" "SELECT COUNT(*) FROM entries WHERE type='skill-suggestion' AND created_at >= datetime('now','-24 hours');" 2>/dev/null)
+  CREATED_COUNT=$(sqlite3 "$DB_RAM" "SELECT COUNT(*) FROM entries WHERE type='skill-created' AND created_at >= datetime('now','-24 hours');" 2>/dev/null)
+  EMBED_TOTAL=$(sqlite3 "$DB_RAM" "SELECT COUNT(*) FROM entries;" 2>/dev/null)
+  EMBED_DONE=$(sqlite3 "$DB_RAM" "SELECT COUNT(*) FROM entries WHERE embedding IS NOT NULL;" 2>/dev/null)
+  SESSIONS=$(sqlite3 "$DB_RAM" "SELECT COUNT(DISTINCT session) FROM entries WHERE created_at >= datetime('now','-24 hours');" 2>/dev/null)
+  cat >> "$EVOLUTION_LOG" <<EOFLOG
+
+## $(date +%Y-%m-%d) — auto (maintenance)
+- Discovery: ${DISCOVERY_COUNT:-0} searches | Suggestions: ${SUGGESTION_COUNT:-0} | Skills created: ${CREATED_COUNT:-0}
+- Embedding: ${EMBED_DONE:-?}/${EMBED_TOTAL:-?} | Sessions: ${SESSIONS:-0}
+- Upstream: ${BEHIND:-0} commits behind
+EOFLOG
+  log "Evolution log updated"
+fi
+
+# 12. Hook auto-setup (was self-evolve) — ensure all AI tools have hooks
+if [ -x "$SKILLS_DIR/scripts/setup-hooks.sh" ]; then
+  bash "$SKILLS_DIR/scripts/setup-hooks.sh" >> "$LOG" 2>&1
+  log "Hook setup: checked all AI tools"
+fi
+
 log "=== cycle done ==="
-# hook verification Wed Apr 15 13:21:13 JST 2026
