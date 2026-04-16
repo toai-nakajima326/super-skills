@@ -3122,7 +3122,7 @@ origin: auto-generated
 
 - First gotcha`;
 
-      const generated = await mlxGenerate(genPrompt, { maxTokens: 8000, temperature: 0.3, caller: 'skill-creation', priority: 0 });
+      const generated = await mlxGenerate(genPrompt, { maxTokens: 12000, temperature: 0.3, caller: 'skill-creation', priority: 0 });
       await new Promise(r => setTimeout(r, 30000));
       if (!generated || generated.length < 50) continue;
 
