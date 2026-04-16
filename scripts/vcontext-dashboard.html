@@ -140,9 +140,15 @@
     <div id="analytics-content" style="max-height:200px;overflow-y:auto;">Loading...</div>
   </div>
 
-  <!-- Weekly Summary -->
+  <!-- Activity Summary -->
   <div class="card wide">
-    <h2>📊 先週のアクティビティ</h2>
+    <h2>📊 アクティビティサマリー
+      <span style="font-size:11px;font-weight:normal;margin-left:10px;">
+        <a href="#" onclick="event.preventDefault();window._actDays=1;refresh();" style="color:var(--accent);text-decoration:none;">24h</a> |
+        <a href="#" onclick="event.preventDefault();window._actDays=3;refresh();" style="color:var(--accent);text-decoration:none;">3日</a> |
+        <a href="#" onclick="event.preventDefault();window._actDays=7;refresh();" style="color:var(--accent);text-decoration:none;">7日</a>
+      </span>
+    </h2>
     <div id="weekly-content">Loading...</div>
   </div>
 
@@ -359,7 +365,7 @@ async function refresh() {
     fetchJson('/metrics/report?hours=24'),
     fetchJson('/pipeline/health'),
     fetchJson('/admin/pending-patches'),
-    fetchJson('/analytics/weekly-summary?days=7'),
+    fetchJson('/analytics/weekly-summary?days=' + (window._actDays || 1)),
     fetchJson('/analytics/skill-effectiveness'),
   ]);
 
