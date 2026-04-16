@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-NODE="/Users/mitsuru_nakajima/.nvm/versions/node/v24.15.0/bin/node"
+NODE="/Users/mitsuru_nakajima/.nvm/versions/node/v25.9.0/bin/node"
 HOOKS="/Users/mitsuru_nakajima/skills/scripts/vcontext-hooks.js"
 PLUGINS="/Users/mitsuru_nakajima/skills/plugins"
 

@@ -19,7 +19,7 @@ set -euo pipefail
 
 WORKTREE="$(cd "$(dirname "$0")/.." && pwd)"
 LIVE_ROOT="$HOME/skills"
-NODE="/Users/mitsuru_nakajima/.nvm/versions/node/v24.15.0/bin/node"
+NODE="/Users/mitsuru_nakajima/.nvm/versions/node/v25.9.0/bin/node"
 DRY_RUN=0
 COMPONENT=""
 
