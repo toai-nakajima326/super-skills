@@ -5005,6 +5005,64 @@ const server = createServer(async (req, res) => {
         execSync(`bash ~/skills/scripts/vcontext-reload.sh`, { stdio: 'ignore' });
         sendJson(res, 200, { rolled_back: true });
       } catch (e) { sendJson(res, 500, { error: e.message || 'no self-improve commit to rollback' }); }
+    } else if (method === 'GET' && path === '/analytics/weekly-summary') {
+      // Weekly summary: what did the user/AI actually do?
+      try {
+        const days = parseInt(parseQuery(req.url).days) || 7;
+        const since = `datetime('now', '-${days} days')`;
+        const stats = {
+          period_days: days,
+          total_events: dbQuery(`SELECT COUNT(*) as c FROM entries WHERE created_at > ${since};`)[0]?.c || 0,
+          sessions: dbQuery(`SELECT COUNT(DISTINCT session) as c FROM entries WHERE created_at > ${since};`)[0]?.c || 0,
+          projects: dbQuery(`SELECT COUNT(DISTINCT namespace) as c FROM entries WHERE tags LIKE '%project:%' AND created_at > ${since};`)[0]?.c || 0,
+          by_type: dbQuery(`SELECT type, COUNT(*) as cnt FROM entries WHERE created_at > ${since} GROUP BY type ORDER BY cnt DESC LIMIT 10;`),
+          top_tools: dbQuery(`SELECT tool_name, COUNT(*) as cnt FROM entry_index WHERE tool_name IS NOT NULL AND created_at > ${since} GROUP BY tool_name ORDER BY cnt DESC LIMIT 10;`),
+          top_sessions: dbQuery(`SELECT session, COUNT(*) as cnt FROM entries WHERE created_at > ${since} AND session != 'system' GROUP BY session ORDER BY cnt DESC LIMIT 5;`),
+          skills_used: dbQuery(`SELECT COUNT(*) as c FROM entries WHERE type='skill-usage' AND created_at > ${since};`)[0]?.c || 0,
+          skills_created: dbQuery(`SELECT COUNT(*) as c FROM entries WHERE type='skill-created' AND created_at > ${since};`)[0]?.c || 0,
+          errors: dbQuery(`SELECT COUNT(*) as c FROM entries WHERE type='tool-error' AND created_at > ${since};`)[0]?.c || 0,
+          decisions: dbQuery(`SELECT substr(content,1,120) as c FROM entries WHERE type='decision' AND created_at > ${since} ORDER BY id DESC LIMIT 10;`),
+        };
+        sendJson(res, 200, stats);
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'GET' && path === '/analytics/skill-effectiveness') {
+      // Skill effectiveness: which skills actually lead to outcomes?
+      try {
+        const results = dbQuery(`
+          SELECT
+            skill_name,
+            usage_count,
+            last_used
+          FROM (
+            SELECT
+              json_extract(value, '$') as skill_name,
+              COUNT(*) as usage_count,
+              MAX(created_at) as last_used
+            FROM entries, json_each(json_extract(entries.content, '$.skills'))
+            WHERE entries.type='skill-usage'
+            GROUP BY skill_name
+          )
+          ORDER BY usage_count DESC LIMIT 30;
+        `);
+        sendJson(res, 200, { skills: results, count: results.length });
+      } catch (e) {
+        // Fallback if JSON functions not available
+        try {
+          const usage = dbQuery(`SELECT content, created_at FROM entries WHERE type='skill-usage' ORDER BY id DESC LIMIT 500;`);
+          const counts = {};
+          for (const row of usage) {
+            try {
+              const data = JSON.parse(row.content);
+              for (const name of (data.skills || [])) {
+                counts[name] = counts[name] || { skill_name: name, usage_count: 0, last_used: row.created_at };
+                counts[name].usage_count++;
+              }
+            } catch {}
+          }
+          const skills = Object.values(counts).sort((a, b) => b.usage_count - a.usage_count).slice(0, 30);
+          sendJson(res, 200, { skills, count: skills.length });
+        } catch (e2) { sendJson(res, 500, { error: e2.message }); }
+      }
     } else if (method === 'GET' && path === '/pipeline/health') {
       // Per-feature heartbeat derived from entry recency — in a loosely
       // coupled AI OS, silent degradation is the biggest risk. This
