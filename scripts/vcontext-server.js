@@ -3510,7 +3510,16 @@ const checkCoreml = checkMlx;
  */
 const MLX_DEFAULT_MODEL = process.env.MLX_EMBED_MODEL || 'mlx-community/Qwen3-Embedding-8B-4bit-DWQ';
 
-function mlxEmbed(text) {
+// Mutex for MLX embed — prevents GPU contention between embed loop and inline store
+let _mlxEmbedLock = Promise.resolve();
+function withMlxLock(fn) {
+  const prev = _mlxEmbedLock;
+  let release;
+  _mlxEmbedLock = new Promise(r => { release = r; });
+  return prev.then(() => fn().finally(release));
+}
+
+function _mlxEmbedRaw(text) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({ model: MLX_DEFAULT_MODEL, prompt: text });
     const parsed = new URL(`${MLX_EMBED_URL}/api/embeddings`);
@@ -3535,8 +3544,11 @@ function mlxEmbed(text) {
   });
 }
 
+// Public API — serialized via mutex to prevent GPU contention
+function mlxEmbed(text) { return withMlxLock(() => _mlxEmbedRaw(text)); }
+
 // Batch embed via /embed_batch (10x throughput vs single calls)
-function mlxEmbedBatch(texts) {
+function _mlxEmbedBatchRaw(texts) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({ texts, model: MLX_DEFAULT_MODEL, normalize: true });
     const parsed = new URL(`${MLX_EMBED_URL}/embed_batch`);
@@ -3560,6 +3572,7 @@ function mlxEmbedBatch(texts) {
     req.end();
   });
 }
+function mlxEmbedBatch(texts) { return withMlxLock(() => _mlxEmbedBatchRaw(texts)); }
 // Back-compat alias
 const coremlEmbed = mlxEmbed;
 
