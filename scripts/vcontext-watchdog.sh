@@ -103,14 +103,14 @@ while true; do
     check_searxng
   fi
 
-  # MLX Embed health check every 10 minutes (every 10th iteration)
-  # Restart if: unresponsive or memory > 8GB
-  if [[ $((SEARXNG_CHECK_COUNTER % 10)) -eq 0 ]]; then
+  # MLX Embed health check every 5 minutes (every 5th iteration)
+  # Restart if: unresponsive or memory > 6GB (MLX leaks ~200 calls before hang)
+  if [[ $((SEARXNG_CHECK_COUNTER % 5)) -eq 0 ]]; then
     EMBED_PID=$(pgrep -f "mlx-embed-server" | head -1)
     if [[ -n "$EMBED_PID" ]]; then
       EMBED_HEALTH=$(curl -s --max-time 5 http://127.0.0.1:3161/health 2>/dev/null)
       EMBED_MB=$(footprint -p "$EMBED_PID" 2>/dev/null | grep Footprint | grep -o '[0-9]* MB' | grep -o '[0-9]*')
-      if [[ -z "$EMBED_HEALTH" ]] || { [[ -n "$EMBED_MB" ]] && [[ "$EMBED_MB" -gt 8000 ]]; }; then
+      if [[ -z "$EMBED_HEALTH" ]] || { [[ -n "$EMBED_MB" ]] && [[ "$EMBED_MB" -gt 6000 ]]; }; then
         log "MLX Embed restart: health=${EMBED_HEALTH:+ok}${EMBED_HEALTH:-timeout} mem=${EMBED_MB:-?}MB"
         launchctl unload ~/Library/LaunchAgents/com.vcontext.mlx-embed.plist 2>/dev/null
         sleep 1; kill -9 "$EMBED_PID" 2>/dev/null; lsof -ti :3161 | xargs kill -9 2>/dev/null
