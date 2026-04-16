@@ -170,7 +170,41 @@ EOFLOG
   log "Evolution log updated"
 fi
 
-# 12. Hook auto-setup (was self-evolve) — ensure all AI tools have hooks
+# 12. Daily AI news check — guaranteed once per day (discovery loop may miss due to restarts)
+NEWS_MARKER="/tmp/vcontext-news-${TODAY}.done"
+if [ ! -f "$NEWS_MARKER" ]; then
+  NEWS_SOURCES=(
+    "Anthropic+Claude+new+release"
+    "OpenAI+GPT+new+model+release"
+    "Apple+MLX+framework+update"
+    "Qwen+Alibaba+new+model"
+    "arxiv+AI+agent+paper+2026"
+    "Google+Gemini+new+release"
+    "Meta+Llama+new+model"
+  )
+  SEARXNG_PORT=$(docker port searxng 8080 2>/dev/null | head -1 | cut -d: -f2)
+  SEARXNG_PORT="${SEARXNG_PORT:-8888}"
+  NEWS_COUNT=0
+  for QUERY in "${NEWS_SOURCES[@]}"; do
+    RESULT=$(curl -s --max-time 10 "http://127.0.0.1:${SEARXNG_PORT}/search?q=${QUERY}+2026&format=json&language=auto" 2>/dev/null)
+    if echo "$RESULT" | python3 -c "import sys,json;d=json.load(sys.stdin);exit(0 if len(d.get('results',[]))>0 else 1)" 2>/dev/null; then
+      SNIPPETS=$(echo "$RESULT" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for r in d.get('results',[])[:3]:
+    print(f'[{r.get(\"engine\",\"?\")}] {r.get(\"title\",\"\")}')
+" 2>/dev/null)
+      curl -s -X POST http://127.0.0.1:3150/store -H 'Content-Type: application/json' \
+        -d "{\"type\":\"skill-discovery\",\"content\":$(python3 -c "import json;print(json.dumps({'topic':'${QUERY//+/ }','results':'''${SNIPPETS}'''.split('\n')[:3],'source':'daily-news-check'}))" 2>/dev/null),\"tags\":[\"news-check\",\"daily\"],\"session\":\"system\"}" > /dev/null 2>&1
+      NEWS_COUNT=$((NEWS_COUNT + 1))
+    fi
+    sleep 2  # rate limit
+  done
+  touch "$NEWS_MARKER"
+  log "Daily news check: $NEWS_COUNT/${#NEWS_SOURCES[@]} sources checked"
+fi
+
+# 13. Hook auto-setup (was self-evolve) — ensure all AI tools have hooks
 if [ -x "$SKILLS_DIR/scripts/setup-hooks.sh" ]; then
   bash "$SKILLS_DIR/scripts/setup-hooks.sh" >> "$LOG" 2>&1
   log "Hook setup: checked all AI tools"
