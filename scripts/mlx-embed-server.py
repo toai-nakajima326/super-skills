@@ -374,14 +374,10 @@ class ModelManager:
 
             embeddings.append(embedding)
         
-        # GPU memory cleanup every 3 calls
-        if not hasattr(self, '_call_count'):
-            self._call_count = 0
-        self._call_count += 1
-        if self._call_count % 3 == 0:
-            if hasattr(mx, 'metal') and hasattr(mx.metal, 'clear_cache'):
-                mx.metal.clear_cache()
-            gc.collect()
+        # GPU memory cleanup EVERY call (batch 2 = 2 items per call)
+        if hasattr(mx, 'metal') and hasattr(mx.metal, 'clear_cache'):
+            mx.metal.clear_cache()
+        gc.collect()
 
         return np.array(embeddings, dtype=np.float32), model_name, embedding_dim
     

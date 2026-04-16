@@ -2638,7 +2638,7 @@ async function startEmbedLoop() {
     try {
       // Batch of 10 — uses MLX /embed_batch endpoint. ~10x throughput
       // with only ~80MB peak memory increase.
-      const BATCH = 1; // single — no batch pressure on MLX
+      const BATCH = 2; // batch 2 + clear_cache every call
       const rows = dbQuery(`SELECT id, content FROM entries WHERE embedding IS NULL ORDER BY id ASC LIMIT ${BATCH};`);
       if (rows.length === 0) {
         await new Promise(r => setTimeout(r, 30000));
@@ -3800,10 +3800,9 @@ function handleAiStatus(req, res) {
   let embeddingBacklog = 0;       // 24h-recent eligible rows still missing embedding
   let embeddingEligibleTotal = 0; // total ELIGIBLE rows (denominator)
   try {
-    // Total = SSD (permanent store, has everything including overflow from RAM)
-    const ssdTotal = dbQuery(`SELECT count(*) as c FROM entries;`, SSD_DB_PATH);
-    embeddingEligibleTotal = ssdTotal[0]?.c || 0;
-    // Embedded = RAM embedded + SSD-only embedded (use RAM count as fast proxy)
+    // Both from RAM — embed loop only processes RAM entries
+    const ramTotal = dbQuery(`SELECT count(*) as c FROM entries;`);
+    embeddingEligibleTotal = ramTotal[0]?.c || 0;
     const ramEmb = dbQuery(`SELECT count(*) as c FROM entries WHERE embedding IS NOT NULL;`);
     embeddingCount = ramEmb[0]?.c || 0;
     embeddingBacklog = embeddingEligibleTotal - embeddingCount;
