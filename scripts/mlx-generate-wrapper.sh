@@ -16,5 +16,5 @@ exec python3 -m vllm_mlx.server \
   --port "${PORT}" \
   --host "${HOST}" \
   --reasoning-parser qwen3 \
-  --max-tokens 500 \
+  --max-tokens 32768 \
   --continuous-batching

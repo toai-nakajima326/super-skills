@@ -3692,13 +3692,13 @@ function mlxGenerateOnce(prompt, options = {}) {
 }
 function _mlxGenerateRaw(prompt, options = {}) {
   return new Promise((resolve, reject) => {
-    // max_tokens capped at 500 — higher values (40960) hog GPU for minutes
+    // vllm-mlx is 2.5x faster — allow higher tokens (Qwen3 thinking uses ~200)
     // and block embed loop. Qwen3 thinking mode uses ~200 tokens for think,
     // leaving ~300 for actual content. Sufficient for summarization tasks.
     const body = JSON.stringify({
       model: MLX_GENERATE_MODEL,
       messages: [{ role: 'user', content: prompt }],
-      max_tokens: Math.min(options.maxTokens || 500, 1000),
+      max_tokens: options.maxTokens || 4000,
       temperature: options.temperature ?? 0.3,
       ...(options.seed != null ? { seed: options.seed } : {}),
     });
