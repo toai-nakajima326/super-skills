@@ -6031,7 +6031,14 @@ const server = createServer(async (req, res) => {
     }
   } catch (e) {
     console.error(`[${method} ${path}]`, e.message);
-    sendJson(res, 500, { error: e.message });
+    // Client-side errors vs server errors.  readBody throws typed messages
+    // that should surface as 4xx, not 5xx (smoke test caught this).
+    const msg = e.message || 'Internal error';
+    if (/invalid json body|body > \d+ bytes/i.test(msg)) {
+      sendJson(res, 400, { error: msg });
+    } else {
+      sendJson(res, 500, { error: msg });
+    }
   }
 });
 

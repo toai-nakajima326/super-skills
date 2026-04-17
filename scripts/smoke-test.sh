@@ -172,11 +172,114 @@ assert_status "/session/ empty → 400"     "/session/"                      "40
 assert_status "/unknown-path → 404"       "/nonexistent-endpoint"          "404"
 assert_status "/dashboard (GET) → 200"    "/dashboard"                     "200"
 # /recall with nonsense FTS chars shouldn't crash — server sanitizes via ftsQuery()
-assert "/recall with special chars"      "/recall?q=%23%24%25%28%29&limit=1" \
+assert "/recall with special chars"      "/recall?q=%23%24%25%28%25%28%29&limit=1" \
   "isinstance(d.get('results'), list)"
 # Large n should be capped, not OOM
 assert "/recent?n=99999 capped"           "/recent?n=99999&short=1" \
   "d.get('count', 99999) <= 200"
+
+# ── Regression tests for bugs fixed 2026-04-17 ──
+# Each test guards against a specific bug that took down a real code path.
+
+# #1 CSRF header requirement on destructive admin endpoints (commit 4f2e19a)
+# No header → 403.  Block trivial cross-origin CSRF.
+POST_NO_HDR=$(curl -s -X POST --max-time 5 "$BASE/admin/rollback-last" -o /dev/null -w '%{http_code}')
+if [ "$POST_NO_HDR" = "403" ]; then
+  echo -e "${G}PASS${N}  [regression] destructive /admin without CSRF header → 403"
+  PASS=$((PASS + 1))
+else
+  echo -e "${R}FAIL${N}  [regression] /admin/rollback-last no-header returned $POST_NO_HDR (expected 403)"
+  FAIL=$((FAIL + 1))
+  FAIL_NAMES+=("csrf-regression")
+fi
+
+# #2 Body size cap — 10 MB (commit 82631ee)
+BIG_CODE=$(python3 -c "print('x' * 11_000_000)" | curl -s -X POST "$BASE/store" \
+  -H 'Content-Type: application/json' -d @- --max-time 15 -o /dev/null -w '%{http_code}' 2>/dev/null)
+if [ "$BIG_CODE" != "200" ] && [ "$BIG_CODE" != "201" ]; then
+  echo -e "${G}PASS${N}  [regression] 11 MB body rejected (got $BIG_CODE, not 2xx)"
+  PASS=$((PASS + 1))
+else
+  echo -e "${R}FAIL${N}  [regression] 11 MB body was accepted — body size cap broken"
+  FAIL=$((FAIL + 1))
+  FAIL_NAMES+=("body-size-regression")
+fi
+
+# #3 Route-cache TTL (commit be0b777) — server-side verifiable only via hooks.js
+# We check the constant is set to something non-zero in the source file.
+if grep -q "ROUTE_CACHE_TTL = 60_000" scripts/vcontext-hooks.js; then
+  echo -e "${G}PASS${N}  [regression] hooks.js ROUTE_CACHE_TTL = 60s"
+  PASS=$((PASS + 1))
+else
+  echo -e "${R}FAIL${N}  [regression] ROUTE_CACHE_TTL reverted"
+  FAIL=$((FAIL + 1))
+  FAIL_NAMES+=("route-cache-regression")
+fi
+
+# #4 Semantic search lock (commit 969481e) — must complete inside 10s
+SEM_CODE=$(curl -s --max-time 10 "$BASE/search/semantic?q=database&limit=2" -o /dev/null -w '%{http_code}')
+if [ "$SEM_CODE" = "200" ]; then
+  echo -e "${G}PASS${N}  [regression] /search/semantic returns 200 inside 10s"
+  PASS=$((PASS + 1))
+else
+  echo -e "${R}FAIL${N}  [regression] /search/semantic timed out or failed ($SEM_CODE)"
+  FAIL=$((FAIL + 1))
+  FAIL_NAMES+=("semantic-lock-regression")
+fi
+
+# ── Boundary / input validation tests ──
+
+# /recent?n=0 should cap gracefully (return empty or 1+ results, not error)
+assert "/recent?n=0 handled"              "/recent?n=0&short=1" \
+  "isinstance(d.get('results'), list)"
+# /metrics/report?hours=0 — shouldn't divide-by-zero or hang
+assert "/metrics?hours=0 handled"         "/metrics/report?hours=0" \
+  "'operations' in d"
+# /recent with nonexistent type → empty list, not 500
+assert "/recent?type=notreal"             "/recent?n=1&type=notreal" \
+  "isinstance(d.get('results'), list) and d.get('count',99)==0"
+# Method mismatch: GET /store → 404 or 405, not 500
+GET_STORE=$(curl -s --max-time 5 "$BASE/store" -o /dev/null -w '%{http_code}')
+if [ "$GET_STORE" = "404" ] || [ "$GET_STORE" = "405" ]; then
+  echo -e "${G}PASS${N}  GET on POST-only /store → $GET_STORE"
+  PASS=$((PASS + 1))
+else
+  echo -e "${R}FAIL${N}  GET /store returned $GET_STORE (expected 404/405)"
+  FAIL=$((FAIL + 1))
+  FAIL_NAMES+=("method-mismatch")
+fi
+
+# POST /store with missing required field → 400
+MISS_TYPE=$(curl -s -X POST "$BASE/store" -H 'Content-Type: application/json' -d '{"content":"no type"}' --max-time 5 -o /dev/null -w '%{http_code}')
+if [ "$MISS_TYPE" = "400" ]; then
+  echo -e "${G}PASS${N}  POST /store missing type → 400"
+  PASS=$((PASS + 1))
+else
+  echo -e "${R}FAIL${N}  POST /store missing type returned $MISS_TYPE (expected 400)"
+  FAIL=$((FAIL + 1))
+  FAIL_NAMES+=("missing-field-validation")
+fi
+
+# POST with malformed JSON → 400 (Invalid JSON body)
+MALFORMED=$(curl -s -X POST "$BASE/store" -H 'Content-Type: application/json' -d 'not-json-at-all' --max-time 5 -o /dev/null -w '%{http_code}')
+if [ "$MALFORMED" = "400" ]; then
+  echo -e "${G}PASS${N}  POST with malformed JSON → 400"
+  PASS=$((PASS + 1))
+else
+  echo -e "${R}FAIL${N}  malformed JSON POST returned $MALFORMED (expected 400)"
+  FAIL=$((FAIL + 1))
+  FAIL_NAMES+=("json-parse-validation")
+fi
+
+# ── Additional uncovered endpoints (coverage expansion) ──
+assert "/stats"                           "/stats" \
+  "isinstance(d.get('ram_entries', d.get('entries', 0)), int)"
+assert "/feed?since=2026-01-01"           "/feed?since=2026-01-01" \
+  "isinstance(d.get('results', d.get('events', [])), list)"
+assert "/auth/whoami"                     "/auth/whoami" \
+  "'role' in d or 'userId' in d or 'user' in d"
+assert "/admin/pending-patches"           "/admin/pending-patches" \
+  "isinstance(d.get('patches', []), list)"
 
 # ── Dashboard HTML served ──
 # Use HTTP code check instead of JSON parse
