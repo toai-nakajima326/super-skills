@@ -2815,7 +2815,11 @@ async function startEmbedLoop() {
   while (embedLoopRunning) {
     // Ensure MLX embed backend is available
     if (!mlxAvailable) {
-      checkMlx();
+      // await so the flag reflects the latest probe before we decide to skip.
+      // Without await we always see the stale false from startup race and
+      // sleep 60s unnecessarily, keeping the loop idle for 60s after every
+      // MLX restart even though the server came back in 10s.
+      await checkMlx();
       if (!mlxAvailable) {
         await new Promise(r => setTimeout(r, 60000));
         continue;
@@ -3809,6 +3813,8 @@ let coremlAvailable = false;
  * Tries /api/health (new MLX server) then /health (legacy CoreML).
  * This is a fast local server for search-time query embedding.
  */
+let _mlxEmbedFailStreak = 0; // hysteresis: only flip to false after N consecutive failures
+
 async function checkMlx() {
   try {
     const parsed = new URL(`${MLX_EMBED_URL}/api/health`);
@@ -3826,16 +3832,31 @@ async function checkMlx() {
       req.end();
     });
     // MLX server returns status='healthy', legacy CoreML returns status='ok'
-    mlxAvailable = data && (data.status === 'healthy' || data.status === 'ok');
-    coremlAvailable = mlxAvailable; // back-compat
-    if (mlxAvailable) {
+    const ok = data && (data.status === 'healthy' || data.status === 'ok');
+    if (ok) {
+      if (!mlxAvailable) console.log(`[mlx-embed] Available: model=${data.model_name || data.model || ''} (dim=${data.embedding_dim || 0})`);
+      mlxAvailable = true;
+      coremlAvailable = true;
       mlxEmbedDim = data.embedding_dim || 0;
       mlxModelName = data.model_name || data.model || '';
-      console.log(`[mlx-embed] Available: model=${mlxModelName} (dim=${mlxEmbedDim})`);
+      _mlxEmbedFailStreak = 0;
+    } else {
+      _mlxEmbedFailStreak++;
+      if (_mlxEmbedFailStreak >= 3) {
+        if (mlxAvailable) console.log(`[mlx-embed] Unavailable: unexpected status (streak=${_mlxEmbedFailStreak})`);
+        mlxAvailable = false;
+        coremlAvailable = false;
+      }
     }
-  } catch {
-    mlxAvailable = false;
-    coremlAvailable = false;
+  } catch (e) {
+    _mlxEmbedFailStreak++;
+    if (_mlxEmbedFailStreak === 1 || _mlxEmbedFailStreak >= 3) {
+      console.log(`[mlx-embed] Probe failed (streak=${_mlxEmbedFailStreak}): ${e.message?.slice(0, 80)}`);
+    }
+    if (_mlxEmbedFailStreak >= 3) {
+      mlxAvailable = false;
+      coremlAvailable = false;
+    }
   }
 }
 // Back-compat alias
