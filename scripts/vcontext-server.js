@@ -1565,8 +1565,24 @@ function handleRecent(req, res) {
 
   parseTags(allResults);
 
-  sendJson(res, 200, { results: allResults.slice(0, n), count: Math.min(allResults.length, n) });
-  recordMetric({ operation: 'recent', startTime: _startTime, responseChars: JSON.stringify(allResults.slice(0, n)).length, resultCount: Math.min(allResults.length, n), taskKind: 'recent' });
+  // ?short=1 — truncate content to 500 chars server-side.  Dashboard
+  // displays ≤200 chars, so sending full content (avg 15–40KB/row) is
+  // pure bandwidth waste. 2.9MB payload → ~300KB with short=1.
+  // Keep the raw embedding field out of responses (rarely needed,
+  // 16KB/row as JSON).
+  const short = params.short === '1';
+  const trimmed = allResults.slice(0, n).map(r => {
+    const out = { ...r };
+    if (short && typeof out.content === 'string' && out.content.length > 500) {
+      out.content = out.content.slice(0, 500) + '…';
+      out._truncated = true;
+    }
+    if (short) delete out.embedding;
+    return out;
+  });
+
+  sendJson(res, 200, { results: trimmed, count: trimmed.length });
+  recordMetric({ operation: 'recent', startTime: _startTime, responseChars: JSON.stringify(trimmed).length, resultCount: trimmed.length, taskKind: 'recent' });
 }
 
 /**
@@ -4122,26 +4138,33 @@ async function mlxGenerate(prompt, options = {}) {
 
 // GET /ai/status — Show local AI status
 function handleAiStatus(req, res) {
+  // One aggregate query instead of 6 full-table scans — /ai/status was
+  // 1.2s (6 × 200ms COUNT(*) over 40k rows). Single pass with SUM(CASE)
+  // cuts it to ~200ms.
   let embeddingCount = 0;
   let embeddingBacklog = 0;       // 24h-recent eligible rows still missing embedding
   let embeddingEligibleTotal = 0; // total ELIGIBLE rows (denominator)
-  try {
-    // Both from RAM — embed loop only processes RAM entries
-    const ramTotal = dbQuery(`SELECT count(*) as c FROM entries;`);
-    embeddingEligibleTotal = ramTotal[0]?.c || 0;
-    const ramEmb = dbQuery(`SELECT count(*) as c FROM entries WHERE embedding IS NOT NULL;`);
-    embeddingCount = ramEmb[0]?.c || 0;
-    embeddingBacklog = embeddingEligibleTotal - embeddingCount;
-  } catch {}
-
-  // LLM generation stats
   let genStats = { summaries: 0, suggestions: 0, skills_created: 0, discoveries: 0 };
   try {
-    const s1 = dbQuery(`SELECT count(*) as c FROM entries WHERE reasoning IS NOT NULL AND reasoning != '';`);
-    const s2 = dbQuery(`SELECT count(*) as c FROM entries WHERE type='skill-suggestion';`);
-    const s3 = dbQuery(`SELECT count(*) as c FROM entries WHERE type='skill-created';`);
-    const s4 = dbQuery(`SELECT count(*) as c FROM entries WHERE type='skill-discovery';`);
-    genStats = { summaries: s1[0]?.c || 0, suggestions: s2[0]?.c || 0, skills_created: s3[0]?.c || 0, discoveries: s4[0]?.c || 0 };
+    const agg = dbQuery(`
+      SELECT
+        COUNT(*) AS total,
+        COUNT(embedding) AS embedded,
+        SUM(CASE WHEN reasoning IS NOT NULL AND reasoning != '' THEN 1 ELSE 0 END) AS with_reasoning,
+        SUM(CASE WHEN type = 'skill-suggestion' THEN 1 ELSE 0 END) AS skill_suggestions,
+        SUM(CASE WHEN type = 'skill-created' THEN 1 ELSE 0 END) AS skill_created,
+        SUM(CASE WHEN type = 'skill-discovery' THEN 1 ELSE 0 END) AS skill_discoveries
+      FROM entries;
+    `)[0] || {};
+    embeddingEligibleTotal = agg.total || 0;
+    embeddingCount = agg.embedded || 0;
+    embeddingBacklog = embeddingEligibleTotal - embeddingCount;
+    genStats = {
+      summaries: agg.with_reasoning || 0,
+      suggestions: agg.skill_suggestions || 0,
+      skills_created: agg.skill_created || 0,
+      discoveries: agg.skill_discoveries || 0,
+    };
   } catch {}
 
   sendJson(res, 200, {
