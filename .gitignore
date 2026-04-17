@@ -36,3 +36,4 @@ models/*.data
 .claude/worktrees/
 .claude/worktrees/
 data/snapshots/
+data/experiments/
