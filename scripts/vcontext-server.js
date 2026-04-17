@@ -2882,12 +2882,23 @@ function formatBytes(bytes) {
 
 // ── Streaming embed (MLX: always-on, GPU-accelerated) ──────────
 let embedLoopRunning = false;
+// Loop heartbeat — each iteration updates the timestamp so a stuck loop
+// (stuck on await or caught in retry backoff) is distinguishable from an
+// intentionally-idle loop.  Exposed via /pipeline/health.
+const _loopHeartbeat = {
+  embed: 0,
+  embed_iter: 0,
+  discovery: 0,
+  discovery_iter: 0,
+};
 
 async function startEmbedLoop() {
   if (embedLoopRunning) return;
   embedLoopRunning = true;
 
   while (embedLoopRunning) {
+    _loopHeartbeat.embed = Date.now();
+    _loopHeartbeat.embed_iter++;
     // Ensure MLX embed backend is available
     if (!mlxAvailable) {
       // await so the flag reflects the latest probe before we decide to skip.
@@ -3249,6 +3260,8 @@ async function startDiscoveryLoop() {
   discoveryLoopRunning = true;
 
   while (discoveryLoopRunning) {
+    _loopHeartbeat.discovery = Date.now();
+    _loopHeartbeat.discovery_iter++;
     // Ensure MLX generate is available
     if (!mlxGenerateAvailable) { checkMlxGenerate(); }
     if (!mlxGenerateAvailable) {
@@ -5789,7 +5802,30 @@ const server = createServer(async (req, res) => {
         red:    features_out.filter(f => f.status === 'red').length,
         idle:   features_out.filter(f => f.status === 'idle').length,
       };
-      sendJson(res, 200, { summary, features: features_out });
+      // Loop heartbeats — distinguishes "loop alive but idle" from
+      // "loop stuck / dead".  Feature-recency above tells us the
+      // EFFECTS of the loop; heartbeat tells us the LOOP ITSELF.
+      const loops = {
+        embed: {
+          running: embedLoopRunning,
+          last_tick_ms_ago: _loopHeartbeat.embed ? Date.now() - _loopHeartbeat.embed : null,
+          iterations: _loopHeartbeat.embed_iter,
+          status: !embedLoopRunning ? 'stopped'
+            : _loopHeartbeat.embed && (Date.now() - _loopHeartbeat.embed) < 120_000 ? 'green'
+            : _loopHeartbeat.embed && (Date.now() - _loopHeartbeat.embed) < 600_000 ? 'yellow'
+            : 'red',
+        },
+        discovery: {
+          running: discoveryLoopRunning,
+          last_tick_ms_ago: _loopHeartbeat.discovery ? Date.now() - _loopHeartbeat.discovery : null,
+          iterations: _loopHeartbeat.discovery_iter,
+          status: !discoveryLoopRunning ? 'stopped'
+            : _loopHeartbeat.discovery && (Date.now() - _loopHeartbeat.discovery) < 600_000 ? 'green'
+            : _loopHeartbeat.discovery && (Date.now() - _loopHeartbeat.discovery) < 3600_000 ? 'yellow'
+            : 'red',
+        },
+      };
+      sendJson(res, 200, { summary, features: features_out, loops });
     } else if (method === 'POST' && path === '/admin/run-all') {
       // Manually fire the AI-driven loops whose scheduler has gone quiet.
       // MLX uses a single serialized lock — run tasks SEQUENTIALLY so
