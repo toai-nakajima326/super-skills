@@ -2873,6 +2873,13 @@ function doBackupAndMigrate() {
   } catch {}
   // Incremental index backfill
   try { backfillIndex(200); } catch {}
+  // Sweep orphan entry_index rows — entries that were deleted (via dedup
+  // or migration) leave stale index rows that bloat queries. Limit the
+  // per-cycle delete so we never stall the tick on a huge cleanup.
+  try {
+    const r = ramDb.prepare(`DELETE FROM entry_index WHERE entry_id IN (SELECT entry_id FROM entry_index WHERE entry_id NOT IN (SELECT id FROM entries) LIMIT 1000)`).run();
+    if (r.changes > 0) console.log(`[vcontext:auto] Purged ${r.changes} orphan entry_index rows`);
+  } catch {}
   // Recheck AI availability
   checkMlxGenerate();
   checkMlx(); // MLX embed server (always-on embedding)
