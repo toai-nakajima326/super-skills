@@ -1391,9 +1391,13 @@ async function handleRecall(req, res) {
   }
 
   // --- Semantic boost: if FTS returned few results, supplement with vector search ---
-  if (allResults.length < limit && mlxAvailable && vecDb) {
+  // Uses mlxEmbedFast (2s timeout, LRU-cached). If the embed worker is busy
+  // with a background batch the call returns null rather than blocking the
+  // request for 30–60s. Set ?semantic=false to skip entirely.
+  const wantSemantic = params.semantic !== 'false';
+  if (wantSemantic && allResults.length < limit && mlxAvailable && vecDb) {
     try {
-      const queryEmbed = await mlxEmbed(q.slice(0, 500));
+      const queryEmbed = await mlxEmbedFast(q.slice(0, 500), 2000);
       if (queryEmbed && queryEmbed.length > 0) {
         const vecResults = vecSearch(queryEmbed, limit * 2);
         const vecIds = vecResults
@@ -3782,6 +3786,44 @@ function _mlxEmbedRaw(text) {
 
 // Public API — serialized via mutex to prevent GPU contention
 function mlxEmbed(text) { return withMlxLock(() => _mlxEmbedRaw(text)); }
+
+// Query-embedding LRU cache + short-timeout variant for the interactive
+// recall path. The background embed loop holds withMlxLock while batching,
+// so a naive await blocks recall for 30–60 s. mlxEmbedFast races against
+// a timeout and returns null instead of waiting — recall degrades to
+// FTS-only results rather than hanging the request.
+const _queryEmbedCache = new Map(); // key → Float32Array embedding
+const QUERY_EMBED_CACHE_MAX = 50;
+
+async function mlxEmbedFast(text, timeoutMs = 2000) {
+  const key = String(text).slice(0, 200);
+  // LRU hit — move to end
+  if (_queryEmbedCache.has(key)) {
+    const cached = _queryEmbedCache.get(key);
+    _queryEmbedCache.delete(key);
+    _queryEmbedCache.set(key, cached);
+    return cached;
+  }
+  try {
+    // Bypass withMlxLock — the MLX embed HTTP server handles its own
+    // queueing, and the app-level lock serializes with batch embedding
+    // which adds seconds of wait. Direct call lets the server schedule.
+    const embedPromise = _mlxEmbedRaw(text);
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('mlxEmbedFast timeout')), timeoutMs));
+    const result = await Promise.race([embedPromise, timeoutPromise]);
+    if (result && result.length > 0) {
+      _queryEmbedCache.set(key, result);
+      if (_queryEmbedCache.size > QUERY_EMBED_CACHE_MAX) {
+        const oldest = _queryEmbedCache.keys().next().value;
+        _queryEmbedCache.delete(oldest);
+      }
+    }
+    return result;
+  } catch {
+    return null; // gracefully degrade — FTS results are still useful
+  }
+}
 
 // Batch embed via /embed_batch (10x throughput vs single calls)
 function _mlxEmbedBatchRaw(texts) {
