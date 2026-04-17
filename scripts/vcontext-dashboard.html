@@ -653,9 +653,12 @@ async function refresh() {
     var recallColor = recallStatus === 'fast' ? 'var(--green)' : recallStatus === 'normal' ? 'var(--yellow)' : 'var(--red)';
 
     var mhtml = '<div style="font-size:13px;line-height:1.8;">';
-    mhtml += '<div>Record: <strong>' + totalEntries.toLocaleString() + '</strong> entries ';
-    mhtml += '<span style="color:' + storeColor + ';">(' + Math.round(storeOp.avg_latency_ms) + 'ms/write)</span></div>';
-    mhtml += '<div>Search: <strong>' + recallOp.count + '</strong> queries ';
+    // Period label used across this card for any time-windowed metric.
+    // Lifetime counters are explicitly marked "total"; period counters use this.
+    var periodLabel = (metrics.period_hours === 24) ? '24h' : (metrics.period_hours + 'h');
+    mhtml += '<div>Record: <strong>' + totalEntries.toLocaleString() + '</strong> entries total ';
+    mhtml += '<span style="color:' + storeColor + ';" title="average over last ' + periodLabel + '">(' + Math.round(storeOp.avg_latency_ms) + 'ms/write · ' + periodLabel + ')</span></div>';
+    mhtml += '<div>Search: <strong>' + recallOp.count + '</strong> queries/' + periodLabel + ' ';
     mhtml += '<span style="color:' + recallColor + ';">(' + Math.round(recallOp.avg_latency_ms) + 'ms avg)</span>';
     if (recallOp.avg_result_count > 0) mhtml += ' <span style="color:var(--text-dim);">' + recallOp.avg_result_count.toFixed(1) + ' hits/query</span>';
     mhtml += '</div>';
@@ -669,7 +672,6 @@ async function refresh() {
     // Skill inventory — lifetime total + period count (option C: show both
     // so users can tell at a glance what's historical vs recent)
     var skills = metrics.skills || {};
-    var periodLabel = (metrics.period_hours === 24) ? '24h' : (metrics.period_hours + 'h');
     mhtml += '<div>Skills: <strong>' + (skills.registered || 0) + '</strong> registered';
     if (skills.auto_created) {
       var recent = skills.auto_created_in_period || 0;
@@ -709,22 +711,26 @@ async function refresh() {
     }
     mhtml += '</div>';
 
-    // Effectiveness — period + cumulative
+    // Effectiveness — period + cumulative.
+    // period_savings_rate = "of tokens needed in this window, how much was
+    //   already stored before the window started?" → lower value = we did more
+    //   net new work in the window.
+    // cumulative_savings_rate = same ratio against all-time storage.
     mhtml += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--bg-bar);font-size:12px;">';
     var pRate = ((derived.period_savings_rate || 0) * 100).toFixed(2);
     var cRate = ((derived.cumulative_savings_rate || 0) * 100).toFixed(2);
     var pColor = pRate >= 50 ? 'var(--green)' : pRate >= 20 ? 'var(--yellow)' : 'var(--text-dim)';
     var cColor = cRate >= 50 ? 'var(--green)' : cRate >= 20 ? 'var(--yellow)' : 'var(--text-dim)';
     mhtml += '<div style="display:flex;gap:16px;">';
-    mhtml += '<div><div style="font-size:10px;color:var(--text-muted);">24h savings</div>';
+    mhtml += '<div title="prior / (prior + new in ' + periodLabel + ')"><div style="font-size:10px;color:var(--text-muted);">' + periodLabel + ' savings</div>';
     mhtml += '<div style="font-size:18px;font-weight:bold;color:' + pColor + ';">' + pRate + '%</div></div>';
-    mhtml += '<div><div style="font-size:10px;color:var(--text-muted);">Cumulative</div>';
+    mhtml += '<div title="all-time stored / (all-time + new in ' + periodLabel + ')"><div style="font-size:10px;color:var(--text-muted);">Cumulative</div>';
     mhtml += '<div style="font-size:18px;font-weight:bold;color:' + cColor + ';">' + cRate + '%</div></div>';
     mhtml += '</div>';
-    mhtml += '<div style="font-size:10px;color:var(--text-dim);margin-top:4px;">';
-    mhtml += 'Prior: ' + (derived.prior_stored_tokens || 0).toLocaleString() + ' tok';
-    mhtml += ' | New: ' + (derived.period_new_tokens || 0).toLocaleString() + ' tok';
-    mhtml += ' | Total: ' + (derived.cumulative_stored_tokens || 0).toLocaleString() + ' tok';
+    mhtml += '<div style="font-size:10px;color:var(--text-dim);margin-top:4px;" title="Prior = stored before this ' + periodLabel + ' window. New = created inside window. Total = lifetime stored.">';
+    mhtml += 'Prior (pre-' + periodLabel + '): ' + (derived.prior_stored_tokens || 0).toLocaleString() + ' tok';
+    mhtml += ' | New (in ' + periodLabel + '): ' + (derived.period_new_tokens || 0).toLocaleString() + ' tok';
+    mhtml += ' | Total (lifetime): ' + (derived.cumulative_stored_tokens || 0).toLocaleString() + ' tok';
     mhtml += '</div>';
     mhtml += '</div>';
 
