@@ -1145,13 +1145,15 @@ async function handleStore(req, res) {
     } catch {}
   });
 
-  // Auto-summarize with MLX generate (24/7)
+  // Auto-summarize with MLX generate (24/7).
+  // noThink: measured 91% faster + 91% fewer tokens with equal quality on
+  // extractive summarization (experiment-thinking-skip.sh, 2026-04-17).
   if (mlxGenerateAvailable && content.length > 200) {
     setImmediate(async () => {
       try {
         const summary = await mlxGenerate(
           `Summarize this in one sentence (max 50 words). Output ONLY the summary, nothing else:\n\n${content.slice(0, 2000)}`,
-          { maxTokens: 40960 }
+          { maxTokens: 400, noThink: true }
         );
         if (summary && summary.length > 5) {
           dbExec(`UPDATE entries SET reasoning = ${esc(summary.trim())} WHERE id = ${entry.id} AND reasoning IS NULL;`);
@@ -2980,6 +2982,67 @@ function detectAnomalies() {
       dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES ('anomaly-alert', ${esc(content)}, '["anomaly-alert","auto"]', 'system', ${estimateTokens(content)}, datetime('now'), 0, 'ram');`);
       console.log(`[vcontext:alert] ${alerts.length} anomalies detected`);
     } catch {}
+    // Auto-response: take concrete actions for anomalies that have safe fixes.
+    // Cooldown prevents flapping if a condition persists across cycles.
+    try { respondToAnomalies(alerts); } catch (e) { console.error('[anomaly-response]', e.message?.slice(0, 80)); }
+  }
+}
+
+// Track last-action timestamps per anomaly kind to avoid flapping
+const _anomalyLastAction = new Map();
+const ANOMALY_COOLDOWN_MS = 5 * 60 * 1000; // 5 min
+
+function respondToAnomalies(alerts) {
+  const now = Date.now();
+  const actions = [];
+  for (const alert of alerts) {
+    const msg = alert.msg || '';
+    // Key = anomaly kind (not the full message, which includes varying counts)
+    let kind = null;
+    if (msg.startsWith('Error spike')) kind = 'error-spike';
+    else if (msg.startsWith('Embedding stalled')) kind = 'embed-stall';
+    else if (msg.startsWith('RAM ahead of SSD')) kind = 'ram-ahead';
+    else if (msg.startsWith('RAM disk >3GB')) kind = 'ram-disk-full';
+    if (!kind) continue;
+
+    const last = _anomalyLastAction.get(kind) || 0;
+    if (now - last < ANOMALY_COOLDOWN_MS) continue; // still in cooldown
+    _anomalyLastAction.set(kind, now);
+
+    try {
+      if (kind === 'embed-stall') {
+        // MLX embed worker stopped producing. Kick the launchd agent.
+        execSync('launchctl kickstart -k "gui/$(id -u)/com.vcontext.mlx-embed" 2>/dev/null || true', { timeout: 5000 });
+        actions.push({ kind, action: 'kickstart mlx-embed launchd agent' });
+        console.log('[anomaly-response] Restarted MLX embed (stall detected)');
+      } else if (kind === 'ram-ahead') {
+        // Tier migration lagged. Force the fast sync now.
+        try { syncRamToSsd(); } catch {}
+        actions.push({ kind, action: 'forced syncRamToSsd()' });
+        console.log('[anomaly-response] Forced RAM→SSD sync');
+      } else if (kind === 'ram-disk-full') {
+        // RAM disk approaching full. Force aggressive WAL checkpoint + migrate.
+        try { if (ramDb) ramDb.pragma('wal_checkpoint(TRUNCATE)'); } catch {}
+        try { migrateRamToSsd(); } catch {}
+        actions.push({ kind, action: 'wal_checkpoint(TRUNCATE) + migrateRamToSsd()' });
+        // Also macOS notification since this is critical
+        try { execSync(`osascript -e 'display notification "${msg.replace(/"/g, "")}" with title "🚨 vcontext RAM full"' 2>/dev/null || true`); } catch {}
+        console.log('[anomaly-response] RAM disk full — checkpointed + migrated');
+      } else if (kind === 'error-spike') {
+        // Humans only — spike could be any bug. Notify.
+        try { execSync(`osascript -e 'display notification "${msg.replace(/"/g, "")}" with title "⚠️ vcontext errors"' 2>/dev/null || true`); } catch {}
+        actions.push({ kind, action: 'macOS notification (no auto-fix — needs diagnosis)' });
+      }
+    } catch (e) {
+      console.error(`[anomaly-response] ${kind} failed:`, e.message?.slice(0, 80));
+    }
+  }
+  // Audit trail — one entry per response batch
+  if (actions.length > 0) {
+    try {
+      const auditContent = JSON.stringify({ actions, responded_at: new Date().toISOString() });
+      dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES ('anomaly-response', ${esc(auditContent)}, '["anomaly-response","auto"]', 'system', ${estimateTokens(auditContent)}, datetime('now'), 0, 'ram');`);
+    } catch {}
   }
 }
 
@@ -3943,12 +4006,19 @@ function mlxGenerateOnce(prompt, options = {}) {
 }
 function _mlxGenerateRaw(prompt, options = {}) {
   return new Promise((resolve, reject) => {
+    // Thinking control — Qwen3 supports `/no_think` as a prompt directive
+    // to skip the <think>...</think> block. For simple tasks (summarize,
+    // classify, extract) thinking wastes 100-400 tokens of latency with
+    // no quality win. Pass `noThink: true` to skip it.
+    const effectivePrompt = options.noThink
+      ? `/no_think\n${prompt}`
+      : prompt;
     // vllm-mlx is 2.5x faster — allow higher tokens (Qwen3 thinking uses ~200)
     // and block embed loop. Qwen3 thinking mode uses ~200 tokens for think,
     // leaving ~300 for actual content. Sufficient for summarization tasks.
     const body = JSON.stringify({
       model: MLX_GENERATE_MODEL,
-      messages: [{ role: 'user', content: prompt }],
+      messages: [{ role: 'user', content: effectivePrompt }],
       max_tokens: options.maxTokens || 4000,
       temperature: options.temperature ?? 0.3,
       ...(options.seed != null ? { seed: options.seed } : {}),
@@ -4110,7 +4180,7 @@ async function handleAiSummarize(req, res) {
     const rows = dbQuery(`SELECT id, content FROM entries WHERE reasoning IS NULL AND created_at < datetime('now', '-1 day') LIMIT 20;`);
     for (const row of rows) {
       try {
-        const summary = await mlxGenerate(`Summarize in one sentence (max 50 words):\n\n${row.content.slice(0, 2000)}`, { maxTokens: 40960 });
+        const summary = await mlxGenerate(`Summarize in one sentence (max 50 words):\n\n${row.content.slice(0, 2000)}`, { maxTokens: 400, noThink: true });
         if (summary) dbExec(`UPDATE entries SET reasoning = ${esc(summary.trim())} WHERE id = ${row.id};`);
       } catch {}
     }
@@ -4123,7 +4193,7 @@ async function handleAiSummarize(req, res) {
     const rows = dbQuery(`SELECT content FROM entries WHERE id = ${id};`);
     if (rows[0]) {
       try {
-        const summary = await mlxGenerate(`Summarize in one sentence (max 50 words):\n\n${rows[0].content.slice(0, 2000)}`, { maxTokens: 40960 });
+        const summary = await mlxGenerate(`Summarize in one sentence (max 50 words):\n\n${rows[0].content.slice(0, 2000)}`, { maxTokens: 400, noThink: true });
         if (summary) { dbExec(`UPDATE entries SET reasoning = ${esc(summary.trim())} WHERE id = ${id};`); count++; }
       } catch {}
     }
@@ -4608,7 +4678,7 @@ Keywords:`;
       // to the user's prompt words so the pipeline keeps moving.
       let keywordsRaw = '';
       try {
-        keywordsRaw = await mlxGenerate(keywordPrompt, { maxTokens: 40960, temperature: 0.1 });
+        keywordsRaw = await mlxGenerate(keywordPrompt, { maxTokens: 2000, temperature: 0.1, noThink: true });
       } catch (e) {
         console.error(`[vcontext:predict] mlxGenerate failed: ${e.message}`);
       }
