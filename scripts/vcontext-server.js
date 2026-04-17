@@ -1814,6 +1814,15 @@ function handlePrune(req, res) {
   // Rebuild FTS
   dbExec("INSERT INTO entries_fts(entries_fts) VALUES('rebuild');");
 
+  // Clean entry_index orphans created by the DELETE above.  Without this
+  // the 5-min incremental sweep takes many cycles to catch up after a
+  // large prune, leaving ghost rows that bloat /analytics/weekly-summary
+  // and skill-effectiveness queries.
+  try {
+    const r = ramDb.prepare(`DELETE FROM entry_index WHERE entry_id NOT IN (SELECT id FROM entries)`).run();
+    if (r.changes > 0) console.log(`[handlePrune] purged ${r.changes} orphan entry_index rows`);
+  } catch {}
+
   // Write-through: also prune matching entries from SSD
   let ssdPruned = 0;
   try {
@@ -2938,6 +2947,23 @@ function doBackupAndMigrate() {
   try {
     const r = ramDb.prepare(`DELETE FROM entry_index WHERE entry_id IN (SELECT entry_id FROM entry_index WHERE entry_id NOT IN (SELECT id FROM entries) LIMIT 1000)`).run();
     if (r.changes > 0) console.log(`[vcontext:auto] Purged ${r.changes} orphan entry_index rows`);
+  } catch {}
+  // skill-trigger garbage collection — each predictive-search run creates
+  // triggers from session-specific prompts (e.g. "APIエラー|401|502").
+  // They persist as status='active' forever, so a typical week grows the
+  // routing table by ~600 rows, slowing buildRouteTable and polluting
+  // matches.  Deprecate triggers older than 30 days that have no recorded
+  // skill-usage hits — lightweight: UPDATE, not DELETE, so we can still
+  // audit them.
+  try {
+    const r = ramDb.prepare(`
+      UPDATE entries
+      SET status = 'deprecated'
+      WHERE type = 'skill-trigger'
+        AND status = 'active'
+        AND created_at < datetime('now', '-30 days')
+    `).run();
+    if (r.changes > 0) console.log(`[vcontext:auto] Deprecated ${r.changes} stale skill-triggers`);
   } catch {}
   // Recheck AI availability
   checkMlxGenerate();
