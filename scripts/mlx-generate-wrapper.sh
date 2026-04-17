@@ -1,20 +1,23 @@
 #!/bin/bash
-# MLX Generate Server wrapper — vllm-mlx (replaces custom mlx-generate-server.py)
-# OpenAI-compatible API on port 3162 with continuous batching + Qwen3 reasoning parser
+# MLX Generate Server wrapper — mlx_lm.server with speculative decoding
+# Qwen3-8B (main) + Qwen3-0.6B (draft) = 1.3-2x faster, 100% accuracy preserved
 
 set -euo pipefail
 
 export PATH="/Users/mitsuru_nakajima/.pyenv/versions/3.13.2/bin:$PATH"
 
 MODEL="${MLX_GENERATE_MODEL:-mlx-community/Qwen3-8B-4bit}"
+DRAFT_MODEL="${MLX_DRAFT_MODEL:-Qwen/Qwen3-0.6B-MLX-4bit}"
 PORT="${MLX_GENERATE_PORT:-3162}"
 HOST="127.0.0.1"
 
-echo "[mlx-generate-wrapper] Starting vllm-mlx: model=${MODEL} port=${PORT}"
-exec python3 -m vllm_mlx.server \
+echo "[mlx-generate-wrapper] Starting mlx_lm.server with speculative decoding"
+echo "[mlx-generate-wrapper] main=${MODEL} draft=${DRAFT_MODEL} port=${PORT}"
+exec python3 -m mlx_lm.server \
   --model "${MODEL}" \
+  --draft-model "${DRAFT_MODEL}" \
+  --num-draft-tokens 5 \
+  --prompt-cache-size 20 \
+  --prompt-cache-bytes 1073741824 \
   --port "${PORT}" \
-  --host "${HOST}" \
-  --reasoning-parser qwen3 \
-  --max-tokens 32768 \
-  --continuous-batching
+  --host "${HOST}"
