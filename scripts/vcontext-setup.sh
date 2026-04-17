@@ -11,7 +11,7 @@ MOUNT_POINT="/Volumes/VContext"
 DB_PATH="${MOUNT_POINT}/vcontext.db"
 BACKUP_DIR="${HOME}/skills/data"
 BACKUP_PATH="${BACKUP_DIR}/vcontext-backup.sqlite"
-RAM_BLOCKS=8388608  # 4GB in 512-byte blocks
+RAM_BLOCKS=12582912  # 6GB in 512-byte blocks (was 4GB — expanded 2026-04-17 for headroom)
 PLIST_LABEL="com.vcontext.ramdisk"
 PLIST_PATH="${HOME}/Library/LaunchAgents/${PLIST_LABEL}.plist"
 
@@ -119,7 +119,7 @@ cmd_start() {
     fi
   fi
 
-  log "Creating 4GB RAM disk (${RAM_BLOCKS} x 512-byte blocks)"
+  log "Creating 6GB RAM disk (${RAM_BLOCKS} x 512-byte blocks)"
   DISK_DEV=$(hdiutil attach -nomount ram://${RAM_BLOCKS})
   DISK_DEV=$(echo "${DISK_DEV}" | xargs)  # trim whitespace
 
@@ -158,7 +158,7 @@ cmd_start() {
   log "  Mount:    ${MOUNT_POINT}"
   log "  Database: ${DB_PATH}"
   log "  Backup:   ${BACKUP_PATH}"
-  log "  Size:     4 GB RAM"
+  log "  Size:     6 GB RAM"
   echo ""
   log "Start the server: node scripts/vcontext-server.js"
 }
