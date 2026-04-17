@@ -151,6 +151,33 @@ assert "/ai/status"                  "/ai/status" \
 assert "/pipeline/health"            "/pipeline/health" \
   "'features' in d and 'summary' in d"
 
+# ── Edge cases (inputs that should fail cleanly, not 500) ──
+# Validates the server returns an explicit error envelope rather than
+# leaking a stack trace or hanging.
+assert_status() {
+  local name="$1" url="$2" expected="$3"
+  local code
+  code=$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' "$BASE$url" 2>/dev/null)
+  if [ "$code" = "$expected" ]; then
+    echo -e "${G}PASS${N}  $name ($code)"
+    PASS=$((PASS + 1))
+  else
+    echo -e "${R}FAIL${N}  $name — got HTTP $code, expected $expected"
+    FAIL=$((FAIL + 1))
+    FAIL_NAMES+=("$name")
+  fi
+}
+assert_status "/recall missing q → 400"   "/recall"                        "400"
+assert_status "/session/ empty → 400"     "/session/"                      "400"
+assert_status "/unknown-path → 404"       "/nonexistent-endpoint"          "404"
+assert_status "/dashboard (GET) → 200"    "/dashboard"                     "200"
+# /recall with nonsense FTS chars shouldn't crash — server sanitizes via ftsQuery()
+assert "/recall with special chars"      "/recall?q=%23%24%25%28%29&limit=1" \
+  "isinstance(d.get('results'), list)"
+# Large n should be capped, not OOM
+assert "/recent?n=99999 capped"           "/recent?n=99999&short=1" \
+  "d.get('count', 99999) <= 200"
+
 # ── Dashboard HTML served ──
 # Use HTTP code check instead of JSON parse
 DASH_CODE=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' "$BASE/dashboard")
