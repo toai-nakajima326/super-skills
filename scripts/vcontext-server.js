@@ -915,11 +915,26 @@ function promoteToRam(rows, sourceTier) {
 }
 
 // ── HTTP helpers ───────────────────────────────────────────────
+// Hard cap on POST body size to prevent local OOM from a runaway client
+// streaming unbounded data into /store.  Realistic /store entries are
+// under 500 KB; 10 MB gives 20× headroom before we hang up the socket.
+const MAX_BODY_BYTES = 10 * 1024 * 1024;
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on('data', (c) => chunks.push(c));
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > MAX_BODY_BYTES) {
+        req.destroy();
+        reject(new Error(`Request body > ${MAX_BODY_BYTES} bytes (rejected to prevent OOM)`));
+        return;
+      }
+      chunks.push(c);
+    });
     req.on('end', () => {
+      if (size > MAX_BODY_BYTES) return; // already rejected
       try {
         const raw = Buffer.concat(chunks).toString('utf-8');
         resolve(raw ? JSON.parse(raw) : {});
