@@ -3171,7 +3171,7 @@ async function runOnePrediction() {
             const keywords = line.replace(/^[-\s*]+/, '').trim();
             if (keywords.length >= 3) {
               dbExec(`INSERT OR IGNORE INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier, status, content_hash)
-                VALUES ('skill-trigger', ${esc(JSON.stringify({ keywords, for_skills: ['auto-router'], generated_at: new Date().toISOString() }))},
+                VALUES ('skill-trigger', ${esc(JSON.stringify({ keywords, for_skills: ['infinite-skills'], generated_at: new Date().toISOString() }))},
                 '["skill-trigger","auto"]', 'system', 10, datetime('now'), 0, 'ram', 'active',
                 ${esc(require('node:crypto').createHash('sha256').update(keywords).digest('hex'))});`);
             }

@@ -487,7 +487,7 @@ async function buildRouteTable() {
         const t = JSON.parse(line);
         if (t.keywords) {
           const re = new RegExp(t.keywords.replace(/\|/g, '|'), 'i');
-          table.push({ keywords: re, skills: t.for_skills || ['auto-router'] });
+          table.push({ keywords: re, skills: t.for_skills || ['infinite-skills'] });
         }
       } catch {}
     }
@@ -497,7 +497,7 @@ async function buildRouteTable() {
   return table;
 }
 
-async function routeSkills(prompt, sessionId, label = '[super-skills]') {
+async function routeSkills(prompt, sessionId, label = '[infinite-skills]') {
   const table = await buildRouteTable();
   const ruleMatched = new Set();
   for (const rule of table) {
@@ -1165,7 +1165,7 @@ async function recordEvent(eventName) {
       const prompt = data.prompt || data.content || data.message || '';
       if (prompt.length >= 1) {
         // Uses shared routeSkills (rule-based + semantic hybrid)
-        const { lines, matchedNames } = await routeSkills(prompt, sessionId, '[super-skills]');
+        const { lines, matchedNames } = await routeSkills(prompt, sessionId, '[infinite-skills]');
         if (matchedNames.length > 0) {
           process.stdout.write(lines.join('\n') + '\n');
           const kws = (prompt.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) || []).slice(0, 8);
@@ -1480,7 +1480,7 @@ async function handleSubagentStart(eventName = 'subagent-start') {
   const prompt = description;
   if (prompt.length >= 1) {
     try {
-      const { lines, matchedNames } = await routeSkills(prompt, sessionId, '[super-skills:agent]');
+      const { lines, matchedNames } = await routeSkills(prompt, sessionId, '[infinite-skills:agent]');
       if (matchedNames.length > 0) {
         process.stdout.write(lines.join('\n') + '\n');
       }

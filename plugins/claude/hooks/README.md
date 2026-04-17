@@ -22,4 +22,4 @@ This directory contains a safe, reminder-only Claude hooks template for the Supe
 
 ## Activation
 
-Review `super-skills.hooks.json` and merge only the entries you want into your Claude hooks configuration.
+Review `infinite-skills.hooks.json` and merge only the entries you want into your Claude hooks configuration.

@@ -31,12 +31,12 @@ The installer should treat Claude support as:
 
 - `full` for `.claude/skills`
 - `full` for `.claude/AGENTS.md`, generated from `plugins/claude/templates/AGENTS.md`
-- `full` for `.claude/plugins/super-skills` when `plugin:claude` is selected
+- `full` for `.claude/plugins/infinite-skills` when `plugin:claude` is selected
 - opt-in for hook activation
 
 ## Included Files
 
 - `INSTALL.md`
-- `hooks/super-skills.hooks.json`
+- `hooks/infinite-skills.hooks.json`
 - `hooks/README.md`
 - `scripts/hooks/*.js`

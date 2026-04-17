@@ -1,5 +1,5 @@
 ---
-name: super-skills
+name: infinite-skills
 description: "Use always. Automatically detect context, search vcontext skill-registry, and apply the most appropriate skill. Measures skill effectiveness and feeds results back for improvement."
 origin: unified
 ---

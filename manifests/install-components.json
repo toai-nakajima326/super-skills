@@ -25,7 +25,6 @@
     { "name": "exa-search", "type": "skill", "source": "skills/exa-search" },
     { "name": "mcp-server-patterns", "type": "skill", "source": "skills/mcp-server-patterns" },
     { "name": "dmux-workflows", "type": "skill", "source": "skills/dmux-workflows" },
-    { "name": "auto-router", "type": "skill", "source": "skills/auto-router" },
     { "name": "supervisor-worker", "type": "skill", "source": "skills/supervisor-worker" },
     { "name": "quality-gate", "type": "skill", "source": "skills/quality-gate" },
     { "name": "report-format", "type": "skill", "source": "skills/report-format" },

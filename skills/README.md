@@ -25,4 +25,4 @@ Additional source rules:
 
 Run `node scripts/build-skills.js` to generate Codex-facing metadata in `.agents/skills/`.
 
-See [SKILL-AUTHORING.md](/Volumes/Storage/src/super-skills/docs/SKILL-AUTHORING.md) for the full contract.
+See [SKILL-AUTHORING.md](/Volumes/Storage/src/infinite-skills/docs/SKILL-AUTHORING.md) for the full contract.

@@ -496,7 +496,7 @@ function ensurePlanOk(plan) {
 }
 
 function defaultStatePath(options) {
-  return options.statePath ?? path.join(options.targetRoot, ".super-skills", "install-state", `${options.target}.json`);
+  return options.statePath ?? path.join(options.targetRoot, ".infinite-skills", "install-state", `${options.target}.json`);
 }
 
 function buildStatePayload(plan, options) {

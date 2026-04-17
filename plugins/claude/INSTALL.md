@@ -7,7 +7,7 @@ This adapter is intentionally opt-in.
 When included through the installer, the Claude adapter is copied into:
 
 ```text
-.claude/plugins/super-skills/
+.claude/plugins/infinite-skills/
 ```
 
 The bundle includes:
@@ -21,7 +21,7 @@ It does not auto-enable hooks.
 ## How To Enable
 
 1. Install the adapter with `--with plugin:claude --target claude`
-2. Review `.claude/plugins/super-skills/hooks/super-skills.hooks.json`
+2. Review `.claude/plugins/infinite-skills/hooks/infinite-skills.hooks.json`
 3. Merge the desired hook entries into your Claude hooks config manually
 
 Suggested commands:

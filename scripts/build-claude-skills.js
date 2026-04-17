@@ -17,9 +17,9 @@ function build() {
   let built = 0;
   const allErrors = [];
 
-  // Only deploy super-skills to .claude/skills/ — all other skills
+  // Only deploy infinite-skills to .claude/skills/ — all other skills
   // live in vcontext skill-registry and are loaded on demand via recall
-  const CLAUDE_DEPLOY = ['super-skills'];
+  const CLAUDE_DEPLOY = ['infinite-skills'];
 
   for (const dir of dirs) {
     const { meta, body, filePath } = readSkill(SRC, dir);

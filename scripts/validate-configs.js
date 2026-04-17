@@ -57,7 +57,7 @@ for (const fileName of fs.readdirSync(path.join(ROOT, "mcp", "profiles")).filter
 readJson(path.join(ROOT, "manifests", "install-components.json"));
 readJson(path.join(ROOT, "manifests", "install-profiles.json"));
 readJson(path.join(ROOT, "manifests", "install-modules.json"));
-readJson(path.join(ROOT, "plugins", "claude", "hooks", "super-skills.hooks.json"));
+readJson(path.join(ROOT, "plugins", "claude", "hooks", "infinite-skills.hooks.json"));
 
 ensureTomlLike(path.join(ROOT, ".codex", "config.toml"), [
   "approval_policy",
