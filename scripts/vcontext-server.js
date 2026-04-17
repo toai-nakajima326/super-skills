@@ -338,7 +338,9 @@ function dbQuery(sql, dbPath = DB_PATH) {
     }
     // Legacy ENOBUFS/spawnSync errors no longer apply with in-process SQLite,
     // but keep this pattern for defensive error handling
-    console.error(`[db query error @ ${dbPath}]`, e.message?.slice(0, 100));
+    // Log SQL snippet so root-cause is visible — malformed JSON etc.
+    const sqlSnippet = String(sql).replace(/\s+/g, ' ').slice(0, 200);
+    console.error(`[db query error @ ${dbPath}]`, e.message?.slice(0, 100), '| SQL:', sqlSnippet);
     return [];
   }
 }
@@ -1633,7 +1635,6 @@ function handleSession(req, res) {
     session: sessionId,
     results: allRows,
     count: allRows.length,
-    truncated,
     total,
     limit,
     offset,
@@ -5277,42 +5278,29 @@ const server = createServer(async (req, res) => {
       } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'GET' && path === '/analytics/skill-effectiveness') {
       // Skill effectiveness: which skills actually lead to outcomes?
+      // We aggregate in JS instead of SQL json_each — SQLite's optimizer
+      // pushes json_each above the type filter in multiple plan shapes
+      // (CTE, MATERIALIZED, inner subquery) and any non-array content
+      // throws "malformed JSON" that floods the log. Pure JS is correct
+      // and within ~10ms for 500 rows.
       try {
-        const results = dbQuery(`
-          SELECT
-            skill_name,
-            usage_count,
-            last_used
-          FROM (
-            SELECT
-              json_extract(value, '$') as skill_name,
-              COUNT(*) as usage_count,
-              MAX(created_at) as last_used
-            FROM entries, json_each(json_extract(entries.content, '$.skills'))
-            WHERE entries.type='skill-usage'
-            GROUP BY skill_name
-          )
-          ORDER BY usage_count DESC LIMIT 30;
-        `);
-        sendJson(res, 200, { skills: results, count: results.length });
-      } catch (e) {
-        // Fallback if JSON functions not available
-        try {
-          const usage = dbQuery(`SELECT content, created_at FROM entries WHERE type='skill-usage' ORDER BY id DESC LIMIT 500;`);
-          const counts = {};
-          for (const row of usage) {
-            try {
-              const data = JSON.parse(row.content);
-              for (const name of (data.skills || [])) {
-                counts[name] = counts[name] || { skill_name: name, usage_count: 0, last_used: row.created_at };
-                counts[name].usage_count++;
-              }
-            } catch {}
-          }
-          const skills = Object.values(counts).sort((a, b) => b.usage_count - a.usage_count).slice(0, 30);
-          sendJson(res, 200, { skills, count: skills.length });
-        } catch (e2) { sendJson(res, 500, { error: e2.message }); }
-      }
+        const usage = dbQuery(`SELECT content, created_at FROM entries WHERE type='skill-usage' ORDER BY id DESC LIMIT 2000;`);
+        const counts = {};
+        for (const row of usage) {
+          try {
+            const data = JSON.parse(row.content);
+            const names = Array.isArray(data.skills) ? data.skills : [];
+            for (const name of names) {
+              if (typeof name !== 'string') continue;
+              if (!counts[name]) counts[name] = { skill_name: name, usage_count: 0, last_used: row.created_at };
+              counts[name].usage_count++;
+              if (row.created_at > counts[name].last_used) counts[name].last_used = row.created_at;
+            }
+          } catch {}
+        }
+        const skills = Object.values(counts).sort((a, b) => b.usage_count - a.usage_count).slice(0, 30);
+        sendJson(res, 200, { skills, count: skills.length });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'GET' && path === '/pipeline/health') {
       // Per-feature heartbeat derived from entry recency — in a loosely
       // coupled AI OS, silent degradation is the biggest risk. This
