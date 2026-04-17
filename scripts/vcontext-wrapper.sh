@@ -7,6 +7,13 @@ NODE="/Users/mitsuru_nakajima/.nvm/versions/node/v25.9.0/bin/node"
 SERVER="/Users/mitsuru_nakajima/skills/scripts/vcontext-server.js"
 PID_FILE="/tmp/vcontext-server.pid"
 
+# Node 25 default heap ~2 GB. Multiple exit-134 / "Reached heap limit"
+# crashes observed today under burst load — raise to 4 GB so the server
+# has breathing room while handlers process large MLX responses, WS
+# fan-out, and the JSONL write queue.  System has 36 GB RAM so 4 GB is
+# a tiny share.  Override via VCONTEXT_MAX_HEAP_MB in vcontext.env.
+export NODE_OPTIONS="--max-old-space-size=${VCONTEXT_MAX_HEAP_MB:-4096} ${NODE_OPTIONS:-}"
+
 # Load runtime env overrides (VCONTEXT_BIND=0.0.0.0 for LAN, etc.)
 ENV_FILE="$HOME/skills/data/vcontext.env"
 if [[ -f "$ENV_FILE" ]]; then

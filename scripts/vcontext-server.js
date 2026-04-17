@@ -57,8 +57,21 @@ const ENTRIES_WAL_MAX_BYTES = 500 * 1024 * 1024; // 500MB, then rotate
 // queue guarantees lines land whole so /admin/replay-wal never encounters
 // a half-written record.
 const _walQueue = [];
+const _WAL_QUEUE_MAX = 2000; // bound to prevent heap OOM under burst
 let _walFlushing = false;
+let _walDropped = 0;
 function appendToWalQueue(line) {
+  // Producer can outpace fs.appendFile drain; unbounded queue growth
+  // was one trigger for "FATAL ERROR: Reached heap limit" crashes
+  // observed today.  SSD DB and snapshots already carry the same data,
+  // so a short stretch of dropped WAL lines is survivable.
+  if (_walQueue.length >= _WAL_QUEUE_MAX) {
+    _walDropped++;
+    if (_walDropped === 1 || _walDropped % 100 === 0) {
+      console.warn(`[wal-queue] dropping lines (drain too slow) — total dropped: ${_walDropped}`);
+    }
+    return;
+  }
   _walQueue.push(line);
   if (_walFlushing) return;
   _walFlushing = true;
