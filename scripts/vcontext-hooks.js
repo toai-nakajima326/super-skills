@@ -413,9 +413,12 @@ async function cmdShell() {
 // Cache refreshes every 5 min so new auto-created skills get picked up.
 let _routeCache = null;
 let _routeCacheAt = 0;
-// No TTL — rebuild every call. DB query is <10ms (SQLite local),
-// and ensures new auto-created skills participate immediately.
-const ROUTE_CACHE_TTL = 0;
+// 60s TTL — rebuild every minute.  Prior comment claimed "DB query is
+// <10ms (SQLite local)" but the implementation uses spawnSync('sqlite3',
+// ...) which pays 30-100ms fork+exec cost per call × 2 queries per build.
+// At 5 prompts/min that's 300ms-1s of hook-path latency.  New auto-created
+// skills tolerate a ≤60s delay before they participate in routing.
+const ROUTE_CACHE_TTL = 60_000;
 
 // Hardcoded core rules (always present, can't be auto-deleted)
 const CORE_ROUTES = [
