@@ -666,11 +666,20 @@ async function refresh() {
       mhtml += '<span style="color:var(--yellow);">' + idxPct + '% built</span> (' + idx.indexed + '/' + idx.total + ')';
     }
     mhtml += '</div>';
-    // Skill inventory
+    // Skill inventory — lifetime total + period count (option C: show both
+    // so users can tell at a glance what's historical vs recent)
     var skills = metrics.skills || {};
+    var periodLabel = (metrics.period_hours === 24) ? '24h' : (metrics.period_hours + 'h');
     mhtml += '<div>Skills: <strong>' + (skills.registered || 0) + '</strong> registered';
-    if (skills.auto_created) mhtml += ' <span style="color:var(--text-dim);">(' + skills.auto_created + ' auto-created)</span>';
-    if (skills.usage_in_period) mhtml += ' <span style="color:var(--green);" title="Number of routing matches (one prompt can match several skills)">' + skills.usage_in_period + ' matches/24h</span>';
+    if (skills.auto_created) {
+      var recent = skills.auto_created_in_period || 0;
+      mhtml += ' <span style="color:var(--text-dim);" title="lifetime auto-generated / within reporting window">('
+        + skills.auto_created + ' auto-created lifetime, ' + recent + ' in ' + periodLabel + ')</span>';
+    }
+    if (skills.usage_in_period) {
+      mhtml += ' <span style="color:var(--green);" title="Number of routing matches (one prompt can match several skills)">'
+        + skills.usage_in_period + ' matches/' + periodLabel + '</span>';
+    }
     mhtml += '</div>';
     // AI Pipeline Health — per-feature heartbeat (loose-coupling observability)
     if (pipeline && pipeline.features) {

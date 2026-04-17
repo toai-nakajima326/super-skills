@@ -4906,6 +4906,10 @@ function handleMetricsReport(req, res) {
   const skillCount = skillCountRow[0]?.c || 0;
   const skillCreatedRow = dbQuery(`SELECT COUNT(*) as c FROM entries WHERE type='skill-created';`);
   const skillCreated = skillCreatedRow[0]?.c || 0;
+  // Auto-created within the current reporting window (option C — show both
+  // lifetime and period counts so users know what's recent vs historical)
+  const skillCreatedPeriodRow = dbQuery(`SELECT COUNT(*) as c FROM entries WHERE type='skill-created' AND created_at >= ${since};`);
+  const skillCreatedPeriod = skillCreatedPeriodRow[0]?.c || 0;
   const skillUsageRow = dbQuery(`SELECT COUNT(*) as c FROM entries WHERE type='skill-usage' AND created_at >= ${since};`);
   const skillUsageRecent = skillUsageRow[0]?.c || 0;
 
@@ -4914,7 +4918,8 @@ function handleMetricsReport(req, res) {
     operations,
     skills: {
       registered: skillCount,
-      auto_created: skillCreated,
+      auto_created: skillCreated,                // lifetime total
+      auto_created_in_period: skillCreatedPeriod, // within period_hours window
       usage_in_period: skillUsageRecent,
     },
     derived: {
