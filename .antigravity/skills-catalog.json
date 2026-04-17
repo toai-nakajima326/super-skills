@@ -2,10 +2,10 @@
   "version": 1,
   "skills": [
     {
-      "name": "super-skills",
-      "displayName": "Super Skills",
+      "name": "infinite-skills",
+      "displayName": "Infinite Skills",
       "description": "Use always. Automatically detect context, search vcontext skill-registry, and apply the most appropriate skill. Measures...",
-      "path": "skills/super-skills/SKILL.md"
+      "path": "skills/infinite-skills/SKILL.md"
     }
   ]
 }
