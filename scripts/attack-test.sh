@@ -1,19 +1,27 @@
 #!/bin/bash
 # attack-test.sh — Adversarial / chaos probes against running vcontext.
 #
-# Safe to run on a live server — all probes are idempotent or clearly
-# marked. No destructive admin actions.
+# Probes are idempotent, but CUMULATIVE LOAD (28 probes + 10 concurrent
+# writes + giant bodies) has OOM'd the server in the past. Two safeguards:
+#   1. ATTACK_SLEEP_MS (default 300) paces every probe. Bump to 1000 for
+#      a stressed server, or to 100 if you're trying to reproduce burst
+#      crashes on purpose.
+#   2. ATTACK_CONCURRENCY (default 10) caps the JSONL-race burst so the
+#      test doesn't itself become the DoS it's meant to detect.
 
 set -u
 BASE="${VCONTEXT_URL:-http://localhost:3150}"
+ATTACK_SLEEP_MS="${ATTACK_SLEEP_MS:-300}"
+ATTACK_CONCURRENCY="${ATTACK_CONCURRENCY:-10}"
 if [ -t 1 ]; then G='\033[0;32m'; R='\033[0;31m'; Y='\033[1;33m'; N='\033[0m'
 else G=''; R=''; Y=''; N=''; fi
 
 PASS=0; FAIL=0; WEAK=()
+_sleep() { python3 -c "import time;time.sleep($ATTACK_SLEEP_MS/1000)" 2>/dev/null || sleep 0.3; }
 
 probe() {
   local name="$1" url="$2" expected_codes="$3"
-  sleep 0.15
+  _sleep
   local code=$(curl -s --max-time 15 "$BASE$url" -o /dev/null -w '%{http_code}' 2>/dev/null)
   if [[ "$expected_codes" == *"$code"* ]]; then
     echo -e "${G}OK${N}   $name ($code)"; PASS=$((PASS+1))
@@ -24,7 +32,7 @@ probe() {
 
 probe_post() {
   local name="$1" url="$2" body="$3" expected_codes="$4"
-  sleep 0.15
+  _sleep
   local code=$(curl -s --max-time 15 -X POST "$BASE$url" \
     -H 'Content-Type: application/json' -d "$body" \
     -o /dev/null -w '%{http_code}' 2>/dev/null)
@@ -123,12 +131,19 @@ if [ -n "$patch_id" ]; then
     echo -e "${R}WEAK${N} RCE: approve returned $code — $(head -c 100 /tmp/rce.json)"
     FAIL=$((FAIL+1)); WEAK+=("rce-regression")
   fi
+  # Cleanup — without this every run leaves a scary-looking
+  # pending-patch (`FILE: foo.js; rm -rf …`) on the dashboard. The
+  # approve flow correctly rejects it, but the entry itself persists.
+  # /admin/reject-patch flips status→rejected so the dashboard hides it.
+  curl -s -X POST --max-time 5 "$BASE/admin/reject-patch" \
+    -H 'Content-Type: application/json' -H 'X-Vcontext-Admin: yes' \
+    -d "{\"id\":$patch_id}" -o /dev/null
 fi
 
 echo ""
-echo "--- JSONL concurrent write race ---"
+echo "--- JSONL concurrent write race (concurrency=$ATTACK_CONCURRENCY) ---"
 B=$(wc -l < "$HOME/skills/data/entries-wal.jsonl")
-for i in 1 2 3 4 5 6 7 8 9 10; do
+for i in $(seq 1 "$ATTACK_CONCURRENCY"); do
   (curl -s -X POST "$BASE/store" -H 'Content-Type: application/json' \
      -d "{\"type\":\"test\",\"content\":\"chaos-$i-$(date +%N)\"}" > /dev/null) &
 done

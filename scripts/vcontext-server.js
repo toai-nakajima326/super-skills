@@ -171,7 +171,36 @@ function getAccessibleGroups(auth) {
 
 // In-process SQLite via better-sqlite3 (replaces execFileSync child processes)
 const Database = require('better-sqlite3');
+
+// ABI self-test — verifies the native .node binary was built for the
+// currently-running Node version. Without this, a stale binary (e.g. from
+// `npm rebuild` run under a different nvm-selected Node) causes every
+// DB call to throw `NODE_MODULE_VERSION mismatch`, which our recovery
+// path then misreads as "DB is corrupt" and enters a recover loop that
+// never binds the port.  Fail fast instead: exit 2 lets launchd apply
+// throttling and surfaces the issue immediately in logs.
+(function selfTestBetterSqlite3() {
+  try {
+    const probe = new Database(':memory:');
+    const row = probe.prepare('SELECT 1 AS v').get();
+    probe.close();
+    if (!row || row.v !== 1) throw new Error('unexpected result: ' + JSON.stringify(row));
+  } catch (e) {
+    const nodeModules = process.versions.modules;
+    console.error('[vcontext:fatal] better-sqlite3 ABI self-test failed.');
+    console.error('[vcontext:fatal]   Node version: ' + process.version + ' (module ' + nodeModules + ')');
+    console.error('[vcontext:fatal]   Error: ' + (e.message || e).toString().slice(0, 200));
+    console.error('[vcontext:fatal] Fix: run `PATH="' + process.execPath.replace(/\/node$/, '') + ':$PATH" npm rebuild better-sqlite3` from ~/skills');
+    process.exit(2);
+  }
+})();
+
 let ramDb, ssdDb;
+
+// In-memory caches for expensive aggregations served to the dashboard.
+// Keyed by a semantic string; each entry is {at: timestamp, data: object}.
+// TTL is endpoint-specific and enforced where the cache is read.
+let _analyticsCache = {};
 
 function checkAndRecoverDb(dbPath, isRam) {
   // Integrity check; if corrupt:
@@ -778,6 +807,19 @@ function insertIndex(entryId, type, session, content, tokenEst, hasEmbedding) {
     const f = extractIndexFields(content);
     dbExec(`INSERT OR REPLACE INTO entry_index (entry_id, type, session, tool_name, file_path, command, token_estimate, has_embedding, created_at) VALUES (${Number(entryId)}, ${esc(type)}, ${esc(session)}, ${esc(f.tool_name)}, ${esc(f.file_path)}, ${esc(f.command)}, ${tokenEst || 0}, ${hasEmbedding ? 1 : 0}, datetime('now'));`);
   } catch {}
+}
+
+// Whitelist for caller-supplied task_kind tags. Keeps api_metrics clean
+// (short, known values) and prevents log pollution / storage blow-up
+// from adversarial query params.
+const _TASK_KIND_WHITELIST = new Set([
+  'search', 'recent', 'session-recall', 'handoff', 'working-state',
+  'rules', 'skill-lookup', 'resolve', 'consult', 'summary',
+]);
+function sanitizeTaskKind(raw) {
+  if (typeof raw !== 'string') return null;
+  const v = raw.slice(0, 32);
+  return _TASK_KIND_WHITELIST.has(v) ? v : null;
 }
 
 function recordMetric({ operation, startTime, requestChars, responseChars, resultCount, usedIds, taskKind, session }) {
@@ -1403,6 +1445,10 @@ async function handleRecall(req, res) {
   const type = params.type;
   const namespace = params.namespace; // filter by project:xxx
   const userFilter = params.user || (params.my === 'true' ? auth.userId : null);
+  // task_kind — optional caller-supplied tag for /metrics/report breakdowns
+  // (e.g. session-recall → enables resume_cost_tokens). Whitelisted to
+  // short, known values so log tables stay clean.
+  const taskKind = sanitizeTaskKind(params.task_kind) || 'search';
   // Auto-filter by accessible groups (unless owner)
   const accessibleGroups = getAccessibleGroups(auth);
   const allResults = [];
@@ -1514,12 +1560,12 @@ async function handleRecall(req, res) {
       used += cost;
     }
     sendJson(res, 200, { results: kept, count: kept.length, query: q, budget, used_tokens: used, dropped: allResults.length - kept.length });
-    recordMetric({ operation: 'recall', startTime: _startTime, requestChars: (q || '').length, responseChars: JSON.stringify(kept).length, resultCount: kept.length, usedIds: JSON.stringify(kept.map(r => r.id)), taskKind: 'search' });
+    recordMetric({ operation: 'recall', startTime: _startTime, requestChars: (q || '').length, responseChars: JSON.stringify(kept).length, resultCount: kept.length, usedIds: JSON.stringify(kept.map(r => r.id)), taskKind });
     return;
   }
 
   sendJson(res, 200, { results: allResults, count: allResults.length, query: q });
-  recordMetric({ operation: 'recall', startTime: _startTime, requestChars: (q || '').length, responseChars: JSON.stringify(allResults).length, resultCount: allResults.length, usedIds: JSON.stringify(allResults.map(r => r.id)), taskKind: 'search' });
+  recordMetric({ operation: 'recall', startTime: _startTime, requestChars: (q || '').length, responseChars: JSON.stringify(allResults).length, resultCount: allResults.length, usedIds: JSON.stringify(allResults.map(r => r.id)), taskKind });
 }
 
 /**
@@ -1648,7 +1694,10 @@ function handleRecent(req, res) {
   });
 
   sendJson(res, 200, { results: trimmed, count: trimmed.length });
-  recordMetric({ operation: 'recent', startTime: _startTime, responseChars: JSON.stringify(trimmed).length, resultCount: trimmed.length, taskKind: 'recent' });
+  // task_kind override — session-recall hooks pass ?task_kind=session-recall
+  // so /metrics/report can isolate "resume cost" from ad-hoc /recent calls.
+  const taskKind = sanitizeTaskKind(params.task_kind) || 'recent';
+  recordMetric({ operation: 'recent', startTime: _startTime, responseChars: JSON.stringify(trimmed).length, resultCount: trimmed.length, taskKind });
 }
 
 /**
@@ -1899,7 +1948,6 @@ function handleHealth(req, res) {
     mlx_generate_available: mlxGenerateAvailable,
     mlx_generate_model: mlxGenerateAvailable ? MLX_GENERATE_MODEL : null,
     mlx_available: mlxAvailable,
-    coreml_available: mlxAvailable,
     ws_clients: wsClients.size,
     uptime_seconds: Math.floor(process.uptime()),
     features: {
@@ -3968,13 +4016,11 @@ const MLX_EMBED_URL = process.env.MLX_EMBED_URL || process.env.COREML_EMBED_URL 
 let mlxAvailable = false;
 let mlxEmbedDim = 0;    // auto-detected from health check
 let mlxModelName = '';   // e.g. 'mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ'
-// Back-compat alias
-let coremlAvailable = false;
 
 /**
  * Check if MLX embed server is running on port 3161.
- * Tries /api/health (new MLX server) then /health (legacy CoreML).
  * This is a fast local server for search-time query embedding.
+ * (2026-04-17: legacy CoreML back-compat aliases removed — 0 callers.)
  */
 let _mlxEmbedFailStreak = 0; // hysteresis: only flip to false after N consecutive failures
 
@@ -3994,12 +4040,11 @@ async function checkMlx() {
       req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
       req.end();
     });
-    // MLX server returns status='healthy', legacy CoreML returns status='ok'
+    // MLX server returns status='healthy' (or legacy 'ok')
     const ok = data && (data.status === 'healthy' || data.status === 'ok');
     if (ok) {
       if (!mlxAvailable) console.log(`[mlx-embed] Available: model=${data.model_name || data.model || ''} (dim=${data.embedding_dim || 0})`);
       mlxAvailable = true;
-      coremlAvailable = true;
       mlxEmbedDim = data.embedding_dim || 0;
       mlxModelName = data.model_name || data.model || '';
       _mlxEmbedFailStreak = 0;
@@ -4008,7 +4053,6 @@ async function checkMlx() {
       if (_mlxEmbedFailStreak >= 3) {
         if (mlxAvailable) console.log(`[mlx-embed] Unavailable: unexpected status (streak=${_mlxEmbedFailStreak})`);
         mlxAvailable = false;
-        coremlAvailable = false;
       }
     }
   } catch (e) {
@@ -4018,12 +4062,9 @@ async function checkMlx() {
     }
     if (_mlxEmbedFailStreak >= 3) {
       mlxAvailable = false;
-      coremlAvailable = false;
     }
   }
 }
-// Back-compat alias
-const checkCoreml = checkMlx;
 
 /**
  * Generate embedding via MLX server (/api/embeddings).
@@ -4133,8 +4174,7 @@ function _mlxEmbedBatchRaw(texts) {
     req.end();
   });
 }
-// Back-compat alias (legacy CoreML callers — kept for API compatibility)
-const coremlEmbed = mlxEmbed;
+// (2026-04-17: coremlEmbed alias removed — 0 callers found in audit.)
 
 // ── MLX Generate Server (Apple Silicon, 24/7) ────────────────
 
@@ -4355,7 +4395,6 @@ function handleAiStatus(req, res) {
     mlx_generate_url: MLX_GENERATE_URL,
     mlx_generate_model: MLX_GENERATE_MODEL,
     gen_stats: genStats,
-    coreml_available: mlxAvailable,
     mlx_available: mlxAvailable,
     mlx_url: MLX_EMBED_URL,
     mlx_model: mlxModelName,
@@ -5702,10 +5741,72 @@ const server = createServer(async (req, res) => {
         execSync(`bash ~/skills/scripts/vcontext-reload.sh`, { stdio: 'ignore' });
         sendJson(res, 200, { rolled_back: true });
       } catch (e) { sendJson(res, 500, { error: e.message || 'no self-improve commit to rollback' }); }
+    } else if (method === 'POST' && path === '/admin/restart-aios') {
+      // Soft restart — send SIGHUP to the wrapper, which kills the current
+      // server and starts a fresh one (sub-5s downtime). LaunchAgent stays
+      // loaded, so a crash at any point still auto-recovers.
+      if (req.headers['x-vcontext-admin'] !== 'yes') {
+        return sendJson(res, 403, { error: 'X-Vcontext-Admin: yes header required' });
+      }
+      try {
+        // PID_FILE is set by wrapper; fall back to parent-pid if missing.
+        const fs = require('node:fs');
+        let wrapperPid = null;
+        try { wrapperPid = parseInt(fs.readFileSync('/tmp/vcontext-wrapper.lock', 'utf-8').trim()) || null; } catch {}
+        if (!wrapperPid) {
+          // No lock file → server was started outside the wrapper; nothing to SIGHUP.
+          return sendJson(res, 503, { error: 'wrapper lock not found — cannot restart via SIGHUP' });
+        }
+        sendJson(res, 200, { restarting: true, wrapper_pid: wrapperPid });
+        // Defer so the response flushes before the server exits.
+        setTimeout(() => { try { process.kill(wrapperPid, 'SIGHUP'); } catch (e) { console.error('[admin/restart-aios]', e.message); } }, 100);
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'POST' && path === '/admin/stop-aios') {
+      // Hard stop — tells launchd to unload the agent (so it does NOT
+      // auto-respawn), then exits.  User restarts later via
+      //   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.vcontext.server.plist
+      // or re-running ~/skills/scripts/vcontext-setup.sh.
+      if (req.headers['x-vcontext-admin'] !== 'yes') {
+        return sendJson(res, 403, { error: 'X-Vcontext-Admin: yes header required' });
+      }
+      const body = await readBody(req).catch(() => ({}));
+      // Require an explicit confirm token to prevent a drive-by click from
+      // killing the service. Dashboard sends {"confirm":"yes"}.
+      if (body?.confirm !== 'yes') {
+        return sendJson(res, 400, { error: 'confirm:"yes" required in body' });
+      }
+      try {
+        const uid = process.getuid();
+        const plist = process.env.HOME + '/Library/LaunchAgents/com.vcontext.server.plist';
+        sendJson(res, 200, {
+          stopped: true,
+          restart_cmd: `launchctl bootstrap gui/${uid} ${plist}`,
+          note: 'Run the restart_cmd in a terminal to bring vcontext back up.',
+        });
+        // Deferred shutdown so the response reaches the client.
+        setTimeout(() => {
+          try {
+            // bootout disables KeepAlive (prevents respawn); errors are
+            // non-fatal — we exit either way.
+            execSync(`launchctl bootout gui/${uid}/com.vcontext.server`, { stdio: 'ignore', timeout: 5000 });
+          } catch {}
+          console.log('[admin/stop-aios] launchctl bootout issued; exiting process.');
+          process.exit(0);
+        }, 300);
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'GET' && path === '/analytics/weekly-summary') {
       // Weekly summary: what did the user/AI actually do?
+      // Cached for 30s per `days` value. Each call runs 10 DB aggregations
+      // over the full entries table; dashboard fires this on every refresh.
+      // The data is backward-looking so a 30s lag is fine.
       try {
         const days = parseInt(parseQuery(req.url).days) || 7;
+        const cacheKey = `weekly:${days}`;
+        _analyticsCache = _analyticsCache || {};
+        const cached = _analyticsCache[cacheKey];
+        if (cached && (Date.now() - cached.at) < 30_000) {
+          return sendJson(res, 200, cached.data);
+        }
         const since = `datetime('now', '-${days} days')`;
         const stats = {
           period_days: days,
@@ -5719,7 +5820,9 @@ const server = createServer(async (req, res) => {
           skills_created: dbQuery(`SELECT COUNT(*) as c FROM entries WHERE type='skill-created' AND created_at > ${since};`)[0]?.c || 0,
           errors: dbQuery(`SELECT COUNT(*) as c FROM entries WHERE type='tool-error' AND created_at > ${since};`)[0]?.c || 0,
           decisions: dbQuery(`SELECT substr(content,1,120) as c FROM entries WHERE type='decision' AND created_at > ${since} ORDER BY id DESC LIMIT 10;`),
+          _cached: false,
         };
+        _analyticsCache[cacheKey] = { at: Date.now(), data: { ...stats, _cached: true } };
         sendJson(res, 200, stats);
       } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'GET' && path === '/analytics/skill-effectiveness') {
@@ -6042,6 +6145,66 @@ const server = createServer(async (req, res) => {
       sendJson(res, 200, { deleted, failed });
     } else if (method === 'POST' && path === '/tier/migrate') {
       handleTierMigrate(req, res);
+    } else if (method === 'GET' && path === '/sessions/summary') {
+      // Compact session aggregate for the dashboard's Sessions card.
+      // Replaces the old pattern of `/recent?n=200&short=1` (200KB payload)
+      // being aggregated client-side. SQL does the same work in ~5KB.
+      try {
+        const params = parseQuery(req.url);
+        const hours = Math.min(parseInt(params.hours) || 24, 24 * 7);
+        const since = esc(new Date(Date.now() - hours * 3600000).toISOString().replace('T', ' ').slice(0, 19));
+        // Per-session aggregates: event count, first/last seen.
+        // entry_index is already indexed on (session, created_at) so this
+        // is a bounded table scan, not a full entries scan.
+        const agg = dbQuery(`
+          SELECT session, COUNT(*) as events, MIN(created_at) as first_seen, MAX(created_at) as last_active
+          FROM entry_index WHERE session IS NOT NULL AND session != ''
+            AND created_at >= ${since}
+          GROUP BY session ORDER BY last_active DESC LIMIT 100;
+        `);
+        if (agg.length === 0) return sendJson(res, 200, { sessions: [], count: 0 });
+        // Type-breakdown per session — a separate grouped query, then joined in JS.
+        const sids = agg.map(r => esc(r.session)).join(',');
+        const typeRows = dbQuery(`
+          SELECT session, type, COUNT(*) as cnt FROM entry_index
+          WHERE session IN (${sids}) AND created_at >= ${since}
+          GROUP BY session, type;
+        `);
+        const typesMap = {};
+        for (const r of typeRows) {
+          (typesMap[r.session] = typesMap[r.session] || {})[r.type] = r.cnt;
+        }
+        // Project (cwd) per session — fetch exactly one representative
+        // entry per session via MIN(id) subquery. Uses idx_entries_session_id
+        // (session, id DESC) so the inner query is an index-range scan, not
+        // a full content-LIKE scan. ~10x faster for 50-session windows.
+        const projRows = dbQuery(`
+          SELECT e.session, substr(e.content, 1, 400) as content FROM entries e
+          WHERE e.id IN (
+            SELECT MIN(id) FROM entries WHERE session IN (${sids}) GROUP BY session
+          );
+        `);
+        const projMap = {};
+        for (const r of projRows) {
+          try {
+            const d = JSON.parse(r.content + (r.content.endsWith('}') ? '' : '}'));
+            if (d.cwd) projMap[r.session] = d.cwd.split('/').filter(Boolean).pop();
+          } catch {
+            // content was truncated mid-object; regex fallback
+            const m = /"cwd"\s*:\s*"([^"]+)"/.exec(r.content || '');
+            if (m) projMap[r.session] = m[1].split('/').filter(Boolean).pop();
+          }
+        }
+        const sessions = agg.map(r => ({
+          session: r.session,
+          events: r.events,
+          first_seen: r.first_seen,
+          last_active: r.last_active,
+          types: typesMap[r.session] || {},
+          project: projMap[r.session] || '',
+        }));
+        sendJson(res, 200, { sessions, count: sessions.length, period_hours: hours });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'GET' && path === '/tier/stats') {
       handleTierStats(req, res);
     } else if (method === 'POST' && path === '/tier/config') {

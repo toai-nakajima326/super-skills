@@ -1562,14 +1562,18 @@ async function handleSessionRecall() {
   const sessionId = extractSessionId(input);
   const namespace = process.env.VCONTEXT_NAMESPACE || '';
   const nsParam = namespace ? `&namespace=${namespace}` : '';
+  // Tag all GETs from this flow so /metrics/report can attribute
+  // their latency + bytes to "resume cost" rather than ad-hoc search.
+  // Whitelisted server-side; unknown values are silently dropped.
+  const tk = '&task_kind=session-recall';
 
   // Own session context
-  const own = await get(`/session/${encodeURIComponent(sessionId)}?limit=20`);
+  const own = await get(`/session/${encodeURIComponent(sessionId)}?limit=20${tk}`);
   // Recent from all sessions (for cross-session awareness)
-  const recent = await get(`/recent?n=10${nsParam}`);
+  const recent = await get(`/recent?n=10${nsParam}${tk}`);
   const stats = await get('/tier/stats');
 
-  const rules = await get('/recall?q=MANDATORY+RULE&type=decision&limit=10');
+  const rules = await get('/recall?q=MANDATORY+RULE&type=decision&limit=10' + tk);
 
   const lines = ['## Virtual Context — Session Recall', ''];
   lines.push(`Session: ${sessionId}`);
@@ -1606,8 +1610,8 @@ async function handleSessionRecall() {
       // name (final path segment), then post-filter by full cwd match.
       const worktree = cwd.split('/').filter(Boolean).slice(-1)[0] || '';
       const q = encodeURIComponent(worktree || cwd);
-      const handoffs = await get(`/recall?q=${q}&type=handoff&limit=10`);
-      const working = await get(`/recall?q=${q}&type=working-state&limit=10`);
+      const handoffs = await get(`/recall?q=${q}&type=handoff&limit=10${tk}`);
+      const working = await get(`/recall?q=${q}&type=working-state&limit=10${tk}`);
       const candidates = [
         ...(handoffs.results || []),
         ...(working.results || []),
@@ -1682,7 +1686,7 @@ async function handleSessionRecall() {
     const cwd = data.cwd || '';
     if (cwd) {
       const worktree = cwd.split('/').filter(Boolean).slice(-1)[0] || '';
-      const recentWorking = await get(`/recall?q=${encodeURIComponent(worktree)}&type=working-state&limit=20`);
+      const recentWorking = await get(`/recall?q=${encodeURIComponent(worktree)}&type=working-state&limit=20${tk}`);
       const now = Date.now();
       const concurrent = (recentWorking.results || []).filter(r => {
         if (r.session === sessionId) return false;

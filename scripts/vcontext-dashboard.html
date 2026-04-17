@@ -129,6 +129,8 @@
       <button class="btn" style="font-size:11px;padding:3px 8px;" onclick="confirmAction('Summarize', '24時間以上前のエントリをLocal LLMで要約', '/ai/summarize', 'POST')">Summarize</button>
       <button class="btn" style="font-size:11px;padding:3px 8px;" onclick="confirmAction('Migrate', 'RAM→SSD→Cloudに移動', '/tier/migrate', 'POST')">Migrate</button>
       <button class="btn" style="font-size:11px;padding:3px 8px;" onclick="confirmAction('Refresh', 'ダッシュボード更新', '_refresh', '')">Refresh</button>
+      <button class="btn" style="font-size:11px;padding:3px 8px;background:#d38a00;color:#fff;border-color:#d38a00;" onclick="confirmAction('Restart AIOS', 'サーバーを再起動します (≈5秒のダウンタイム、LaunchAgent 有効のまま)', '/admin/restart-aios', 'ADMIN')">Restart AIOS</button>
+      <button class="btn" style="font-size:11px;padding:3px 8px;background:#b42c2c;color:#fff;border-color:#b42c2c;" onclick="confirmAction('Stop AIOS', '⚠️ launchctl bootout → サーバー完全停止。復旧するまでメモリ記録は止まります。復旧には別途ターミナルが必要。', '/admin/stop-aios', 'ADMIN-CONFIRM')">Stop AIOS</button>
     </div>
     <div id="action-confirm" style="display:none;margin-top:6px;padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg-bar);font-size:11px;">
       <div id="action-confirm-title" style="font-weight:bold;margin-bottom:2px;"></div>
@@ -258,12 +260,54 @@ function confirmAction(title, desc, path, method) {
 async function doAction(path, method) {
   const el = document.getElementById('action-result');
   el.textContent = 'Executing...';
+  // method === 'ADMIN' → POST with X-Vcontext-Admin header (Restart AIOS)
+  // method === 'ADMIN-CONFIRM' → same + body {confirm:"yes"} (Stop AIOS)
+  const isAdmin = method === 'ADMIN' || method === 'ADMIN-CONFIRM';
+  const needsConfirm = method === 'ADMIN-CONFIRM';
+  const opts = isAdmin
+    ? { method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Vcontext-Admin': 'yes' },
+        body: needsConfirm ? JSON.stringify({ confirm: 'yes' }) : undefined }
+    : { method };
   try {
-    const r = await fetch(API + path, { method });
-    const d = await r.json();
+    const r = await fetch(API + path, opts);
+    // Stop/Restart endpoints return JSON but the server exits right after,
+    // so the connection may drop before we finish parsing. Handle both.
+    let d; try { d = await r.json(); } catch { d = { stopped: true, note: 'server exited — see dashboard banner' }; }
+    if (path === '/admin/stop-aios' && (d.stopped || r.status === 200)) {
+      showStoppedBanner(d.restart_cmd);
+      el.textContent = 'AIOS stopped. Dashboard frozen — see banner for restart command.';
+      return;
+    }
+    if (path === '/admin/restart-aios' && (d.restarting || r.status === 200)) {
+      el.textContent = 'Restarting… dashboard will refresh when server is back.';
+      // Poll /health; refresh() once the new server answers.
+      const start = Date.now();
+      const poll = setInterval(async () => {
+        if (Date.now() - start > 60000) { clearInterval(poll); el.textContent = 'Restart timed out (>60s).'; return; }
+        try { const h = await fetch(API + '/health'); if (h.ok) { clearInterval(poll); el.textContent = 'AIOS is back.'; refresh(); } } catch {}
+      }, 2000);
+      return;
+    }
     el.textContent = JSON.stringify(d).slice(0, 200);
     refresh();
   } catch (e) { el.textContent = 'Error: ' + e.message; }
+}
+
+function showStoppedBanner(restartCmd) {
+  // Full-width banner at top of dashboard explaining how to restart.
+  // Persists because refresh() will fail while AIOS is stopped.
+  var banner = document.getElementById('aios-stopped-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'aios-stopped-banner';
+    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;padding:12px 16px;background:#b42c2c;color:#fff;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,0.3);';
+    document.body.prepend(banner);
+  }
+  banner.innerHTML = '<strong>⏹ AIOS STOPPED</strong> — Memory recording has halted. To restart, run this in a terminal:<br>' +
+    '<code style="display:inline-block;margin-top:4px;padding:4px 8px;background:rgba(0,0,0,0.3);border-radius:4px;font-family:monospace;">' +
+    (restartCmd ? restartCmd.replace(/[<>&]/g, function(c){return {'<':'&lt;','>':'&gt;','&':'&amp;'}[c];}) : 'bash ~/skills/scripts/vcontext-setup.sh') +
+    '</code>';
 }
 
 function badgeClass(type) {
@@ -361,13 +405,14 @@ async function rollbackLast() {
 
 async function refresh() {
   // Parallel fetch all data at once
-  const [alertData, health, tiers, ai, recent, allRecent, metrics, pipeline, patches, weekly, skillEffect, walStatus] = await Promise.all([
+  const [alertData, health, tiers, ai, recent, sessionsSummary, metrics, pipeline, patches, weekly, skillEffect, walStatus] = await Promise.all([
     fetchJson('/recent?n=1&type=anomaly-alert'),
     fetchJson('/health'),
     fetchJson('/tier/stats'),
     fetchJson('/ai/status'),
     fetchJson('/recent?n=15&short=1'),
-    fetchJson('/recent?n=200&short=1'),
+    // Replaces old /recent?n=200&short=1 (200KB) — SQL aggregate ≈5KB
+    fetchJson('/sessions/summary?hours=24'),
     fetchJson('/metrics/report?hours=24'),
     fetchJson('/pipeline/health'),
     fetchJson('/admin/pending-patches'),
@@ -575,26 +620,23 @@ async function refresh() {
     }).join('');
   }
 
-  // Sessions — aggregate from recent entries
-  if (allRecent && allRecent.results) {
+  // Sessions — server now aggregates via /sessions/summary (SQL),
+  // so the client just renders. Shape: {session, events, types{}, project,
+  // first_seen, last_active}. This replaces a 200KB payload + client-side
+  // for-loop with a 5KB JSON + zero parsing.
+  if (sessionsSummary && sessionsSummary.sessions) {
     var sessions = {};
-    for (var i = 0; i < allRecent.results.length; i++) {
-      var entry = allRecent.results[i];
-      var parsed2 = {};
-      try { parsed2 = JSON.parse(entry.content); } catch {}
-      var sid = parsed2.session_id || entry.session || '';
-      if (!sid) continue;
-      if (!sessions[sid]) {
-        sessions[sid] = { events: 0, types: {}, project: '', model: '', lastActive: entry.created_at, firstSeen: entry.created_at };
-      }
-      var s = sessions[sid];
-      s.events++;
-      s.types[entry.type] = (s.types[entry.type] || 0) + 1;
-      s.firstSeen = entry.created_at;
-      if (!s.project && parsed2.cwd) s.project = parsed2.cwd.split('/').filter(Boolean).pop();
-      if (!s.model && parsed2.model) s.model = parsed2.model;
+    for (var i = 0; i < sessionsSummary.sessions.length; i++) {
+      var srv = sessionsSummary.sessions[i];
+      sessions[srv.session] = {
+        events: srv.events,
+        types: srv.types || {},
+        project: srv.project || '',
+        model: '', // not surfaced by /sessions/summary yet — omit
+        lastActive: srv.last_active,
+        firstSeen: srv.first_seen,
+      };
     }
-
     var sortedSessions = Object.entries(sessions).sort(function(a, b) {
       return (b[1].lastActive || '').localeCompare(a[1].lastActive || '');
     });
@@ -710,6 +752,24 @@ async function refresh() {
         mhtml += '<div style="font-size:11px;">' + dot + ' ' + f.label + ' <span style="color:var(--text-dim);">' + suffix + '</span></div>';
       });
       mhtml += '</div>';
+      // Loop heartbeats — direct "is the worker ticking?" signal,
+      // separate from feature recency (which measures effects).
+      if (pipeline.loops) {
+        mhtml += '<div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--bg-bar);">';
+        mhtml += '<div style="color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px;">Worker loops</div>';
+        mhtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:4px;">';
+        Object.entries(pipeline.loops).forEach(function(entry) {
+          var name = entry[0], L = entry[1];
+          var dot = L.status === 'green' ? '🟢' : L.status === 'yellow' ? '🟡' : L.status === 'red' ? '🔴' : '⚫'; // stopped
+          var tick = L.last_tick_ms_ago == null ? 'never'
+            : L.last_tick_ms_ago < 60000 ? Math.floor(L.last_tick_ms_ago / 1000) + 's'
+            : L.last_tick_ms_ago < 3600000 ? Math.floor(L.last_tick_ms_ago / 60000) + 'm'
+            : Math.floor(L.last_tick_ms_ago / 3600000) + 'h';
+          mhtml += '<div style="font-size:11px;">' + dot + ' ' + name + ' loop <span style="color:var(--text-dim);">'
+            + 'iter=' + (L.iterations || 0) + ' · last ' + tick + ' ago</span></div>';
+        });
+        mhtml += '</div></div>';
+      }
       mhtml += '</div>';
     }
     mhtml += '</div>';
