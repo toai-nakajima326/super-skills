@@ -4012,8 +4012,7 @@ function _mlxEmbedBatchRaw(texts) {
     req.end();
   });
 }
-function mlxEmbedBatch(texts) { return withMlxLock(() => _mlxEmbedBatchRaw(texts)); }
-// Back-compat alias
+// Back-compat alias (legacy CoreML callers — kept for API compatibility)
 const coremlEmbed = mlxEmbed;
 
 // ── MLX Generate Server (Apple Silicon, 24/7) ────────────────
@@ -6033,6 +6032,21 @@ function shutdown(signal) {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
+// Process-level safety nets — today's audit showed no unhandledRejection
+// handler, which correlates with several exit-137 crashes via async errors
+// escaping setImmediate(async...) callbacks (auto-summarize, auto-embed,
+// auto-conflict-detect). Log and swallow rather than crash the server.
+process.on('unhandledRejection', (reason, promise) => {
+  const msg = (reason && reason.message) || String(reason);
+  console.error('[unhandledRejection]', msg?.slice(0, 200));
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err?.message?.slice(0, 200));
+  console.error(err?.stack?.split('\n').slice(0, 5).join('\n'));
+  // Don't exit — let the event loop continue. If state is corrupt the
+  // next request will surface the real issue more precisely.
+});
 
 // Check local AI availability + start background loops
 checkMlx().then(() => {
