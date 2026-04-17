@@ -5248,6 +5248,57 @@ const server = createServer(async (req, res) => {
           rotate_threshold_mb: ENTRIES_WAL_MAX_BYTES / 1024 / 1024
         });
       } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'GET' && path === '/admin/health-report') {
+      // Human-readable daily/weekly brief — formatted string + structured data.
+      // ?days=1 for yesterday, ?days=7 for weekly. Used by vcontext-morning-brief.sh.
+      try {
+        const q = parseQuery(req.url);
+        const days = Math.max(1, Math.min(30, parseInt(q.days) || 1));
+        const hours = days * 24;
+        const since = `datetime('now', '-${days} days')`;
+
+        const events = dbQuery(`SELECT COUNT(*) as c FROM entries WHERE created_at > ${since};`)[0]?.c || 0;
+        const sessions = dbQuery(`SELECT COUNT(DISTINCT session) as c FROM entries WHERE created_at > ${since};`)[0]?.c || 0;
+        const errors = dbQuery(`SELECT COUNT(*) as c FROM entries WHERE type='tool-error' AND created_at > ${since};`)[0]?.c || 0;
+        const skills = dbQuery(`SELECT COUNT(*) as c FROM entries WHERE type='skill-usage' AND created_at > ${since};`)[0]?.c || 0;
+        const decisions = dbQuery(`SELECT COUNT(*) as c FROM entries WHERE type='decision' AND created_at > ${since};`)[0]?.c || 0;
+        const topTools = dbQuery(`SELECT tool_name, COUNT(*) as cnt FROM entry_index WHERE tool_name IS NOT NULL AND created_at > ${since} GROUP BY tool_name ORDER BY cnt DESC LIMIT 5;`);
+        const slowestOps = dbQuery(`SELECT operation, ROUND(AVG(latency_ms),0) as ms, COUNT(*) as n FROM api_metrics WHERE created_at > ${since} GROUP BY operation ORDER BY ms DESC LIMIT 3;`);
+        const anomalies = dbQuery(`SELECT content FROM entries WHERE type='anomaly-alert' AND created_at > ${since} ORDER BY id DESC LIMIT 5;`);
+        const patchesQ = dbQuery(`SELECT COUNT(*) as c FROM entries WHERE type='pending-patch' AND created_at > ${since};`)[0]?.c || 0;
+
+        const label = days === 1 ? 'Daily' : (days === 7 ? 'Weekly' : `${days}-day`);
+        let brief = `vcontext ${label} Brief (last ${days}d)\n`;
+        brief += `━━━━━━━━━━━━━━━━━━━━━\n`;
+        brief += `Events:    ${events.toLocaleString()}  (${Math.round(events/hours)}/h)\n`;
+        brief += `Sessions:  ${sessions}\n`;
+        brief += `Skills:    ${skills} uses\n`;
+        brief += `Decisions: ${decisions}\n`;
+        brief += `Errors:    ${errors}${errors > 50 ? ' ⚠️' : ''}\n`;
+        if (patchesQ > 0) brief += `Proposals: ${patchesQ} pending\n`;
+        if (topTools.length > 0) {
+          brief += `\nTop tools: ` + topTools.map(t => `${t.tool_name}×${t.cnt}`).join(', ') + `\n`;
+        }
+        if (slowestOps.length > 0) {
+          brief += `Slowest:   ` + slowestOps.map(s => `${s.operation}=${s.ms}ms`).join(', ') + `\n`;
+        }
+        if (anomalies.length > 0) {
+          brief += `\nAnomalies (${anomalies.length}):\n`;
+          for (const a of anomalies.slice(0, 3)) {
+            try {
+              const ad = JSON.parse(a.content);
+              if (ad.alerts) {
+                for (const alert of ad.alerts.slice(0, 1)) brief += `  • ${alert.msg}\n`;
+              }
+            } catch {}
+          }
+        }
+        sendJson(res, 200, {
+          period_days: days, brief,
+          stats: { events, sessions, errors, skills, decisions, patches: patchesQ },
+          top_tools: topTools, slowest_ops: slowestOps
+        });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'POST' && path === '/admin/rollback-last') {
       // Rollback last self-improve commit
       try {

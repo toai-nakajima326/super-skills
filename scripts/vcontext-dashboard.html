@@ -113,6 +113,12 @@
     <div id="health-content">Loading...</div>
   </div>
 
+  <!-- Data Protection (JSONL WAL + recovery status) -->
+  <div class="card">
+    <h2>Data Protection</h2>
+    <div id="wal-content" style="font-size:12px;">Loading...</div>
+  </div>
+
   <!-- Storage + Actions (compact) -->
   <div class="card">
     <h2>Storage</h2>
@@ -355,7 +361,7 @@ async function rollbackLast() {
 
 async function refresh() {
   // Parallel fetch all data at once
-  const [alertData, health, tiers, ai, recent, allRecent, metrics, pipeline, patches, weekly, skillEffect] = await Promise.all([
+  const [alertData, health, tiers, ai, recent, allRecent, metrics, pipeline, patches, weekly, skillEffect, walStatus] = await Promise.all([
     fetchJson('/recent?n=1&type=anomaly-alert'),
     fetchJson('/health'),
     fetchJson('/tier/stats'),
@@ -367,6 +373,7 @@ async function refresh() {
     fetchJson('/admin/pending-patches'),
     fetchJson('/analytics/weekly-summary?days=' + (window._actDays || 1)),
     fetchJson('/analytics/skill-effectiveness'),
+    fetchJson('/admin/wal-status'),
   ]);
 
   // Alerts
@@ -451,6 +458,27 @@ async function refresh() {
       tiersHtml += '</div>';
     }
     document.getElementById('tiers-content').innerHTML = tiersHtml;
+  }
+
+  // Data Protection — JSONL WAL + recovery status
+  var walEl = document.getElementById('wal-content');
+  if (walEl) {
+    if (walStatus && walStatus.exists) {
+      var pct = Math.min(100, Math.round((walStatus.size_mb / walStatus.rotate_threshold_mb) * 100));
+      var pctColor = pct >= 90 ? 'var(--red)' : pct >= 60 ? 'var(--yellow)' : 'var(--green)';
+      walEl.innerHTML =
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:6px;">' +
+          '<div><div style="font-size:11px;color:var(--text-dim);">JSONL lines</div><div style="font-size:16px;font-weight:600;">' + (walStatus.lines||0).toLocaleString() + '</div></div>' +
+          '<div><div style="font-size:11px;color:var(--text-dim);">Size / Rotate at</div><div style="font-size:16px;font-weight:600;">' + walStatus.size_mb + ' / ' + walStatus.rotate_threshold_mb + ' MB</div></div>' +
+        '</div>' +
+        '<div class="chart-bar"><span class="label">JSONL fill</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + pct + '%;background:' + pctColor + '"></div></div><span style="margin-left:8px;font-size:12px;">' + pct + '%</span></div>' +
+        '<div style="font-size:11px;color:var(--text-dim);margin-top:6px;">' +
+          'Defense-in-depth: RAM DB → <b>async</b> SSD DB → <b>async</b> JSONL (this log) → 1min RAM→SSD catch-up → 5min full backup → snapshots. <br>' +
+          'If both SQLite DBs die, replay via <code>POST /admin/replay-wal</code>.' +
+        '</div>';
+    } else {
+      walEl.innerHTML = '<div style="color:var(--text-dim);">WAL not yet created (no writes since rotation)</div>';
+    }
   }
 
   // AI detail (rendered in Storage Tiers card, standalone card removed)

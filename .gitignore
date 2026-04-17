@@ -25,6 +25,9 @@ data/*.db-wal
 data/entries-wal.jsonl
 data/entries-wal.jsonl.*
 
+# Daily morning briefs (local notifications)
+data/morning-briefs/
+
 # Python cache
 scripts/__pycache__/
 
