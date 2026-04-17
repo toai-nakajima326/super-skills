@@ -4,6 +4,63 @@ Auto-maintained by the `self-evolve` skill. Records all upstream syncs, web disc
 
 ---
 
+## 2026-04-17 — web-discovery + upstream-sync
+
+**Search window**: 2026-04-16 → 2026-04-17
+**Queries executed**: 18
+**New sources checked**: 63 (WebFetch deep dives: 7 pages)
+**Candidates found**: 6 | **Adopted**: 3 | **Skipped**: 4 | **Flagged**: 0
+
+### Upstream Sync: surgical (no merge — conflict-free)
+- **Reasoning**: Full `git merge upstream/main` would create 30+ modify/delete conflicts because we had deleted `.claude/skills/` built artifacts in a previous cleanup, but upstream modified them (added `user-invocable: true`). Took surgical approach: copied 24 skill source files directly from `upstream/main:skills/` into our `skills/` directory without triggering merge conflicts. All 23 of 24 upstream skills were already registered in vcontext from prior runs; added the missing `mcp-server-patterns` registration. Validated 28/28 skills, deployed, committed.
+- **Skills from upstream**: api-design, backend-patterns, careful, checkpoint, coding-standards, deep-research, dmux-workflows, documentation-lookup, e2e-testing, exa-search, freeze, frontend-patterns, guard, health-check, investigate, mcp-server-patterns, plan-architecture, plan-product, qa-browser, review, security-review, ship-release, tdd-workflow, verification-loop
+
+### Action: created — adversarial-review
+- **Source**: "Agent Skills: The Cheat Codes for Claude Code" (Medium, Jonathan Fulton, April 2026) — multi-source confirmed; Codex Review Plugin adversarial mode cited as catching race conditions that survived 3 human review rounds
+- **Reasoning**: Novel and distinct from standard `review` skill. Adversarial review acts as a devil's advocate — actively tries to break code by probing race conditions, null paths, edge cases, and weak architectural assumptions. Routed at P4 alongside `review` and `security-review`.
+- **Changes**: Created `skills/adversarial-review/SKILL.md`. Added to super-skills routing at P4: `adversarial-review(try to break/edge case/race condition)`. Registered in vcontext (id=117905).
+- **Risk assessment**: low — new skill, no modification to existing skills
+
+### Action: created — gh-skill-manager
+- **Source**: GitHub Blog Changelog, April 16, 2026 — "Manage Agent Skills with GitHub CLI" (v2.90.0). Primary source (official GitHub changelog). Commands: `gh skill install/search/preview/update/publish`, `--agent claude-code|cursor|codex|gemini` flag, immutable releases via git tags, content-addressed SHA tracking.
+- **Reasoning**: Novel skill (shipped the same day as this run). Cross-agent skill portability is now standardized. The `gh skill` CLI is a package-manager-grade tool for distributing and versioning AI agent skills with supply chain security guarantees. Directly relevant to managing this skill framework.
+- **Changes**: Created `skills/gh-skill-manager/SKILL.md`. Added to super-skills routing at P7: `gh-skill-manager(install/update/publish agent skill/gh skill CLI)`. Registered in vcontext (id=117904).
+- **Risk assessment**: low — new skill
+
+### Action: improved — mcp-server-patterns
+- **Source**: Cloudflare Enterprise MCP Reference Architecture (blog.cloudflare.com/enterprise-mcp/) — "lazy discovery" two-tool pattern. MCP Server Security Best Practices 2026 (Medium) — OAuth 2.1 per-tool scopes as mandatory standard.
+- **Reasoning**: Two concrete improvements to existing thin skill: (1) Lazy tool discovery — expose only 2 tools (search + execute) so agents discover capabilities on demand, solving context exhaustion at 10,000+ server scale; (2) Per-tool OAuth 2.1 scopes (calendar:read, email:send, contacts:delete) — now mandatory standard for HTTP transports per 2026 security guidance. Updated vcontext entry (id=117906).
+- **Changes**: Expanded `skills/mcp-server-patterns/SKILL.md` from 19 to 39 lines.
+- **Risk assessment**: low — incremental improvement
+
+### Skipped: Claude Code Agent Teams
+- **Reasoning**: Experimental feature (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, v2.1.32+) — peer-to-peer agent messaging with shared task lists and file locking. Interesting but still experimental, and overlaps significantly with our existing `supervisor-worker` skill. Will re-evaluate when stable.
+
+### Skipped: Kiro cross-session memory patterns
+- **Reasoning**: Kiro (AWS agentic IDE) implements persistent cross-session memory and multi-repo unified tasks with review-driven learning. Architecturally interesting but platform-specific (Kiro only). Not portable to our Claude Code + vcontext framework.
+
+### Skipped: Trust Wall / AI governance checklist
+- **Reasoning**: "Trust Wall" framing for AI-caused production incidents (Gravitee State of AI Agent Security 2026, Lightrun). Governance gap between model-level guardrails and runtime enforcement. Covered sufficiently by existing `careful`, `guard`, and `security-review` skills. Not differentiated enough for a new skill.
+
+### Skipped: Progressive Disclosure prompt pattern
+- **Reasoning**: Phase-gated instructions so agents receive detail only at the relevant phase (from Paxrel AI Agent Prompt Engineering 2026). Already covered by our `phase-gate` skill in ~/.claude/skills/.
+
+### Step 3: Local AI Model Maintenance
+- **MLX generate**: Server was DOWN at run start (port 3162 ECONNREFUSED). Restarted via wrapper script. Running: `mlx-community/Qwen3-8B-4bit` + `Qwen/Qwen3-0.6B-MLX-4bit` draft (speculative decoding). Model unchanged — current setup still optimal.
+- **MLX embed**: Running — `mlx-community/Qwen3-Embedding-8B-4bit-DWQ` (dim=4096). Embedding backlog: 16,829 entries queued.
+- **Decision**: No model upgrades this run. MLX generate restart was the only action needed.
+
+### Step 4: Hook Auto-Setup
+- **Detected tools**: Claude Code, Codex, Cursor, Kiro
+- **Result**: Claude Code already configured; Codex hooks.json refreshed (backed up previous); Cursor and Kiro hooks updated
+- **No new tools detected** since last run
+
+### Infrastructure improvements committed
+- `vcontext-server.js`: Added DB integrity check + corruption recovery (PRAGMA integrity_check → salvage raw entries → restore from snapshot → merge salvaged back). Preserves user prompts/tool calls that cannot be regenerated.
+- `vcontext-watchdog.sh`: Added RAM disk capacity monitoring — WARN at 85%, emergency cleanup at 95% (WAL checkpoint + corrupt backup removal + macOS notification).
+
+---
+
 ## 2026-04-16 — web-discovery
 
 **Search window**: 2026-04-15 → 2026-04-16
