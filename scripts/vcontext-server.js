@@ -51,6 +51,27 @@ const BACKUP_PATH = join(BACKUP_DIR, 'vcontext-backup.sqlite');
 const SSD_DB_PATH = join(BACKUP_DIR, 'vcontext-ssd.db');
 const ENTRIES_WAL_PATH = join(BACKUP_DIR, 'entries-wal.jsonl'); // SQLite-independent append-only log
 const ENTRIES_WAL_MAX_BYTES = 500 * 1024 * 1024; // 500MB, then rotate
+
+// Serialized writer for entries-wal.jsonl. Node's fs.appendFile opens+
+// writes+closes on every call — concurrent callers can interleave.  This
+// queue guarantees lines land whole so /admin/replay-wal never encounters
+// a half-written record.
+const _walQueue = [];
+let _walFlushing = false;
+function appendToWalQueue(line) {
+  _walQueue.push(line);
+  if (_walFlushing) return;
+  _walFlushing = true;
+  setImmediate(async () => {
+    const fs = require('node:fs/promises');
+    while (_walQueue.length > 0) {
+      const batch = _walQueue.splice(0, _walQueue.length).join('');
+      try { await fs.appendFile(ENTRIES_WAL_PATH, batch); }
+      catch { /* best-effort; SSD DB + snapshot cover the same data */ }
+    }
+    _walFlushing = false;
+  });
+}
 const CLOUD_CONFIG_PATH = join(BACKUP_DIR, 'vcontext-cloud.json');
 const SCRIPT_DIR = new URL('.', import.meta.url).pathname;
 const BACKUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -1137,14 +1158,20 @@ async function handleStore(req, res) {
     } catch (e) {
       console.error('[write-through] SSD sync failed:', e.message?.slice(0, 80));
     }
-    // (b) JSONL append — raw, format-agnostic durable log
+    // (b) JSONL append — raw, format-agnostic durable log.
+    // Serialized via _walQueue because concurrent fs.appendFile calls can
+    // interleave partial writes on macOS (each call is a separate open/
+    // write/close, not atomic across callers).  JSONL is newline-
+    // delimited, so a single interleaved line would break /admin/replay-wal
+    // mid-file.  Queue preserves issue order without blocking the store
+    // response.
     try {
       const line = JSON.stringify({
         id: entry.id, type, content, tags: tagList, session: session || null,
         created_at: entry.created_at || now, content_hash: contentHash,
         reasoning, conditions, supersedes, confidence, status
       }) + '\n';
-      require('node:fs').appendFile(ENTRIES_WAL_PATH, line, () => {}); // async, ignore errors
+      appendToWalQueue(line);
     } catch {}
   });
 
