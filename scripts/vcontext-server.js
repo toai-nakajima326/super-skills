@@ -202,6 +202,56 @@ let ramDb, ssdDb;
 // TTL is endpoint-specific and enforced where the cache is read.
 let _analyticsCache = {};
 
+// ── Event-loop watchdog (runtime hang detector) ──────────────────
+// Background: Fix B in wrapper.sh catches STARTUP hangs (process alive
+// but port 3150 never bound). It does NOT catch RUNTIME hangs where
+// the server was healthy, then wedged — e.g. MLX generate crashed and
+// mlxGenerate() blocked the event loop, so inbound HTTP still accept()s
+// but no handler ever fires. That's the state we hit today.
+//
+// A Worker thread runs in the same process but a separate event loop.
+// Even when the main thread is fully blocked, the worker's timers
+// still fire. We ping main every 5s; if main doesn't pong within 30s,
+// the worker sends SIGKILL to its own PID — this is the ONLY reliable
+// way to interrupt a busy-waiting main thread. Testing showed
+// `process.exit(137)` from a worker does NOT interrupt a synchronous
+// main-thread busy loop (exit signal is queued on main's event loop
+// which is itself blocked). SIGKILL goes through the kernel and
+// terminates the process regardless of user-space state. Exit code
+// is then 137 (128+9); wrapper treats anything ≠0,2 as a normal
+// restart.
+(function startEventLoopWatchdog() {
+  if (process.env.VCONTEXT_DISABLE_WATCHDOG === '1') return;
+  try {
+    const { Worker } = require('node:worker_threads');
+    const w = new Worker(`
+      const { parentPort } = require('node:worker_threads');
+      let lastPong = Date.now();
+      parentPort.on('message', (m) => { if (m === 'pong') lastPong = Date.now(); });
+      setInterval(() => {
+        const gap = Date.now() - lastPong;
+        if (gap > 30000) {
+          console.error('[watchdog] main event loop unresponsive for ' + gap + 'ms — SIGKILL pid=' + process.pid);
+          // SIGKILL to own pid: kernel terminates the whole process,
+          // bypassing any user-space block. process.exit() would queue
+          // on main's event loop which is what we're trying to escape.
+          try { process.kill(process.pid, 'SIGKILL'); } catch (e) {
+            console.error('[watchdog] SIGKILL failed, falling back to process.exit:', e.message);
+            process.exit(137);
+          }
+        }
+        try { parentPort.postMessage('ping'); } catch {}
+      }, 5000).unref?.();
+    `, { eval: true });
+    w.on('message', (m) => { if (m === 'ping') w.postMessage('pong'); });
+    w.on('error', (e) => console.error('[watchdog] worker error:', e.message));
+    w.unref(); // don't keep main process alive on watchdog's behalf
+  } catch (e) {
+    // Worker unavailable — log and continue without watchdog (rare).
+    console.error('[watchdog] failed to start:', e.message);
+  }
+})();
+
 function checkAndRecoverDb(dbPath, isRam) {
   // Integrity check; if corrupt:
   //   1. SALVAGE raw entries from corrupt DB via `sqlite3 .recover`
