@@ -1,7 +1,7 @@
 {
   "name": "super-skills",
   "version": "1.0.0",
-  "description": "Unified skill framework for AI coding agents — author once, deploy to Claude Code, Codex, Cursor, Kiro, and Antigravity",
+  "description": "Unified skill framework for AI coding agents \u2014 author once, deploy to Claude Code, Codex, Cursor, Kiro, and Antigravity",
   "type": "module",
   "scripts": {
     "build": "node scripts/build-all.js",
@@ -14,7 +14,9 @@
     "validate": "node scripts/validate-skills.js",
     "sync": "./scripts/sync-upstream.sh",
     "sync:check": "./scripts/sync-upstream.sh --check",
-    "deploy": "./scripts/sync-upstream.sh --deploy"
+    "deploy": "./scripts/sync-upstream.sh --deploy",
+    "test": "bash scripts/smoke-test.sh",
+    "test:quick": "bash scripts/smoke-test.sh --quick"
   },
   "keywords": [
     "ai-agent",

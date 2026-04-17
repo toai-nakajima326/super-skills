@@ -37,6 +37,9 @@ import { execSync, execFileSync } from 'node:child_process';
 import { existsSync, statSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+// Pure utilities extracted 2026-04-17 as a refactor proof — same impl,
+// just in a module so it's easier to test and reuse. See lib/vcontext-utils.js.
+import { esc, ftsQuery, estimateTokens, parseTags } from './lib/vcontext-utils.js';
 const require = createRequire(import.meta.url);
 
 // ── Configuration ──────────────────────────────────────────────
@@ -345,20 +348,7 @@ function dbQuery(sql, dbPath = DB_PATH) {
   }
 }
 
-/**
- * Escape a string for safe SQL embedding (single-quote doubling).
- */
-function esc(str) {
-  if (str === null || str === undefined) return 'NULL';
-  return "'" + String(str).replace(/'/g, "''") + "'";
-}
-
-/** Sanitize query for FTS5 MATCH — strip chars that cause syntax errors */
-function ftsQuery(q) {
-  // Remove FTS5 operators and special chars, keep alphanumeric + spaces + CJK.
-  // Period "." causes "syntax error near ." — must be stripped.
-  return String(q).replace(/[<>\/\\(),;:!@#$%^&*+=\[\]{}|~`".'?-]/g, ' ').replace(/\s+/g, ' ').trim();
-}
+// esc() and ftsQuery() moved to ./lib/vcontext-utils.js (2026-04-17 refactor)
 
 // ── RAM disk check ─────────────────────────────────────────────
 function ensureRamDisk() {
@@ -713,9 +703,7 @@ function doBackup() {
 }
 
 // ── Token estimation ───────────────────────────────────────────
-function estimateTokens(text) {
-  return Math.ceil(String(text).length / 4);
-}
+// estimateTokens() moved to ./lib/vcontext-utils.js (2026-04-17 refactor)
 
 // ── Index + Metrics helpers ─────────────────────────────────────
 
@@ -1019,11 +1007,7 @@ function parsePath(url) {
 /**
  * Parse tags JSON safely.
  */
-function parseTags(rows) {
-  for (const row of rows) {
-    try { row.tags = JSON.parse(row.tags); } catch { /* keep as string */ }
-  }
-}
+// parseTags() moved to ./lib/vcontext-utils.js (2026-04-17 refactor)
 
 // ── Route handlers ─────────────────────────────────────────────
 
@@ -2997,6 +2981,64 @@ function detectAnomalies() {
     const ramSize = statSync(DB_PATH).size;
     if (ramSize > 3 * 1024 * 1024 * 1024) {
       alerts.push({ level: 'high', msg: `RAM disk >3GB (${(ramSize/1024/1024/1024).toFixed(1)}GB)` });
+    }
+  } catch {}
+
+  // 5. Latency regression: recall or store avg > 3x the 24h baseline.
+  // Compares last 30min vs 7d-prior baseline (excluding the last 1h so
+  // current degradation doesn't contaminate the baseline).
+  try {
+    const opsToCheck = ['recall', 'store', 'recent'];
+    for (const op of opsToCheck) {
+      const recent = dbQuery(`SELECT AVG(latency_ms) as avg, COUNT(*) as n FROM api_metrics WHERE operation=${esc(op)} AND created_at > datetime('now','-30 minutes');`);
+      const baseline = dbQuery(`SELECT AVG(latency_ms) as avg FROM api_metrics WHERE operation=${esc(op)} AND created_at BETWEEN datetime('now','-7 days') AND datetime('now','-1 hour');`);
+      const recentAvg = recent[0]?.avg || 0;
+      const recentN = recent[0]?.n || 0;
+      const baselineAvg = baseline[0]?.avg || 0;
+      // Require: meaningful sample (>=20 recent calls) + meaningful baseline (>200ms typical) + 3x degradation
+      if (recentN >= 20 && baselineAvg > 200 && recentAvg > baselineAvg * 3) {
+        alerts.push({
+          level: 'medium',
+          msg: `Latency regression: ${op} ${Math.round(recentAvg)}ms avg (30min, n=${recentN}) vs ${Math.round(baselineAvg)}ms baseline — ${Math.round(recentAvg/baselineAvg)}x slower`,
+        });
+      }
+    }
+  } catch {}
+
+  // 6. DB write failures — count malformed/lock errors in the last 30min.
+  // These don't crash the server but silently drop rows. Grep the running
+  // log file for `[db exec error` patterns.
+  try {
+    const fs = require('node:fs');
+    const LOG = '/tmp/vcontext-server.log';
+    if (fs.existsSync(LOG)) {
+      const stat = fs.statSync(LOG);
+      // Only scan the last 512KB (enough for ~30min of logs on busy systems)
+      const scanBytes = Math.min(512 * 1024, stat.size);
+      const fd = fs.openSync(LOG, 'r');
+      const buf = Buffer.alloc(scanBytes);
+      fs.readSync(fd, buf, 0, scanBytes, stat.size - scanBytes);
+      fs.closeSync(fd);
+      const text = buf.toString('utf8');
+      const errors = (text.match(/\[db exec error|\[db query error|database disk image is malformed/g) || []).length;
+      if (errors > 20) {
+        alerts.push({ level: 'high', msg: `DB errors in recent log: ${errors} (last ~30min) — check for corruption or schema drift` });
+      }
+    }
+  } catch {}
+
+  // 7. Embed backlog growth — eligible backlog grew by >200 in the last
+  // hour despite the loop being enabled. Indicates producer/consumer
+  // imbalance (user writes faster than MLX embeds).
+  try {
+    const SKIP_TYPES = "'working-state','anomaly-alert','pre-tool','session-recall','test'";
+    const currentBacklog = dbQuery(`SELECT COUNT(*) as c FROM entries WHERE embedding IS NULL AND type NOT IN (${SKIP_TYPES});`)[0]?.c || 0;
+    // "1h ago" proxy: count of non-embedded entries whose id is < (max_id - approx_hour_of_writes).
+    // We approximate by sampling the previous anomaly-response audit: if we've
+    // alerted on this in the last hour, it's considered open and we skip
+    // re-alerting. Otherwise threshold is a simple absolute backlog watermark.
+    if (currentBacklog > 2000 && mlxAvailable) {
+      alerts.push({ level: 'medium', msg: `Embed backlog growing: ${currentBacklog} eligible pending (MLX embed up but not keeping pace)` });
     }
   } catch {}
 

@@ -22,10 +22,21 @@ echo $$ > "$PIDFILE"
 trap 'rm -f "$PIDFILE"' EXIT
 
 HEALTH_URL="http://localhost:3150/health"
-CHECK_INTERVAL=60
 WEBHOOK_URL="${VCONTEXT_ALERT_WEBHOOK:-}"  # Set env var for Slack/Discord/LINE
-NOTIFY_COOLDOWN=300  # Don't spam: 5 min between notifications
 LAST_NOTIFY_FILE="/tmp/vcontext-watchdog-last-notify.txt"
+
+# ── Tunables (override via env) ───────────────────────────────
+# All thresholds here so ops can tune without editing code.
+# Memory thresholds reflect steady-state + buffer, not leak detection:
+#   Qwen3-8B-4bit ~6GB + draft 0.5GB + prompt cache 1GB + runtime 2GB = ~10GB
+#   Embed 8B-DWQ  ~5GB + cache                                       = ~5-6GB
+CHECK_INTERVAL="${VCONTEXT_WATCHDOG_INTERVAL:-60}"           # seconds between checks
+NOTIFY_COOLDOWN="${VCONTEXT_WATCHDOG_COOLDOWN:-300}"          # min gap between user notifications
+RAM_WARN_PCT="${VCONTEXT_RAM_WARN_PCT:-85}"                  # warn at this RAM disk fill %
+RAM_CRIT_PCT="${VCONTEXT_RAM_CRIT_PCT:-95}"                  # emergency cleanup at this %
+MLX_GEN_MAX_MB="${VCONTEXT_MLX_GEN_MAX_MB:-14000}"           # MLX Generate memory kill threshold (14 GB)
+MLX_EMBED_MAX_MB="${VCONTEXT_MLX_EMBED_MAX_MB:-10000}"       # MLX Embed memory kill threshold (10 GB)
+MLX_GEN_CALL_LIMIT="${VCONTEXT_MLX_GEN_CALL_LIMIT:-200}"     # restart MLX Generate after N calls (prevents gradual hang)
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -120,14 +131,14 @@ while true; do
   # RAM disk capacity check — every cycle (critical: DB corruption risk if full)
   RAM_USED_PCT=$(df /Volumes/VContext 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%')
   if [[ -n "$RAM_USED_PCT" ]]; then
-    if [[ "$RAM_USED_PCT" -ge 95 ]]; then
+    if [[ "$RAM_USED_PCT" -ge $RAM_CRIT_PCT ]]; then
       log "RAM DISK CRITICAL: ${RAM_USED_PCT}% used — emergency cleanup"
       # Remove any corrupt DB backups
       rm -f /Volumes/VContext/vcontext-corrupt-*.db 2>/dev/null
       # Force WAL checkpoint to flush and shrink
       sqlite3 /Volumes/VContext/vcontext.db "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null
       osascript -e "display notification \"RAM disk ${RAM_USED_PCT}% — emergency cleanup\" with title \"🚨 vcontext CRITICAL\"" 2>/dev/null
-    elif [[ "$RAM_USED_PCT" -ge 85 ]]; then
+    elif [[ "$RAM_USED_PCT" -ge $RAM_WARN_PCT ]]; then
       log "RAM DISK WARN: ${RAM_USED_PCT}% used"
       sqlite3 /Volumes/VContext/vcontext.db "PRAGMA wal_checkpoint(PASSIVE);" 2>/dev/null
       osascript -e "display notification \"RAM disk ${RAM_USED_PCT}% — watch closely\" with title \"⚠️ vcontext\"" 2>/dev/null
@@ -147,7 +158,7 @@ while true; do
     if [[ -n "$EMBED_PID" ]]; then
       EMBED_HEALTH=$(curl -s --max-time 5 http://127.0.0.1:3161/health 2>/dev/null)
       EMBED_MB=$(footprint -p "$EMBED_PID" 2>/dev/null | grep Footprint | grep -o '[0-9]* MB' | grep -o '[0-9]*')
-      if [[ -z "$EMBED_HEALTH" ]] || { [[ -n "$EMBED_MB" ]] && [[ "$EMBED_MB" -gt 10000 ]]; }; then
+      if [[ -z "$EMBED_HEALTH" ]] || { [[ -n "$EMBED_MB" ]] && [[ "$EMBED_MB" -gt $MLX_EMBED_MAX_MB ]]; }; then
         log "MLX Embed restart: health=${EMBED_HEALTH:+ok}${EMBED_HEALTH:-timeout} mem=${EMBED_MB:-?}MB"
         launchctl unload ~/Library/LaunchAgents/com.vcontext.mlx-embed.plist 2>/dev/null
         sleep 1; kill -9 "$EMBED_PID" 2>/dev/null; lsof -ti :3161 | xargs kill -9 2>/dev/null
@@ -182,7 +193,7 @@ while true; do
       # (watchdog log 12:03, 12:07, 12:13) which in turn OOM'd node via
       # GPU contention + cache thrash. 14GB leaves headroom while still
       # catching a genuine leak.
-      if [[ -n "$GEN_MB" ]] && [[ "$GEN_MB" -gt 14000 ]]; then
+      if [[ -n "$GEN_MB" ]] && [[ "$GEN_MB" -gt $MLX_GEN_MAX_MB ]]; then
         NEED_RESTART=true; REASON="memory ${GEN_MB}MB > 14GB"
       fi
 
@@ -206,7 +217,7 @@ while true; do
       # Call count check (prevents gradual hang)
       GEN_HEALTH=$(curl -s --max-time 3 http://127.0.0.1:3162/health 2>/dev/null)
       GEN_CALLS=$(echo "$GEN_HEALTH" | python3 -c "import sys,json;print(json.load(sys.stdin).get('calls',0))" 2>/dev/null)
-      if [[ -n "$GEN_CALLS" ]] && [[ "$GEN_CALLS" -gt 200 ]]; then
+      if [[ -n "$GEN_CALLS" ]] && [[ "$GEN_CALLS" -gt $MLX_GEN_CALL_LIMIT ]]; then
         NEED_RESTART=true; REASON="calls=${GEN_CALLS} > 200"
       fi
     else
