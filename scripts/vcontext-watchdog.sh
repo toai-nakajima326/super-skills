@@ -7,6 +7,20 @@ set -o pipefail
 trap 'log "Caught signal, continuing..."; sleep 5' HUP INT TERM
 trap 'log "Unexpected error on line $LINENO, continuing..."; sleep 5' ERR
 
+# Self-singleton — prevent multiple watchdogs racing to restart the same
+# services (seen 2026-04-17: 3 watchdogs spawned across reloads, each
+# independently killing+restarting mlx-generate every minute).
+PIDFILE="/tmp/vcontext-watchdog.pid"
+if [[ -f "$PIDFILE" ]]; then
+  OTHER_PID=$(cat "$PIDFILE" 2>/dev/null)
+  if [[ -n "$OTHER_PID" ]] && kill -0 "$OTHER_PID" 2>/dev/null && [[ "$OTHER_PID" != "$$" ]]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Another watchdog (PID $OTHER_PID) is running — exiting"
+    exit 0
+  fi
+fi
+echo $$ > "$PIDFILE"
+trap 'rm -f "$PIDFILE"' EXIT
+
 HEALTH_URL="http://localhost:3150/health"
 CHECK_INTERVAL=60
 WEBHOOK_URL="${VCONTEXT_ALERT_WEBHOOK:-}"  # Set env var for Slack/Discord/LINE
