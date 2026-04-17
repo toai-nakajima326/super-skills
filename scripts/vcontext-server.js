@@ -5486,7 +5486,20 @@ const server = createServer(async (req, res) => {
         }
         const fs = require('node:fs');
         const path = require('node:path');
-        const file = path.join(process.env.HOME, 'skills', fileMatch[1].trim());
+        // Path validation — reject anything that tries to escape ~/skills
+        // or contains shell metacharacters.  Before this, a pending-patch
+        // entry with a crafted FILE: field (e.g. "foo.js; rm -rf ~/")
+        // would reach execSync('node -c ${file}') and achieve arbitrary
+        // command execution under the vcontext approve flow.
+        const rawFile = fileMatch[1].trim();
+        if (/[;&|<>`$(){}\[\]\\\*?!'"\n\r\t ]/.test(rawFile) || rawFile.includes('..')) {
+          return sendJson(res, 400, { error: 'patch FILE contains invalid characters' });
+        }
+        const skillsRoot = path.join(process.env.HOME, 'skills');
+        const file = path.resolve(skillsRoot, rawFile);
+        if (!file.startsWith(skillsRoot + path.sep)) {
+          return sendJson(res, 400, { error: 'patch FILE resolves outside ~/skills' });
+        }
         const before = beforeMatch[1].trim();
         const after = afterMatch[1].trim();
         const original = fs.readFileSync(file, 'utf-8');
@@ -5498,10 +5511,11 @@ const server = createServer(async (req, res) => {
         execSync(`cd ~/skills && git checkout -b patch-${patchId} 2>/dev/null || git checkout patch-${patchId}`, { stdio: 'ignore' });
         const patched = original.replace(before, after);
         fs.writeFileSync(file, patched, 'utf-8');
-        // Syntax test
+        // Syntax test — execFileSync passes file as a separate arg so no
+        // shell expansion even if path validation misses something.
         let testOk = false;
         try {
-          execSync(`node -c ${file}`, { stdio: 'ignore' });
+          execFileSync('node', ['-c', file], { stdio: 'ignore' });
           testOk = true;
         } catch { testOk = false; }
         if (!testOk) {
