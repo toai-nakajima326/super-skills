@@ -2831,7 +2831,12 @@ async function startEmbedLoop() {
       let embeddings = null;
       if (mlxAvailable) {
         try {
-          embeddings = await mlxEmbedBatch(rows.map(r => String(r.content).slice(0, 1000)));
+          // Bypass withMlxLock — store-time mlxEmbed calls that fail
+          // (ECONNRESET during MLX restarts) leave their 60s timeouts
+          // chained on _mlxEmbedLock, which blocks this background
+          // loop for minutes at a time. MLX embed HTTP server handles
+          // its own queue. Same fix as mlxEmbedFast.
+          embeddings = await _mlxEmbedBatchRaw(rows.map(r => String(r.content).slice(0, 1000)));
         } catch (e) {
           console.log(`[embed-loop] batch failed (${rows.length} rows): ${e.message}`);
         }
