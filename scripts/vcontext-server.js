@@ -2810,10 +2810,18 @@ async function startEmbedLoop() {
       continue;
     }
     try {
-      // Batch of 10 — uses MLX /embed_batch endpoint. ~10x throughput
-      // with only ~80MB peak memory increase.
-      const BATCH = 3; // batch 3 + clear_cache every call
-      const rows = dbQuery(`SELECT id, content FROM entries WHERE embedding IS NULL ORDER BY id ASC LIMIT ${BATCH};`);
+      // Batch embed from the backlog.
+      // Skip low-value types — they rarely get searched semantically
+      // and bloat the queue (working-state: 3k+ ephemeral snapshots,
+      // anomaly-alert: duplicative alerts, pre-tool: covered by tool-use).
+      // Fresh first — user's recent context is most likely searched.
+      const BATCH = 3;
+      const rows = dbQuery(`
+        SELECT id, content FROM entries
+        WHERE embedding IS NULL
+          AND type NOT IN ('working-state', 'anomaly-alert', 'pre-tool', 'session-recall', 'test')
+        ORDER BY id DESC LIMIT ${BATCH};
+      `);
       if (rows.length === 0) {
         await new Promise(r => setTimeout(r, 30000));
         continue;
