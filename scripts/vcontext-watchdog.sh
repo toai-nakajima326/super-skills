@@ -176,8 +176,14 @@ while true; do
     if [[ -n "$GEN_PID" ]]; then
       # Memory check
       GEN_MB=$(footprint -p "$GEN_PID" 2>/dev/null | grep Footprint | grep -o '[0-9]* MB' | grep -o '[0-9]*')
-      if [[ -n "$GEN_MB" ]] && [[ "$GEN_MB" -gt 8000 ]]; then
-        NEED_RESTART=true; REASON="memory ${GEN_MB}MB > 8GB"
+      # Threshold 14GB (was 8GB).  Qwen3-8B-4bit ≈6GB, Qwen3-0.6B-MLX-4bit
+      # draft ≈0.5GB, prompt cache 1GB, runtime buffers ≈2GB → normal
+      # resident ~10GB. 8GB kept flapping the server every 4 min today
+      # (watchdog log 12:03, 12:07, 12:13) which in turn OOM'd node via
+      # GPU contention + cache thrash. 14GB leaves headroom while still
+      # catching a genuine leak.
+      if [[ -n "$GEN_MB" ]] && [[ "$GEN_MB" -gt 14000 ]]; then
+        NEED_RESTART=true; REASON="memory ${GEN_MB}MB > 14GB"
       fi
 
       # Actual-generation probe. Qwen3 thinks before answering — a
