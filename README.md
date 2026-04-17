@@ -1,4 +1,8 @@
-# Super Skills
+# Infinite Skills
+
+> (Repo / GitHub remote is still named `super-skills` for continuity with
+> upstream, but the auto-routing skill and all internal references were
+> renamed to `infinite-skills` on 2026-04-17.)
 
 Unified skill framework for AI coding agents. Author once, deploy to **Claude Code**, **Codex**, **Cursor**, **Kiro**, and **Antigravity**.
 
@@ -11,12 +15,60 @@ node scripts/validate-skills.js
 # Build all targets
 npm run build
 
+# Smoke-test the running vcontext server (20 shape-asserting checks).
+# Fails on regressions like missing fields, stale variable names, or
+# dashboard JavaScript syntax errors.
+npm test                 # full suite — includes a test write
+npm run test:quick       # read-only subset
+
 # Install into a project (Claude Code, developer profile)
 node scripts/install-apply.mjs --profile developer --target claude --target-root /path/to/project
 
 # Dry run to see what would be installed
 node scripts/install-apply.mjs --profile core --target cursor --target-root . --dry-run
 ```
+
+## Operations
+
+### vcontext server (port 3150)
+
+- **Start**: auto via `~/Library/LaunchAgents/com.vcontext.server.plist`
+- **Reload**: `bash scripts/vcontext-reload.sh`
+- **Health**: `curl localhost:3150/health`
+- **Dashboard**: `http://localhost:3150/dashboard` (no-cache header — hard refresh not required after fixes)
+- **Morning brief**: runs daily at 09:00 via `com.vcontext.morning-brief` → macOS notification + `data/morning-briefs/YYYY-MM-DD.txt`
+
+### Watchdog tunables (env vars, all optional)
+
+```
+VCONTEXT_WATCHDOG_INTERVAL   60       # seconds between checks
+VCONTEXT_WATCHDOG_COOLDOWN   300      # min notification gap
+VCONTEXT_RAM_WARN_PCT        85       # RAM-disk fill warn
+VCONTEXT_RAM_CRIT_PCT        95       # RAM-disk fill emergency cleanup
+VCONTEXT_MLX_GEN_MAX_MB      14000    # MLX Generate kill threshold
+VCONTEXT_MLX_EMBED_MAX_MB    10000    # MLX Embed kill threshold
+VCONTEXT_MLX_GEN_CALL_LIMIT  200      # restart after N MLX calls
+VCONTEXT_ALERT_WEBHOOK       ''       # Slack/Discord webhook URL
+VCONTEXT_BRIEF_WEBHOOK       ''       # daily-brief webhook
+```
+
+### Data durability (defence in depth)
+
+```
+RAM DB  →  async SSD DB (same id)  →  async JSONL (data/entries-wal.jsonl)
+       →  1-min RAM→SSD catch-up   →  5-min full backup
+       →  daily + pre-deploy + pre-reboot snapshots (data/snapshots/)
+       →  corrupt-RAM recovery: sqlite3 .recover + snapshot merge
+```
+
+Recovery endpoints (all idempotent):
+
+- `POST /admin/replay-wal` — rebuild entries from JSONL if both SQLite DBs die
+- `GET /admin/wal-status` — JSONL size + line count
+- `POST /admin/verify-backup` — integrity-check last 10 snapshots
+- `POST /admin/rollback-last` — revert most recent self-improve commit
+
+See `RECOVERY.md` for the full cold-start procedure.
 
 ## Architecture
 
