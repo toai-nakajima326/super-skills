@@ -336,7 +336,7 @@ function escapeHtml(str) {
 async function approvePatch(id) {
   if (!confirm('このパッチを適用しますか？テスト失敗時は自動ロールバックされます。')) return;
   try {
-    const r = await fetch(API + '/admin/approve-patch', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({id}) });
+    const r = await fetch(API + '/admin/approve-patch', { method: 'POST', headers: {'Content-Type':'application/json','X-Vcontext-Admin':'yes'}, body: JSON.stringify({id}) });
     const data = await r.json();
     alert(r.ok ? '適用しました: patch ' + id : 'エラー: ' + (data.error || 'unknown'));
     refresh();
@@ -345,14 +345,14 @@ async function approvePatch(id) {
 async function rejectPatch(id) {
   if (!confirm('このパッチを却下しますか？')) return;
   try {
-    await fetch(API + '/admin/reject-patch', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({id}) });
+    await fetch(API + '/admin/reject-patch', { method: 'POST', headers: {'Content-Type':'application/json','X-Vcontext-Admin':'yes'}, body: JSON.stringify({id}) });
     refresh();
   } catch (e) { alert('失敗: ' + e.message); }
 }
 async function rollbackLast() {
   if (!confirm('最後の self-improve コミットをロールバックしますか？')) return;
   try {
-    const r = await fetch(API + '/admin/rollback-last', { method: 'POST' });
+    const r = await fetch(API + '/admin/rollback-last', { method: 'POST', headers: {'X-Vcontext-Admin':'yes'} });
     const data = await r.json();
     alert(r.ok ? 'ロールバックしました' : 'エラー: ' + (data.error || 'unknown'));
     refresh();

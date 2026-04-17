@@ -859,9 +859,13 @@ function migrateSsdToCloud() {
       return 0;
     }
 
-    // Only delete from SSD if upload succeeded
-    const ids = staleRows.map(r => r.id).join(',');
-    dbExec(`DELETE FROM entries WHERE id IN (${ids});`, SSD_DB_PATH);
+    // Only delete from SSD if upload succeeded.
+    // Number() wrapping is defensive — ids originate from the DB's own
+    // auto-increment column so injection is unreachable today, but
+    // enforcing numeric type makes the pattern safe-by-construction if a
+    // future change sources these ids from anywhere else.
+    const ids = staleRows.map(r => Number(r.id)).filter(n => Number.isFinite(n)).join(',');
+    if (ids) dbExec(`DELETE FROM entries WHERE id IN (${ids});`, SSD_DB_PATH);
 
     console.log(`[vcontext:tier] Migrated ${staleRows.length} entries SSD → Cloud`);
     return staleRows.length;
@@ -1206,7 +1210,9 @@ async function handleStore(req, res) {
             const conflictIds = [entry.id, ...existing.map(e => e.id)];
             const consultId = `auto_${Date.now()}`;
             const candidates = conflictIds.map(id => {
-              const rows = dbQuery(`SELECT * FROM entries WHERE id = ${id};`);
+              const n = Number(id);
+              if (!Number.isFinite(n)) return null;
+              const rows = dbQuery(`SELECT * FROM entries WHERE id = ${n};`);
               return rows[0] || null;
             }).filter(Boolean);
 
@@ -5148,7 +5154,7 @@ const server = createServer(async (req, res) => {
   // CORS (for any local tooling)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Vcontext-Admin');
 
   if (method === 'OPTIONS') {
     res.writeHead(204);
@@ -5386,6 +5392,12 @@ const server = createServer(async (req, res) => {
       } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'POST' && path === '/admin/approve-patch') {
       // Apply patch → test → reload. Auto-rollback on failure.
+      // CSRF defense: require custom header.  Simple cross-origin requests
+      // can't set this without CORS preflight, defeating trivial CSRF
+      // (a malicious browser page curl-bombing localhost:3150).
+      if (req.headers['x-vcontext-admin'] !== 'yes') {
+        return sendJson(res, 403, { error: 'X-Vcontext-Admin: yes header required for destructive admin actions' });
+      }
       const body = await readBody(req);
       const patchId = parseInt(body.id);
       if (!patchId) return sendJson(res, 400, { error: 'id required' });
@@ -5434,6 +5446,9 @@ const server = createServer(async (req, res) => {
         sendJson(res, 200, { applied: true, patchId });
       } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'POST' && path === '/admin/reject-patch') {
+      if (req.headers['x-vcontext-admin'] !== 'yes') {
+        return sendJson(res, 403, { error: 'X-Vcontext-Admin: yes header required' });
+      }
       const body = await readBody(req);
       const patchId = parseInt(body.id);
       if (!patchId) return sendJson(res, 400, { error: 'id required' });
@@ -5448,6 +5463,10 @@ const server = createServer(async (req, res) => {
       // Replay entries-wal.jsonl back into entries table (INSERT OR IGNORE).
       // Use after catastrophic DB loss if both RAM and SSD SQLite are gone
       // but the JSONL log survived. Non-destructive — duplicates are skipped.
+      // CSRF-guarded because it does bulk DB writes.
+      if (req.headers['x-vcontext-admin'] !== 'yes') {
+        return sendJson(res, 403, { error: 'X-Vcontext-Admin: yes header required' });
+      }
       try {
         const fs = require('node:fs');
         if (!fs.existsSync(ENTRIES_WAL_PATH)) {
@@ -5541,7 +5560,10 @@ const server = createServer(async (req, res) => {
         });
       } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'POST' && path === '/admin/rollback-last') {
-      // Rollback last self-improve commit
+      // Rollback last self-improve commit (git reset + reload).
+      if (req.headers['x-vcontext-admin'] !== 'yes') {
+        return sendJson(res, 403, { error: 'X-Vcontext-Admin: yes header required' });
+      }
       try {
         execSync(`cd ~/skills && git log --oneline -1 | grep -q 'self-improve'`, { stdio: 'ignore' });
         execSync(`cd ~/skills && git reset --hard HEAD~1`, { stdio: 'ignore' });
