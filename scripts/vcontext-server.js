@@ -5856,8 +5856,17 @@ const server = createServer(async (req, res) => {
     } else if (method === 'POST' && path === '/completion-check') {
       await handleCompletionCheck(req, res);
     } else if (method === 'GET' && path === '/dashboard') {
+      // no-cache + must-revalidate so browsers don't pin a broken JS
+      // bundle across deploys.  Today's "Loading..." freeze was caused
+      // by a browser holding onto a SyntaxError-laden HTML that my fix
+      // had already replaced on the server.  File is ~48KB so revalidate
+      // cost is negligible.
       const html = readFileSync(join(SCRIPT_DIR, 'vcontext-dashboard.html'), 'utf-8');
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-cache, must-revalidate',
+        'Pragma': 'no-cache',
+      });
       res.end(html);
     } else {
       sendJson(res, 404, {
