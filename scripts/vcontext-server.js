@@ -4404,10 +4404,13 @@ async function handleSemanticSearch(req, res) {
   let embedSource = null;
 
   // Strategy 1: MLX (fast ~30ms on Apple Silicon GPU)
-  // Only usable for vector search if MLX embedding dimension matches stored embeddings
+  // Only usable for vector search if MLX embedding dimension matches stored embeddings.
+  // Use mlxEmbedFast (lock bypass + 2s timeout + LRU cache) — same fix
+  // handleRecall got. The locked mlxEmbed serializes behind the background
+  // _mlxEmbedBatchRaw loop and can stall /search/semantic for 30-60s.
   if (mlxAvailable) {
     try {
-      const mlxResult = await mlxEmbed(q);
+      const mlxResult = await mlxEmbedFast(q, 2000);
       if (mlxResult && mlxResult.length > 0) {
         // Check if MLX embedding dimension matches stored embeddings
         if (mlxResult.length === EMBED_DIM) {
