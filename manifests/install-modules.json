@@ -4,67 +4,118 @@
     {
       "name": "skills-base",
       "description": "Core coding standards and documentation",
-      "components": ["coding-standards", "documentation-lookup", "health-check"]
+      "components": [
+        "infinite-skills",
+        "coding-standards",
+        "documentation-lookup",
+        "health-check"
+      ]
     },
     {
       "name": "skills-investigate",
       "description": "Root-cause debugging workflow",
-      "components": ["investigate", "verification-loop"]
+      "components": [
+        "investigate",
+        "verification-loop"
+      ]
     },
     {
       "name": "skills-review",
       "description": "Code review workflows",
-      "components": ["review"]
+      "components": [
+        "review"
+      ]
     },
     {
       "name": "skills-safety",
       "description": "Safety guards and caution modes",
-      "components": ["guard", "freeze", "careful", "checkpoint"]
+      "components": [
+        "guard",
+        "freeze",
+        "careful",
+        "checkpoint"
+      ]
     },
     {
       "name": "skills-planning",
       "description": "Product and architecture planning",
-      "components": ["plan-product", "plan-architecture", "spec-driven-dev"]
+      "components": [
+        "plan-product",
+        "plan-architecture",
+        "spec-driven-dev"
+      ]
     },
     {
       "name": "skills-qa",
       "description": "QA and browser testing",
-      "components": ["qa-browser", "e2e-testing"]
+      "components": [
+        "qa-browser",
+        "e2e-testing"
+      ]
     },
     {
       "name": "skills-release",
       "description": "Release and shipping workflow",
-      "components": ["ship-release"]
+      "components": [
+        "ship-release"
+      ]
     },
     {
       "name": "skills-tdd",
       "description": "Test-driven development",
-      "components": ["tdd-workflow"]
+      "components": [
+        "tdd-workflow"
+      ]
     },
     {
       "name": "skills-patterns",
       "description": "Architecture and design patterns",
-      "components": ["api-design", "backend-patterns", "frontend-patterns", "mcp-server-patterns"]
+      "components": [
+        "api-design",
+        "backend-patterns",
+        "frontend-patterns",
+        "mcp-server-patterns"
+      ]
     },
     {
       "name": "skills-security-review",
       "description": "Security-focused review",
-      "components": ["security-review"]
+      "components": [
+        "security-review"
+      ]
     },
     {
       "name": "skills-research",
       "description": "Deep research and search capabilities",
-      "components": ["deep-research", "exa-search", "dmux-workflows"]
+      "components": [
+        "deep-research",
+        "exa-search",
+        "dmux-workflows"
+      ]
     },
     {
       "name": "skills-orchestration",
       "description": "Agent orchestration, quality gates, and process enforcement",
-      "components": ["supervisor-worker", "quality-gate", "report-format", "phase-gate", "session-handoff", "self-evolve", "debate-consensus", "drift-detect", "model-selector", "confidence-filter", "agent-memory"]
+      "components": [
+        "supervisor-worker",
+        "quality-gate",
+        "report-format",
+        "phase-gate",
+        "session-handoff",
+        "self-evolve",
+        "debate-consensus",
+        "drift-detect",
+        "model-selector",
+        "confidence-filter",
+        "agent-memory"
+      ]
     },
     {
       "name": "skills-ui",
       "description": "UI implementation standards",
-      "components": ["ui-implementation"]
+      "components": [
+        "ui-implementation"
+      ]
     }
   ]
 }

@@ -1,44 +1,205 @@
 {
   "version": 1,
   "components": [
-    { "name": "investigate", "type": "skill", "source": "skills/investigate" },
-    { "name": "plan-product", "type": "skill", "source": "skills/plan-product" },
-    { "name": "plan-architecture", "type": "skill", "source": "skills/plan-architecture" },
-    { "name": "review", "type": "skill", "source": "skills/review" },
-    { "name": "security-review", "type": "skill", "source": "skills/security-review" },
-    { "name": "qa-browser", "type": "skill", "source": "skills/qa-browser" },
-    { "name": "ship-release", "type": "skill", "source": "skills/ship-release" },
-    { "name": "tdd-workflow", "type": "skill", "source": "skills/tdd-workflow" },
-    { "name": "guard", "type": "skill", "source": "skills/guard" },
-    { "name": "freeze", "type": "skill", "source": "skills/freeze" },
-    { "name": "careful", "type": "skill", "source": "skills/careful" },
-    { "name": "checkpoint", "type": "skill", "source": "skills/checkpoint" },
-    { "name": "verification-loop", "type": "skill", "source": "skills/verification-loop" },
-    { "name": "health-check", "type": "skill", "source": "skills/health-check" },
-    { "name": "coding-standards", "type": "skill", "source": "skills/coding-standards" },
-    { "name": "documentation-lookup", "type": "skill", "source": "skills/documentation-lookup" },
-    { "name": "api-design", "type": "skill", "source": "skills/api-design" },
-    { "name": "backend-patterns", "type": "skill", "source": "skills/backend-patterns" },
-    { "name": "frontend-patterns", "type": "skill", "source": "skills/frontend-patterns" },
-    { "name": "e2e-testing", "type": "skill", "source": "skills/e2e-testing" },
-    { "name": "deep-research", "type": "skill", "source": "skills/deep-research" },
-    { "name": "exa-search", "type": "skill", "source": "skills/exa-search" },
-    { "name": "mcp-server-patterns", "type": "skill", "source": "skills/mcp-server-patterns" },
-    { "name": "dmux-workflows", "type": "skill", "source": "skills/dmux-workflows" },
-    { "name": "supervisor-worker", "type": "skill", "source": "skills/supervisor-worker" },
-    { "name": "quality-gate", "type": "skill", "source": "skills/quality-gate" },
-    { "name": "report-format", "type": "skill", "source": "skills/report-format" },
-    { "name": "phase-gate", "type": "skill", "source": "skills/phase-gate" },
-    { "name": "session-handoff", "type": "skill", "source": "skills/session-handoff" },
-    { "name": "ui-implementation", "type": "skill", "source": "skills/ui-implementation" },
-    { "name": "self-evolve", "type": "skill", "source": "skills/self-evolve" },
-    { "name": "debate-consensus", "type": "skill", "source": "skills/debate-consensus" },
-    { "name": "drift-detect", "type": "skill", "source": "skills/drift-detect" },
-    { "name": "model-selector", "type": "skill", "source": "skills/model-selector" },
-    { "name": "confidence-filter", "type": "skill", "source": "skills/confidence-filter" },
-    { "name": "agent-memory", "type": "skill", "source": "skills/agent-memory" },
-    { "name": "spec-driven-dev", "type": "skill", "source": "skills/spec-driven-dev" },
-    { "name": "eval-driven-dev", "type": "skill", "source": "skills/eval-driven-dev" },
-    { "name": "claude-routines", "type": "skill", "source": "skills/claude-routines" }
+    {
+      "name": "infinite-skills",
+      "type": "skill",
+      "source": "skills/infinite-skills"
+    },
+    {
+      "name": "investigate",
+      "type": "skill",
+      "source": "skills/investigate"
+    },
+    {
+      "name": "plan-product",
+      "type": "skill",
+      "source": "skills/plan-product"
+    },
+    {
+      "name": "plan-architecture",
+      "type": "skill",
+      "source": "skills/plan-architecture"
+    },
+    {
+      "name": "review",
+      "type": "skill",
+      "source": "skills/review"
+    },
+    {
+      "name": "security-review",
+      "type": "skill",
+      "source": "skills/security-review"
+    },
+    {
+      "name": "qa-browser",
+      "type": "skill",
+      "source": "skills/qa-browser"
+    },
+    {
+      "name": "ship-release",
+      "type": "skill",
+      "source": "skills/ship-release"
+    },
+    {
+      "name": "tdd-workflow",
+      "type": "skill",
+      "source": "skills/tdd-workflow"
+    },
+    {
+      "name": "guard",
+      "type": "skill",
+      "source": "skills/guard"
+    },
+    {
+      "name": "freeze",
+      "type": "skill",
+      "source": "skills/freeze"
+    },
+    {
+      "name": "careful",
+      "type": "skill",
+      "source": "skills/careful"
+    },
+    {
+      "name": "checkpoint",
+      "type": "skill",
+      "source": "skills/checkpoint"
+    },
+    {
+      "name": "verification-loop",
+      "type": "skill",
+      "source": "skills/verification-loop"
+    },
+    {
+      "name": "health-check",
+      "type": "skill",
+      "source": "skills/health-check"
+    },
+    {
+      "name": "coding-standards",
+      "type": "skill",
+      "source": "skills/coding-standards"
+    },
+    {
+      "name": "documentation-lookup",
+      "type": "skill",
+      "source": "skills/documentation-lookup"
+    },
+    {
+      "name": "api-design",
+      "type": "skill",
+      "source": "skills/api-design"
+    },
+    {
+      "name": "backend-patterns",
+      "type": "skill",
+      "source": "skills/backend-patterns"
+    },
+    {
+      "name": "frontend-patterns",
+      "type": "skill",
+      "source": "skills/frontend-patterns"
+    },
+    {
+      "name": "e2e-testing",
+      "type": "skill",
+      "source": "skills/e2e-testing"
+    },
+    {
+      "name": "deep-research",
+      "type": "skill",
+      "source": "skills/deep-research"
+    },
+    {
+      "name": "exa-search",
+      "type": "skill",
+      "source": "skills/exa-search"
+    },
+    {
+      "name": "mcp-server-patterns",
+      "type": "skill",
+      "source": "skills/mcp-server-patterns"
+    },
+    {
+      "name": "dmux-workflows",
+      "type": "skill",
+      "source": "skills/dmux-workflows"
+    },
+    {
+      "name": "supervisor-worker",
+      "type": "skill",
+      "source": "skills/supervisor-worker"
+    },
+    {
+      "name": "quality-gate",
+      "type": "skill",
+      "source": "skills/quality-gate"
+    },
+    {
+      "name": "report-format",
+      "type": "skill",
+      "source": "skills/report-format"
+    },
+    {
+      "name": "phase-gate",
+      "type": "skill",
+      "source": "skills/phase-gate"
+    },
+    {
+      "name": "session-handoff",
+      "type": "skill",
+      "source": "skills/session-handoff"
+    },
+    {
+      "name": "ui-implementation",
+      "type": "skill",
+      "source": "skills/ui-implementation"
+    },
+    {
+      "name": "self-evolve",
+      "type": "skill",
+      "source": "skills/self-evolve"
+    },
+    {
+      "name": "debate-consensus",
+      "type": "skill",
+      "source": "skills/debate-consensus"
+    },
+    {
+      "name": "drift-detect",
+      "type": "skill",
+      "source": "skills/drift-detect"
+    },
+    {
+      "name": "model-selector",
+      "type": "skill",
+      "source": "skills/model-selector"
+    },
+    {
+      "name": "confidence-filter",
+      "type": "skill",
+      "source": "skills/confidence-filter"
+    },
+    {
+      "name": "agent-memory",
+      "type": "skill",
+      "source": "skills/agent-memory"
+    },
+    {
+      "name": "spec-driven-dev",
+      "type": "skill",
+      "source": "skills/spec-driven-dev"
+    },
+    {
+      "name": "eval-driven-dev",
+      "type": "skill",
+      "source": "skills/eval-driven-dev"
+    },
+    {
+      "name": "claude-routines",
+      "type": "skill",
+      "source": "skills/claude-routines"
+    }
   ]
 }
