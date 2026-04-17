@@ -674,9 +674,12 @@ async function refresh() {
     var skills = metrics.skills || {};
     mhtml += '<div>Skills: <strong>' + (skills.registered || 0) + '</strong> registered';
     if (skills.auto_created) {
-      var recent = skills.auto_created_in_period || 0;
+      // Local name must not collide with the outer `const recent` from
+      // refresh()'s destructuring — a `var recent` in the same scope is
+      // a SyntaxError and freezes the whole dashboard at "Loading...".
+      var recentCreated = skills.auto_created_in_period || 0;
       mhtml += ' <span style="color:var(--text-dim);" title="lifetime auto-generated / within reporting window">('
-        + skills.auto_created + ' auto-created lifetime, ' + recent + ' in ' + periodLabel + ')</span>';
+        + skills.auto_created + ' auto-created lifetime, ' + recentCreated + ' in ' + periodLabel + ')</span>';
     }
     if (skills.usage_in_period) {
       mhtml += ' <span style="color:var(--green);" title="Number of routing matches (one prompt can match several skills)">'
