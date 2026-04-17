@@ -4,6 +4,168 @@ Auto-maintained by the `self-evolve` skill. Records all upstream syncs, web disc
 
 ---
 
+## 2026-04-17 (PM) — self-improvement: stability + performance + naming
+
+**Type**: self-improvement (interactive session, 34 commits)
+**Trigger**: user reported dashboard was slow and had "MLX Generate: off" despite service being up. Opened a chain of investigations that surfaced real operational pain.
+
+### Action: created — Morning Brief automation
+- **Target**: new `scripts/vcontext-morning-brief.sh` + LaunchAgent
+  `com.vcontext.morning-brief` + endpoint `GET /admin/health-report?days=N`
+- **Reasoning**: nightly aggregate was only accessible via dashboard; turning
+  it into a macOS notification at 9am gives a passive daily pulse without
+  opening the UI. Brief saved to `data/morning-briefs/YYYY-MM-DD.txt`;
+  optional Slack/Discord via `VCONTEXT_BRIEF_WEBHOOK`.
+- **Risk assessment**: low (read-only endpoint + local notification)
+
+### Action: improved — data protection (multi-layer)
+- **Target**: `scripts/vcontext-server.js`
+- **Reasoning**: user insight — "生成データは再生成できるが、元データは再取得できない." A simple snapshot-restore on DB corruption would lose every raw entry written after the snapshot. Built a layered durability chain:
+  1. Async SSD write-through with matching id (keeps RAM/SSD aligned)
+  2. Append-only JSONL log at `data/entries-wal.jsonl` (SQLite-independent)
+  3. 1-min `rawSyncTimer` catch-up (shrinks loss window from 5 min → 1 min)
+  4. `checkAndRecoverDb` salvages corrupt DB via `sqlite3 .recover` before
+     restoring snapshot, then merges unique entries back
+  5. `POST /admin/replay-wal` / `GET /admin/wal-status` endpoints
+- **Verified**: E2E recovery test saved to
+  `docs/analysis/2026-04-17-recovery-e2e-verification.md` — deliberately
+  corrupted a 1.8GB DB, recovered 39,185 entries in 32s, merged with older
+  snapshot to 45,649 unique (strict superset), final `quick_check` = ok.
+- **Risk assessment**: low (all paths non-destructive, verified)
+
+### Action: improved — performance (cascading lock-bypass)
+- **Target**: `scripts/vcontext-server.js`
+- **Recall latency**: root cause was semantic fallback acquiring `withMlxLock`
+  while the background embed loop held the lock. Added `mlxEmbedFast` (bypass
+  lock + 2s timeout + 50-entry LRU cache). Measured:
+    recall avg  3184ms → 1286ms (→ 642ms post-reboot)
+    recall max  25040ms → 3599ms (→ 2787ms)
+    store max   38145ms → 3337ms (recall's knock-on effect)
+    recent max  16226ms → 286ms (56x)
+- **Embed throughput**: same lock issue on the loop side — it was queued
+  behind failed store-time 60s timeouts. Switched to `_mlxEmbedBatchRaw`
+  (direct). Added checkMlx hysteresis + await in loop (mirror of
+  checkMlxGenerate fix). After reboot: 0/min → 45/min steady.
+- **Dashboard bandwidth**: `/recent?short=1` truncates content to 500
+  chars server-side + drops embeddings from responses. `/ai/status`
+  collapsed 6 full-table COUNT(*) into one SUM(CASE) aggregate. Total
+  payload per refresh: 3.5 MB → 225 KB (94% reduction). /ai/status
+  1199 ms → 682 ms.
+- **Risk assessment**: medium (changes hot paths); verified via before/after
+  SQL metrics and manual probes.
+
+### Action: improved — Qwen3 `/no_think` for extractive tasks
+- **Source**: A/B experiment `scripts/experiment-thinking-skip.sh`
+- **Reasoning**: Qwen3's `<think>...</think>` block burns 100-400 tokens on
+  summarization tasks where the answer is already extractive. Measured
+  15,765ms avg with thinking vs 1,472ms with `/no_think` prepended.
+  Quality equivalent (0/3 `<think>` leak, same summary content).
+- **Applied noThink: true** to: handleStore auto-summarize, /ai/summarize
+  (bulk + per-id), runOnePrediction keyword extraction. Kept thinking for
+  reasoning-heavy callers (resolve, skill creation, rule violations).
+- **Risk assessment**: low (opt-in; reasoning callers untouched)
+
+### Action: improved — Anomaly auto-response
+- **Target**: `scripts/vcontext-server.js`
+- **Reasoning**: `detectAnomalies()` stored alerts but nothing acted. Added
+  `respondToAnomalies()` with per-kind handlers:
+    embed-stall     → launchctl kickstart mlx-embed
+    ram-ahead       → force syncRamToSsd()
+    ram-disk-full   → wal_checkpoint(TRUNCATE) + migrateRamToSsd() + macOS
+                       critical notification
+    error-spike     → macOS notification only (needs diagnosis)
+  Guardrails: 5-min per-kind cooldown (`_anomalyLastAction` Map), every
+  action logged as type='anomaly-response' audit entry.
+- **Risk assessment**: low-medium (kickstart + checkpoint are safe; cooldown
+  prevents flap)
+
+### Action: improved — RAM disk 4GB → 6GB
+- **Target**: `scripts/vcontext-setup.sh` (RAM_BLOCKS = 12582912)
+- **Reasoning**: 4GB was filling to ~62% steady-state; after yesterday's
+  corruption incident (100% full → DB malformed), giving more headroom
+  between normal use and the 95% watchdog cleanup threshold. Applied on
+  mac reboot — current state 5.8 GB at 35% used.
+- **Risk assessment**: low (config change, applies on next boot)
+
+### Action: improved — checkMlxGenerate / checkMlx hysteresis
+- **Target**: `scripts/vcontext-server.js`
+- **Reasoning**: Both probe functions had `catch { flag = false }` with no
+  logging and no hysteresis. One transient failure flipped the flag for
+  the rest of the 5-min cycle. During MLX restart windows this silently
+  disabled discovery, predict, and auto-summarize.
+- **Fix**: 3-consecutive-failure streak before flipping to false + log on
+  first failure + log only on false→true transitions. Embed-loop now
+  awaits `checkMlx()` so the flag reflects the latest probe before deciding
+  to skip.
+- **Risk assessment**: low (loosened, not tightened, so at worst stays
+  "available" slightly longer during real outages — harmless)
+
+### Action: refactor — super-skills → infinite-skills
+- **Target**: full repo + 5 deploy targets (claude/codex/cursor/kiro/antigravity)
+- **Reasoning**: user requested renaming for clearer semantics. Auto-router
+  was supposed to have been unified into super-skills earlier but residue
+  remained (skill-registry DB entry, manifests, 2 server.js fallbacks).
+  Combined cleanup + rename.
+- **Changes**:
+  - `skills/super-skills/` → `skills/infinite-skills/` (including internal
+    `name:` field)
+  - `plugins/claude/hooks/super-skills.hooks.json` → `infinite-skills.hooks.json`
+  - Scheduled task `super-skills-evolve` → `infinite-skills-evolve`
+  - 10 source files updated (build-*, vcontext-*, install-lib,
+    validate-configs, skills/README.md, self-evolve/SKILL.md, plugin docs)
+  - 32 DB `skill-trigger` rows rewritten (auto-router → super-skills → infinite-skills)
+  - `~/.claude/CLAUDE.md` routing reference updated
+  - `~/.codex/AGENTS.md` routing reference updated
+  - Hand-deployed to ~/.cursor/rules/skills/, ~/.kiro/skills/,
+    ~/.antigravity/skills/ (earlier install-apply had no manifest entry
+    for infinite-skills; added it so future installs carry it automatically)
+- **Preserved**: `scripts/sync-upstream.sh` references to
+  `takurot/super-skills` (external GitHub repo name, not skill name)
+- **Risk assessment**: low — mechanical rename, all 5 targets verified
+
+### Bug fixes (captured in commit log)
+- `truncated is not defined` in /session/:id — variable orphaned after
+  pagination refactor
+- `malformed JSON` flood on /analytics/skill-effectiveness — SQLite pushes
+  json_each above type filter in every plan shape tried (CTE/MATERIALIZED/
+  subquery); switched to pure-JS aggregation
+- watchdog pgrep mis-identified MLX generate (looked for wrapper name;
+  wrapper execs `python3 -m mlx_lm.server` so pattern never matched) →
+  perpetual restart loop every 60s. Fixed pattern to match actual cmdline.
+- watchdog singleton guard added via /tmp/vcontext-watchdog.pid
+- MLX memory threshold 8GB → 14GB (was catching steady-state, flap-killing
+  the server indirectly)
+- Dashboard `var recent = ...` shadowed outer `const recent` →
+  parse-time SyntaxError froze the page at "Loading...". Renamed to
+  `recentCreated`. Added `Cache-Control: no-cache` so future fixes reach
+  browsers without a manual hard refresh.
+- `/ai/status` 1.2s → 682ms via single-scan aggregate
+- MLX embed server `/embed_batch` deadlock detected — watchdog /health
+  probe is too shallow to catch it (known gap; kill+launchd restart
+  clears it, deferred fixing the watchdog probe)
+
+### Observability / hygiene
+- Dashboard "Data Protection" card (JSONL WAL status + defense-in-depth
+  explainer)
+- Dashboard Metrics card labels disambiguated lifetime vs period values
+  (skills: lifetime total + in-period; tokens: Prior pre-Nh / New in Nh /
+  Total lifetime; store-latency: Xms/write · Nh)
+- `entry_index` orphan cleanup: purged 28,538 stale rows + incremental
+  sweep added to 5-min tick
+
+### Files touched this session
+34 commits on `main`. Summary: 1 new skill (morning-brief), 1 skill rename
+(super-skills → infinite-skills), 1 experiment script, 1 analysis doc,
+1 LaunchAgent plist, substantial edits to vcontext-server.js /
+vcontext-watchdog.sh / vcontext-dashboard.html, manifest updates for
+install-apply.mjs.
+
+### Rollback
+Any individual commit revertible via git. Data safe by design (async
+write-through + JSONL log + multiple snapshots).
+
+---
+
 ## 2026-04-17 — web-discovery + upstream-sync
 
 **Search window**: 2026-04-16 → 2026-04-17
