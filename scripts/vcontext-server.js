@@ -711,13 +711,34 @@ function doBackup() {
   try {
     mkdirSync(BACKUP_DIR, { recursive: true });
     if (existsSync(DB_PATH) && ramDb) {
-      // better-sqlite3 backup() returns a Promise; fire-and-forget with error logging
-      ramDb.backup(BACKUP_PATH)
-        .then(() => console.log(`[vcontext] Backup complete: ${BACKUP_PATH}`))
+      // Atomic write pattern: backup() writes to a .tmp path, rename on
+      // success.  Prior logic wrote directly to BACKUP_PATH — if the
+      // process died mid-write (today's power outage), the file was
+      // truncated to 0 bytes and setup.sh's restore_backup silently
+      // accepted it, leaving the RAM DB without an entries table.
+      // rename(2) on macOS APFS is atomic on same filesystem.
+      const tmpPath = BACKUP_PATH + '.tmp';
+      ramDb.backup(tmpPath)
+        .then(() => {
+          try {
+            const fsMod = require('node:fs');
+            // Keep previous as .bak for one-shot manual recovery
+            if (existsSync(BACKUP_PATH)) {
+              try { fsMod.renameSync(BACKUP_PATH, BACKUP_PATH + '.bak'); } catch {}
+            }
+            fsMod.renameSync(tmpPath, BACKUP_PATH);
+            console.log(`[vcontext] Backup complete: ${BACKUP_PATH}`);
+          } catch (e) {
+            console.error('[vcontext] Backup rename failed:', e.message);
+          }
+        })
         .catch((err) => {
           console.error('[vcontext] Async backup failed:', err.message);
+          try { require('node:fs').unlinkSync(tmpPath); } catch {}
+          // Direct file copy fallback — still use the tmp+rename pattern
           try {
-            copyFileSync(DB_PATH, BACKUP_PATH);
+            copyFileSync(DB_PATH, tmpPath);
+            require('node:fs').renameSync(tmpPath, BACKUP_PATH);
             console.log('[vcontext] Backup (file copy fallback) complete');
           } catch (e2) {
             console.error('[vcontext] Fallback backup also failed:', e2.message);
