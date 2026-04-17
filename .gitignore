@@ -41,6 +41,7 @@ data/experiments/
 # Atomic-write backup staging + rotated previous (multi-GB, never commit)
 data/vcontext-backup.sqlite
 data/vcontext-backup.sqlite.tmp
+data/vcontext-backup.sqlite.tmp-journal
 data/vcontext-backup.sqlite.bak
 data/vcontext-backup.sqlite-wal
 data/vcontext-backup.sqlite-shm
