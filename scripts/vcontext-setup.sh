@@ -74,21 +74,56 @@ SQL
 }
 
 # ── Restore from backup if available ───────────────────────────
+# Picks the best source in order:
+#   1. vcontext-backup.sqlite  (5-min backup cadence)
+#   2. latest data/snapshots/*.db (pre-outage / daily)
+#   3. vcontext-ssd.db  (long-term archive)
+#   4. fresh init
+# Validates size > 100KB AND integrity_check=ok AND entries-table-exists
+# so a 0-byte or truncated backup doesn't get silently accepted
+# (observed 2026-04-17: power outage mid-backup left 0-byte file,
+#  restore "succeeded" into an empty DB).
 restore_backup() {
-  if [ -f "${BACKUP_PATH}" ]; then
-    log "Restoring from backup: ${BACKUP_PATH}"
-    cp "${BACKUP_PATH}" "${DB_PATH}"
-    # Verify integrity
-    if sqlite3 "${DB_PATH}" "PRAGMA integrity_check;" | grep -q "ok"; then
-      log "Backup restored and verified"
-    else
-      warn "Backup integrity check failed, reinitializing"
-      rm -f "${DB_PATH}"
-      init_db
-    fi
-  else
-    init_db
+  local snap_dir="${BACKUP_DIR}/snapshots"
+  local ssd_db="${BACKUP_DIR}/vcontext-ssd.db"
+  local candidates=()
+
+  # Priority 1: regular backup (if valid)
+  [ -f "${BACKUP_PATH}" ] && candidates+=("${BACKUP_PATH}")
+  # Priority 2: latest snapshots (newest first)
+  if [ -d "$snap_dir" ]; then
+    while IFS= read -r s; do candidates+=("$s"); done < <(ls -t "$snap_dir"/vcontext-*.db 2>/dev/null)
   fi
+  # Priority 3: SSD DB
+  [ -f "$ssd_db" ] && candidates+=("$ssd_db")
+
+  for src in "${candidates[@]}"; do
+    local size_bytes
+    size_bytes=$(stat -f%z "$src" 2>/dev/null || echo 0)
+    # Reject < 100 KB (empty / truncated)
+    if [ "$size_bytes" -lt 102400 ]; then
+      warn "Skip (too small ${size_bytes}B): $(basename "$src")"
+      continue
+    fi
+    # Integrity check
+    if ! sqlite3 "$src" "PRAGMA quick_check;" 2>/dev/null | grep -q "^ok$"; then
+      warn "Skip (integrity fail): $(basename "$src")"
+      continue
+    fi
+    # Must have entries table with rows
+    local row_count
+    row_count=$(sqlite3 "$src" "SELECT COUNT(*) FROM entries;" 2>/dev/null || echo 0)
+    if [ "${row_count:-0}" -lt 10 ]; then
+      warn "Skip (< 10 entries): $(basename "$src")"
+      continue
+    fi
+    log "Restoring from: $(basename "$src") (${size_bytes} B, ${row_count} entries)"
+    cp "$src" "${DB_PATH}"
+    return 0
+  done
+
+  warn "No valid backup found among ${#candidates[@]} candidates — initializing fresh DB"
+  init_db
 }
 
 # ── Start: create RAM disk and init DB ─────────────────────────
