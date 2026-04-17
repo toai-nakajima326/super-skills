@@ -130,7 +130,7 @@
       <button class="btn" style="font-size:11px;padding:3px 8px;" onclick="confirmAction('Migrate', 'RAM→SSD→Cloudに移動', '/tier/migrate', 'POST')">Migrate</button>
       <button class="btn" style="font-size:11px;padding:3px 8px;" onclick="confirmAction('Refresh', 'ダッシュボード更新', '_refresh', '')">Refresh</button>
       <button class="btn" style="font-size:11px;padding:3px 8px;background:#d38a00;color:#fff;border-color:#d38a00;" onclick="confirmAction('Restart AIOS', 'サーバーを再起動します (≈5秒のダウンタイム、LaunchAgent 有効のまま)', '/admin/restart-aios', 'ADMIN')">Restart AIOS</button>
-      <button class="btn" style="font-size:11px;padding:3px 8px;background:#b42c2c;color:#fff;border-color:#b42c2c;" onclick="confirmAction('Stop AIOS', '⚠️ launchctl bootout → サーバー完全停止。復旧するまでメモリ記録は止まります。復旧には別途ターミナルが必要。', '/admin/stop-aios', 'ADMIN-CONFIRM')">Stop AIOS</button>
+      <button class="btn" style="font-size:11px;padding:3px 8px;background:#b42c2c;color:#fff;border-color:#b42c2c;" onclick="confirmStopAios()">Stop AIOS</button>
     </div>
     <div id="action-confirm" style="display:none;margin-top:6px;padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg-bar);font-size:11px;">
       <div id="action-confirm-title" style="font-weight:bold;margin-bottom:2px;"></div>
@@ -241,6 +241,35 @@ async function doSearch(mode) {
       }).join('');
   } catch(e) {
     el.innerHTML = '<div style="color:var(--red);">Error: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+// Stop AIOS — 2-step confirmation to prevent accidental clicks.
+// Observed 2026-04-18: a single click likely stopped AIOS overnight
+// (no one intentionally stopped it but post-mortem showed
+// launchctl bootout was issued). Requires typing "STOP" to proceed.
+function confirmStopAios() {
+  var overlay = document.getElementById('stop-aios-modal');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'stop-aios-modal';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9998;display:flex;align-items:center;justify-content:center;';
+    overlay.innerHTML =
+      '<div style="background:var(--bg);border:2px solid #b42c2c;border-radius:8px;padding:20px;max-width:460px;font-size:13px;">' +
+        '<div style="color:#b42c2c;font-size:16px;font-weight:bold;margin-bottom:8px;">⏹ Stop AIOS — 本当に?</div>' +
+        '<div style="color:var(--text);margin-bottom:10px;line-height:1.5;">' +
+          'サーバーが完全停止します。復旧するまでメモリ記録は止まり、hook も機能しません。<br>' +
+          'Watchdog による自動再起動も無効化されます (明示的に再有効化するまで停止持続)。' +
+        '</div>' +
+        '<div style="color:var(--text-muted);font-size:12px;margin-bottom:4px;">誤クリック防止のため、<code style="padding:2px 6px;background:var(--bg-bar);border-radius:3px;">STOP</code> と入力してください:</div>' +
+        '<input id="stop-aios-confirm-input" type="text" autocomplete="off" style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:13px;font-family:monospace;margin-bottom:12px;" onkeyup="document.getElementById(\'stop-aios-confirm-btn\').disabled = this.value !== \'STOP\';">' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end;">' +
+          '<button class="btn" onclick="document.getElementById(\'stop-aios-modal\').remove()">Cancel</button>' +
+          '<button class="btn" id="stop-aios-confirm-btn" disabled style="background:#b42c2c;color:#fff;border-color:#b42c2c;" onclick="document.getElementById(\'stop-aios-modal\').remove(); doAction(\'/admin/stop-aios\', \'ADMIN-CONFIRM\');">Stop AIOS</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    setTimeout(function() { document.getElementById('stop-aios-confirm-input').focus(); }, 50);
   }
 }
 

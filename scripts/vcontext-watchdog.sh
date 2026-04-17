@@ -128,6 +128,32 @@ while true; do
     fi
   fi
 
+  # Self-heal: ensure launchd is managing com.vcontext.server.
+  # Seen 2026-04-18: after a previous session's /admin/stop-aios call
+  # (which used `launchctl bootout`), the service was missing from the
+  # launchctl service graph after reboot despite the plist being valid.
+  # Without this block, the server stayed down until the user manually
+  # ran `launchctl bootstrap`.
+  # Honors `launchctl disable` state — if the user explicitly disabled
+  # via the new stop-aios flow, we do NOT re-enable (respecting intent).
+  UID_NUM=$(id -u)
+  SVC="gui/${UID_NUM}/com.vcontext.server"
+  PLIST="$HOME/Library/LaunchAgents/com.vcontext.server.plist"
+  if [[ -f "$PLIST" ]]; then
+    if ! launchctl print "$SVC" >/dev/null 2>&1; then
+      if launchctl print-disabled "gui/${UID_NUM}" 2>/dev/null | grep -q '"com.vcontext.server" => \(true\|disabled\)'; then
+        log "com.vcontext.server is disabled by user — not auto-bootstrapping"
+      else
+        log "com.vcontext.server missing from launchd graph — bootstrapping from $PLIST"
+        if launchctl bootstrap "gui/${UID_NUM}" "$PLIST" 2>/dev/null; then
+          log "bootstrap OK"
+        else
+          log "bootstrap failed (retry next cycle)"
+        fi
+      fi
+    fi
+  fi
+
   # RAM disk capacity check — every cycle (critical: DB corruption risk if full)
   RAM_USED_PCT=$(df /Volumes/VContext 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%')
   if [[ -n "$RAM_USED_PCT" ]]; then

@@ -5812,10 +5812,16 @@ const server = createServer(async (req, res) => {
         setTimeout(() => { try { process.kill(wrapperPid, 'SIGHUP'); } catch (e) { console.error('[admin/restart-aios]', e.message); } }, 100);
       } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'POST' && path === '/admin/stop-aios') {
-      // Hard stop — tells launchd to unload the agent (so it does NOT
-      // auto-respawn), then exits.  User restarts later via
-      //   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.vcontext.server.plist
-      // or re-running ~/skills/scripts/vcontext-setup.sh.
+      // Hard stop — disables the launchd agent persistently, then exits.
+      // Uses `launchctl disable` instead of `bootout` for two reasons:
+      //   1. `disable` writes persistent state (survives reboot) with clear
+      //      semantics "user explicitly stopped this".
+      //   2. `bootout` has observed cross-reboot edge cases where the
+      //      service failed to reload on next boot (seen 2026-04-18:
+      //      `launchctl list` missing com.vcontext.server after bootout+
+      //      reboot even though plist was valid).
+      // The watchdog self-heal (vcontext-watchdog.sh) honors `disable`
+      // state — it will NOT auto-restart us until the user re-enables.
       if (req.headers['x-vcontext-admin'] !== 'yes') {
         return sendJson(res, 403, { error: 'X-Vcontext-Admin: yes header required' });
       }
@@ -5827,20 +5833,26 @@ const server = createServer(async (req, res) => {
       }
       try {
         const uid = process.getuid();
-        const plist = process.env.HOME + '/Library/LaunchAgents/com.vcontext.server.plist';
+        const svc = `gui/${uid}/com.vcontext.server`;
+        const restartCmd = `launchctl enable ${svc} && launchctl kickstart ${svc}`;
         sendJson(res, 200, {
           stopped: true,
-          restart_cmd: `launchctl bootstrap gui/${uid} ${plist}`,
-          note: 'Run the restart_cmd in a terminal to bring vcontext back up.',
+          restart_cmd: restartCmd,
+          note: 'Run the restart_cmd in a terminal to bring vcontext back up. The watchdog will not auto-restart while disabled.',
         });
         // Deferred shutdown so the response reaches the client.
         setTimeout(() => {
           try {
-            // bootout disables KeepAlive (prevents respawn); errors are
-            // non-fatal — we exit either way.
-            execSync(`launchctl bootout gui/${uid}/com.vcontext.server`, { stdio: 'ignore', timeout: 5000 });
+            // Step 1: persistent disable — watchdog and next boot both respect this.
+            execSync(`launchctl disable ${svc}`, { stdio: 'ignore', timeout: 5000 });
+          } catch (e) { console.error('[admin/stop-aios] disable failed:', e.message); }
+          try {
+            // Step 2: kill the current process group so wrapper + server both die.
+            // KeepAlive=true on the agent would re-spawn, but disable above
+            // overrides that. Use kickstart-kill to target the launchd service.
+            execSync(`launchctl kill SIGKILL ${svc}`, { stdio: 'ignore', timeout: 5000 });
           } catch {}
-          console.log('[admin/stop-aios] launchctl bootout issued; exiting process.');
+          console.log('[admin/stop-aios] launchctl disable + kill issued; exiting process.');
           process.exit(0);
         }, 300);
       } catch (e) { sendJson(res, 500, { error: e.message }); }
