@@ -151,7 +151,11 @@ while true; do
   # completion with 15s timeout. This is how the 2026-04-14 halt went
   # undetected for a day: /health was up but generation was dead.
   if [[ $((SEARXNG_CHECK_COUNTER % 1)) -eq 0 ]]; then
-    GEN_PID=$(pgrep -f "mlx-generate-server" | head -1)
+    # Process identity: mlx-generate-wrapper.sh execs `python3 -m mlx_lm.server`,
+    # so the running command line contains mlx_lm.server (NOT mlx-generate-server).
+    # Using the wrong pattern caused a perpetual restart loop — watchdog killed
+    # the process every minute thinking it was down.  Match on the actual binary.
+    GEN_PID=$(pgrep -f "mlx_lm.server --model" | head -1)
     NEED_RESTART=false
     REASON=""
 
