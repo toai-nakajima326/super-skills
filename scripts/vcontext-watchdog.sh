@@ -103,6 +103,23 @@ while true; do
     fi
   fi
 
+  # RAM disk capacity check — every cycle (critical: DB corruption risk if full)
+  RAM_USED_PCT=$(df /Volumes/VContext 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%')
+  if [[ -n "$RAM_USED_PCT" ]]; then
+    if [[ "$RAM_USED_PCT" -ge 95 ]]; then
+      log "RAM DISK CRITICAL: ${RAM_USED_PCT}% used — emergency cleanup"
+      # Remove any corrupt DB backups
+      rm -f /Volumes/VContext/vcontext-corrupt-*.db 2>/dev/null
+      # Force WAL checkpoint to flush and shrink
+      sqlite3 /Volumes/VContext/vcontext.db "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null
+      osascript -e "display notification \"RAM disk ${RAM_USED_PCT}% — emergency cleanup\" with title \"🚨 vcontext CRITICAL\"" 2>/dev/null
+    elif [[ "$RAM_USED_PCT" -ge 85 ]]; then
+      log "RAM DISK WARN: ${RAM_USED_PCT}% used"
+      sqlite3 /Volumes/VContext/vcontext.db "PRAGMA wal_checkpoint(PASSIVE);" 2>/dev/null
+      osascript -e "display notification \"RAM disk ${RAM_USED_PCT}% — watch closely\" with title \"⚠️ vcontext\"" 2>/dev/null
+    fi
+  fi
+
   # Check SearXNG every 5 minutes (every 5th iteration)
   SEARXNG_CHECK_COUNTER=$((SEARXNG_CHECK_COUNTER + 1))
   if [[ $((SEARXNG_CHECK_COUNTER % 1)) -eq 0 ]]; then

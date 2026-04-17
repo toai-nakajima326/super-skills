@@ -134,14 +134,129 @@ function getAccessibleGroups(auth) {
 const Database = require('better-sqlite3');
 let ramDb, ssdDb;
 
+function checkAndRecoverDb(dbPath, isRam) {
+  // Integrity check; if corrupt:
+  //   1. SALVAGE raw entries from corrupt DB via `sqlite3 .recover`
+  //      (generated data like embeddings can be regenerated, but raw
+  //      user prompts / tool calls / messages cannot — preserve at all cost)
+  //   2. Restore base from latest snapshot
+  //   3. MERGE salvaged entries back (INSERT OR IGNORE by id)
+  try {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const r = db.prepare('PRAGMA integrity_check').get();
+      if (r.integrity_check !== 'ok') throw new Error(`integrity: ${r.integrity_check}`);
+      return true; // OK
+    } finally { db.close(); }
+  } catch (e) {
+    console.error(`[db-recovery] ${dbPath} corrupt: ${e.message}`);
+    if (!isRam) return false; // Only auto-restore RAM DB (SSD is source of truth)
+
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const { execSync } = require('child_process');
+
+    try {
+      // ── STEP 1: Salvage raw entries from corrupt DB ──────────────
+      // Use sqlite3 CLI .recover (designed for partial corruption recovery).
+      // Write salvage file to /tmp (SSD) so it survives RAM disk cleanup.
+      const salvageFile = `/tmp/vcontext-salvage-${Date.now()}.db`;
+      let salvagedCount = 0;
+      try {
+        console.log(`[db-recovery] Attempting .recover from corrupt DB...`);
+        execSync(`sqlite3 "${dbPath}" ".recover" | sqlite3 "${salvageFile}"`, {
+          timeout: 120000,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          shell: '/bin/bash'
+        });
+        if (fs.existsSync(salvageFile)) {
+          try {
+            const sdb = new Database(salvageFile, { readonly: true });
+            try {
+              const row = sdb.prepare('SELECT COUNT(*) as c FROM entries').get();
+              salvagedCount = row.c;
+              console.log(`[db-recovery] Salvaged ${salvagedCount} raw entries from corrupt DB`);
+            } finally { sdb.close(); }
+          } catch (eCount) {
+            console.log(`[db-recovery] Salvage unreadable: ${eCount.message?.slice(0, 80)}`);
+          }
+        }
+      } catch (eRec) {
+        console.log(`[db-recovery] .recover failed (continuing w/o salvage): ${eRec.message?.slice(0, 80)}`);
+      }
+
+      // ── STEP 2: Locate latest snapshot ──────────────────────────
+      const SNAP_DIR = path.join(process.env.HOME, 'skills', 'data', 'snapshots');
+      if (!fs.existsSync(SNAP_DIR)) return false;
+      const files = fs.readdirSync(SNAP_DIR)
+        .filter(f => f.endsWith('.db'))
+        .map(f => ({ name: f, mtime: fs.statSync(path.join(SNAP_DIR, f)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime);
+      if (files.length === 0) return false;
+      const latest = path.join(SNAP_DIR, files[0].name);
+
+      // ── STEP 3: Move corrupt DB aside (for forensics if space allows) ─
+      try {
+        const stat = fs.statSync(dbPath);
+        const avail = execSync(`df -k "${path.dirname(dbPath)}" | tail -1 | awk '{print $4}'`).toString().trim();
+        if (parseInt(avail) * 1024 > stat.size * 1.5) {
+          fs.renameSync(dbPath, dbPath + '.corrupt.' + Date.now());
+        } else {
+          fs.unlinkSync(dbPath);
+        }
+      } catch { try { fs.unlinkSync(dbPath); } catch {} }
+
+      // ── STEP 4: Restore from snapshot ───────────────────────────
+      fs.copyFileSync(latest, dbPath);
+      console.log(`[db-recovery] Restored snapshot: ${files[0].name}`);
+
+      // ── STEP 5: Merge salvaged raw entries (preserve post-snapshot data) ─
+      if (salvagedCount > 0 && fs.existsSync(salvageFile)) {
+        try {
+          const tgtDb = new Database(dbPath);
+          try {
+            tgtDb.pragma('journal_mode = WAL');
+            tgtDb.pragma('busy_timeout = 5000');
+            // Intersect columns (schema may have drifted between snapshot and salvage)
+            const tgtCols = tgtDb.prepare("PRAGMA table_info(entries)").all().map(c => c.name);
+            tgtDb.prepare(`ATTACH DATABASE ? AS salvage`).run(salvageFile);
+            const srcCols = tgtDb.prepare("PRAGMA salvage.table_info(entries)").all().map(c => c.name);
+            const common = tgtCols.filter(c => srcCols.includes(c));
+            if (common.length > 0 && common.includes('id')) {
+              const colList = common.map(c => `"${c}"`).join(',');
+              const before = tgtDb.prepare('SELECT COUNT(*) as c FROM entries').get().c;
+              tgtDb.exec(`INSERT OR IGNORE INTO main.entries (${colList}) SELECT ${colList} FROM salvage.entries`);
+              const after = tgtDb.prepare('SELECT COUNT(*) as c FROM entries').get().c;
+              const merged = after - before;
+              console.log(`[db-recovery] Merged ${merged} unique raw entries (salvaged=${salvagedCount}, snapshot=${before}, final=${after})`);
+            }
+            try { tgtDb.exec('DETACH DATABASE salvage'); } catch {}
+          } finally { tgtDb.close(); }
+        } catch (eMerge) {
+          console.error(`[db-recovery] Merge failed (snapshot still restored): ${eMerge.message?.slice(0, 100)}`);
+        }
+        try { fs.unlinkSync(salvageFile); } catch {}
+      }
+
+      return true;
+    } catch (e2) {
+      console.error(`[db-recovery] Restore FAILED: ${e2.message}`);
+      return false;
+    }
+  }
+}
+
 function openDatabases() {
+  // Integrity check + auto-recovery before opening
+  checkAndRecoverDb(DB_PATH, true);
+
   ramDb = new Database(DB_PATH);
   ramDb.pragma('journal_mode = WAL');
   ramDb.pragma('busy_timeout = 5000');
   ramDb.pragma('cache_size = -64000');     // 64MB (default 2000 pages = 8MB)
   ramDb.pragma('mmap_size = 268435456');   // 256MB mmap — RAM disk so basically free
   ramDb.pragma('temp_store = MEMORY');     // temp tables in memory, not file
-  ramDb.pragma('wal_autocheckpoint = 2000'); // checkpoint every 2000 pages (8MB)
+  ramDb.pragma('wal_autocheckpoint = 500'); // checkpoint every 500 pages (2MB) — minimize loss
 
   if (existsSync(SSD_DB_PATH)) {
     ssdDb = new Database(SSD_DB_PATH);
@@ -150,6 +265,7 @@ function openDatabases() {
     ssdDb.pragma('cache_size = -32000');    // 32MB for SSD
     ssdDb.pragma('mmap_size = 134217728');  // 128MB mmap
     ssdDb.pragma('temp_store = MEMORY');
+    ssdDb.pragma('wal_autocheckpoint = 500');
   }
 }
 
@@ -5501,10 +5617,18 @@ try { initVecDb(); if (vecDb) vecSync(); } catch (e) { console.error('[startup] 
 // Periodic backup + migration check (replaces plain backup timer)
 const backupTimer = setInterval(doBackupAndMigrate, BACKUP_INTERVAL_MS);
 
+// Fast entries-only sync (raw data is irreplaceable — minimize loss window from 5min→1min)
+// This ONLY runs the cheap entries-gap sync, not the full backup/migrate/embedding cycle.
+const RAW_SYNC_INTERVAL_MS = 60 * 1000; // 1 minute
+const rawSyncTimer = setInterval(() => {
+  try { syncRamToSsd(); } catch (e) { console.error('[vcontext:raw-sync]', e.message?.slice(0, 80)); }
+}, RAW_SYNC_INTERVAL_MS);
+
 // Graceful shutdown
 function shutdown(signal) {
   console.log(`\n[vcontext] Received ${signal}, shutting down...`);
   clearInterval(backupTimer);
+  clearInterval(rawSyncTimer);
   // Close all WebSocket connections
   for (const [id, client] of wsClients) {
     try { client.socket.destroy(); } catch {}
