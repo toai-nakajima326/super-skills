@@ -3874,17 +3874,36 @@ const coremlEmbed = mlxEmbed;
 const MLX_GENERATE_URL = process.env.MLX_GENERATE_URL || 'http://127.0.0.1:3162';
 const MLX_GENERATE_MODEL = process.env.MLX_GENERATE_MODEL || 'mlx-community/Qwen3-8B-4bit';
 let mlxGenerateAvailable = false;
+let _mlxGenFailStreak = 0;  // hysteresis: only flip to false after N consecutive failures
 
 async function checkMlxGenerate() {
   try {
     const data = await httpGet(`${MLX_GENERATE_URL}/v1/models`);
     const parsed = typeof data === 'string' ? JSON.parse(data) : data;
-    mlxGenerateAvailable = parsed && parsed.data && parsed.data.length > 0;
-    if (mlxGenerateAvailable) {
-      console.log(`[mlx-generate] Available: ${MLX_GENERATE_MODEL}`);
+    const ok = parsed && parsed.data && parsed.data.length > 0;
+    if (ok) {
+      if (!mlxGenerateAvailable) console.log(`[mlx-generate] Available: ${MLX_GENERATE_MODEL}`);
+      mlxGenerateAvailable = true;
+      _mlxGenFailStreak = 0;
+    } else {
+      _mlxGenFailStreak++;
+      if (_mlxGenFailStreak >= 3) {
+        if (mlxGenerateAvailable) console.log(`[mlx-generate] Unavailable: empty model list (streak=${_mlxGenFailStreak})`);
+        mlxGenerateAvailable = false;
+      }
     }
-  } catch {
-    mlxGenerateAvailable = false;
+  } catch (e) {
+    _mlxGenFailStreak++;
+    // Log the first failure and every flip — previously a silent catch{} hid
+    // transient 30s MLX restart windows from observability.
+    if (_mlxGenFailStreak === 1 || _mlxGenFailStreak >= 3) {
+      console.log(`[mlx-generate] Probe failed (streak=${_mlxGenFailStreak}): ${e.message?.slice(0, 80)}`);
+    }
+    // Only flip to false after 3 consecutive failures — absorbs transient
+    // restart blips (seen during the watchdog pgrep bug).
+    if (_mlxGenFailStreak >= 3) {
+      mlxGenerateAvailable = false;
+    }
   }
 }
 
