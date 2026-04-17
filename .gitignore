@@ -21,6 +21,10 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 
+# Append-only entries log (contains raw user data — never commit)
+data/entries-wal.jsonl
+data/entries-wal.jsonl.*
+
 # Python cache
 scripts/__pycache__/
 

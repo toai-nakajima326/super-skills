@@ -46,6 +46,8 @@ const DB_PATH = join(MOUNT_POINT, 'vcontext.db');
 const BACKUP_DIR = join(process.env.HOME, 'skills', 'data');
 const BACKUP_PATH = join(BACKUP_DIR, 'vcontext-backup.sqlite');
 const SSD_DB_PATH = join(BACKUP_DIR, 'vcontext-ssd.db');
+const ENTRIES_WAL_PATH = join(BACKUP_DIR, 'entries-wal.jsonl'); // SQLite-independent append-only log
+const ENTRIES_WAL_MAX_BYTES = 500 * 1024 * 1024; // 500MB, then rotate
 const CLOUD_CONFIG_PATH = join(BACKUP_DIR, 'vcontext-cloud.json');
 const SCRIPT_DIR = new URL('.', import.meta.url).pathname;
 const BACKUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -144,8 +146,13 @@ function checkAndRecoverDb(dbPath, isRam) {
   try {
     const db = new Database(dbPath, { readonly: true });
     try {
-      const r = db.prepare('PRAGMA integrity_check').get();
-      if (r.integrity_check !== 'ok') throw new Error(`integrity: ${r.integrity_check}`);
+      // quick_check is 10-100x faster than integrity_check and catches
+      // the same corruption classes we care about (malformed pages, bad
+      // indexes). integrity_check also cross-verifies foreign keys which
+      // is overkill at every startup on a GB-scale DB.
+      const r = db.prepare('PRAGMA quick_check').get();
+      const result = r.quick_check || r.integrity_check;
+      if (result !== 'ok') throw new Error(`integrity: ${result}`);
       return true; // OK
     } finally { db.close(); }
   } catch (e) {
@@ -1112,14 +1119,29 @@ async function handleStore(req, res) {
   // Index this entry
   insertIndex(entry.id, type, session, content, tokenEst, 0);
 
-  // Write-through: immediately sync to SSD for crash safety
-  try {
-    const ssdSql = `INSERT OR REPLACE INTO entries (type, content, tags, session, token_estimate, created_at, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status) VALUES (${esc(type)}, ${esc(content)}, ${esc(tagsJson)}, ${esc(session || null)}, ${tokenEst}, ${esc(entry.created_at || now)}, ${esc(entry.created_at || now)}, 0, 'ssd', ${esc(reasoning)}, ${esc(conditions)}, ${supersedes === null ? 'NULL' : supersedes}, ${esc(confidence)}, ${esc(status)});`;
-    dbExec(ssdSql, SSD_DB_PATH);
-  } catch (e) {
-    // SSD write failure is non-fatal, log but don't block
-    console.error('[write-through] SSD sync failed:', e.message);
-  }
+  // ASYNC write-through — don't block the HTTP response on SSD I/O.
+  // Two independent durability layers:
+  //   (a) SSD SQLite DB (INSERT OR IGNORE with matching id — keeps RAM/SSD ids aligned)
+  //   (b) Append-only JSONL log on SSD (SQLite-independent — survives DB corruption)
+  // Both are fire-and-forget; the 1-min rawSyncTimer is the catch-up safety net.
+  setImmediate(() => {
+    // (a) SSD DB write-through, preserving id for alignment with RAM
+    try {
+      const ssdSql = `INSERT OR IGNORE INTO entries (id, type, content, tags, session, created_at, token_estimate, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status, content_hash) VALUES (${entry.id}, ${esc(type)}, ${esc(content)}, ${esc(tagsJson)}, ${esc(session || null)}, ${esc(entry.created_at || now)}, ${tokenEst}, ${esc(entry.created_at || now)}, 0, 'ssd', ${esc(reasoning)}, ${esc(conditions)}, ${supersedes === null ? 'NULL' : supersedes}, ${esc(confidence)}, ${esc(status)}, ${hashSql});`;
+      dbExec(ssdSql, SSD_DB_PATH);
+    } catch (e) {
+      console.error('[write-through] SSD sync failed:', e.message?.slice(0, 80));
+    }
+    // (b) JSONL append — raw, format-agnostic durable log
+    try {
+      const line = JSON.stringify({
+        id: entry.id, type, content, tags: tagList, session: session || null,
+        created_at: entry.created_at || now, content_hash: contentHash,
+        reasoning, conditions, supersedes, confidence, status
+      }) + '\n';
+      require('node:fs').appendFile(ENTRIES_WAL_PATH, line, () => {}); // async, ignore errors
+    } catch {}
+  });
 
   // Auto-summarize with MLX generate (24/7)
   if (mlxGenerateAvailable && content.length > 200) {
@@ -5180,6 +5202,51 @@ const server = createServer(async (req, res) => {
         dbExec(`UPDATE entries SET content = ${esc(JSON.stringify({...data, status: 'rejected', rejected_at: new Date().toISOString()}))} WHERE id = ${patchId};`);
         sendJson(res, 200, { rejected: true, patchId });
       } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'POST' && path === '/admin/replay-wal') {
+      // Replay entries-wal.jsonl back into entries table (INSERT OR IGNORE).
+      // Use after catastrophic DB loss if both RAM and SSD SQLite are gone
+      // but the JSONL log survived. Non-destructive — duplicates are skipped.
+      try {
+        const fs = require('node:fs');
+        if (!fs.existsSync(ENTRIES_WAL_PATH)) {
+          return sendJson(res, 404, { error: 'no WAL file' });
+        }
+        const lines = fs.readFileSync(ENTRIES_WAL_PATH, 'utf8').split('\n').filter(Boolean);
+        let inserted = 0, skipped = 0, failed = 0;
+        for (const line of lines) {
+          try {
+            const e = JSON.parse(line);
+            const tagsJson = JSON.stringify(e.tags || []);
+            const tokenEst = estimateTokens(e.content || '');
+            // INSERT OR IGNORE preserves any existing row
+            const before = dbQuery('SELECT COUNT(*) as c FROM entries WHERE id = ' + Number(e.id))[0]?.c || 0;
+            dbExec(`INSERT OR IGNORE INTO entries (id, type, content, tags, session, created_at, token_estimate, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status, content_hash) VALUES (${Number(e.id)}, ${esc(e.type)}, ${esc(e.content)}, ${esc(tagsJson)}, ${esc(e.session)}, ${esc(e.created_at)}, ${tokenEst}, ${esc(e.created_at)}, 0, 'ram', ${esc(e.reasoning)}, ${esc(e.conditions)}, ${e.supersedes == null ? 'NULL' : Number(e.supersedes)}, ${esc(e.confidence || 'medium')}, ${esc(e.status || 'active')}, ${esc(e.content_hash)});`);
+            const after = dbQuery('SELECT COUNT(*) as c FROM entries WHERE id = ' + Number(e.id))[0]?.c || 0;
+            if (after > before) inserted++; else skipped++;
+          } catch { failed++; }
+        }
+        sendJson(res, 200, { total: lines.length, inserted, skipped, failed, wal_path: ENTRIES_WAL_PATH });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'GET' && path === '/admin/wal-status') {
+      // Check size and line count of the append-only WAL
+      try {
+        const fs = require('node:fs');
+        if (!fs.existsSync(ENTRIES_WAL_PATH)) {
+          return sendJson(res, 200, { exists: false, path: ENTRIES_WAL_PATH });
+        }
+        const st = fs.statSync(ENTRIES_WAL_PATH);
+        const content = fs.readFileSync(ENTRIES_WAL_PATH, 'utf8');
+        const lines = content.split('\n').filter(Boolean).length;
+        sendJson(res, 200, {
+          exists: true,
+          path: ENTRIES_WAL_PATH,
+          size_bytes: st.size,
+          size_mb: Math.round(st.size / 1024 / 1024 * 10) / 10,
+          lines,
+          modified: new Date(st.mtimeMs).toISOString(),
+          rotate_threshold_mb: ENTRIES_WAL_MAX_BYTES / 1024 / 1024
+        });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'POST' && path === '/admin/rollback-last') {
       // Rollback last self-improve commit
       try {
@@ -5595,6 +5662,25 @@ server.on('upgrade', (req, socket, head) => {
 
 // Ensure RAM disk + DB exist
 ensureRamDisk();
+
+// Rotate entries-wal.jsonl if oversized (keep last 3 generations: .1, .2, .3)
+try {
+  const fs = require('node:fs');
+  mkdirSync(BACKUP_DIR, { recursive: true });
+  if (fs.existsSync(ENTRIES_WAL_PATH) && fs.statSync(ENTRIES_WAL_PATH).size > ENTRIES_WAL_MAX_BYTES) {
+    // shift .2 → .3, .1 → .2, current → .1
+    for (let i = 3; i >= 1; i--) {
+      const src = `${ENTRIES_WAL_PATH}.${i}`;
+      const dst = `${ENTRIES_WAL_PATH}.${i + 1}`;
+      if (fs.existsSync(src)) {
+        if (i === 3) { try { fs.unlinkSync(src); } catch {} } // drop oldest
+        else { try { fs.renameSync(src, dst); } catch {} }
+      }
+    }
+    fs.renameSync(ENTRIES_WAL_PATH, `${ENTRIES_WAL_PATH}.1`);
+    console.log(`[startup] Rotated entries-wal.jsonl`);
+  }
+} catch (e) { console.error('[startup] WAL rotate:', e.message?.slice(0, 60)); }
 
 // Open in-process SQLite connections (must precede schema migrations)
 try { openDatabases(); } catch (e) { console.error('[startup] openDatabases:', e.message?.slice(0, 60)); }
