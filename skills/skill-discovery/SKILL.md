@@ -47,8 +47,8 @@ async function fetchTrends(topics, afterDate) {
   const results = [];
   for (const topic of topics) {
     const res = await exa.searchAndContents(topic, {
-      numResults: 5,
-      startPublishedDate: afterDate,  // 例: '2025-01-01'
+      numResults: 20,
+      startPublishedDate: afterDate,  // 例: '2025-01-01' — no result cap
       useAutoprompt: true,
       type: 'neural',
       highlights: { numSentences: 3 }
@@ -168,16 +168,58 @@ node ~/skills/scripts/skill-discovery-fetch.js --after="$LAST_RUN" \
 echo "$TODAY" > ~/.skills-discovery-last-run
 ```
 
-## 発見ソース一覧
+## 発見ソース一覧（制限なし — 全ソースを網羅する）
 
+### Tier 1: 必須（毎サイクル）
 | ソース | 検索方法 | 対象 |
 |--------|---------|------|
-| Exa neural search | `exa-search`スキル | AI/dev記事 |
-| GitHub Trending | `curl github.com/trending` | 新ライブラリ |
-| arXiv | Exa + site:arxiv.org | 論文パターン |
-| Hacker News | Exa + site:news.ycombinator.com | コミュニティ発見 |
-| Claude/Anthropic changelog | Exa + site:anthropic.com | モデル変更 |
-| takurot/super-skills | `git fetch upstream` | コミュニティスキル |
+| Exa neural search | `exa-search`スキル / SearXNG | AI/dev記事、パターン |
+| arXiv | Exa + site:arxiv.org | 最新論文・実装パターン |
+| Papers with Code | site:paperswithcode.com | 再現実装パターン |
+| Semantic Scholar | site:semanticscholar.org | 引用・関連研究 |
+| Hugging Face Papers | site:huggingface.co/papers | 話題の論文 |
+| GitHub Trending (全言語) | github.com/trending?since=weekly | 週間トレンドライブラリ |
+| GitHub Trending (Python) | github.com/trending?l=python&since=weekly | Python新ライブラリ |
+| GitHub Trending (TypeScript) | github.com/trending?l=typescript&since=weekly | TS新ライブラリ |
+| Hacker News | Exa + site:news.ycombinator.com | コミュニティ実践知 |
+| Zenn | site:zenn.dev | 日本語技術記事 |
+| Qiita | site:qiita.com | 日本語実装記事 |
+| Classmethod | site:dev.classmethod.jp | 日本語AWS/AI記事 |
+
+### Tier 2: 優先（毎サイクル）
+| ソース | 検索方法 | 対象 |
+|--------|---------|------|
+| Reddit r/LocalLLaMA | site:reddit.com/r/LocalLLaMA | ローカルLLM動向 |
+| Reddit r/MachineLearning | site:reddit.com/r/MachineLearning | 研究動向 |
+| Reddit r/ClaudeAI | site:reddit.com/r/ClaudeAI | Claude活用パターン |
+| Reddit r/programming | site:reddit.com/r/programming | 汎用開発パターン |
+| Lobsters | site:lobste.rs | 高品質技術記事 |
+| Dev.to | site:dev.to | 実装チュートリアル |
+| Medium | site:medium.com (AI/ML tag) | 解説・ユースケース |
+| Anthropic Blog | site:anthropic.com/news | モデル・SDK変更 |
+| Anthropic Docs changelog | docs.anthropic.com (直接確認) | API変更・新機能 |
+| OpenAI Blog | site:openai.com/blog | 競合動向・パターン |
+
+### Tier 3: 補完（必要に応じて）
+| ソース | 検索方法 | 対象 |
+|--------|---------|------|
+| npm new packages | npmjs.com/search?q=claude+agent | 新しいJS/TSツール |
+| PyPI new packages | pypi.org/search/?q=agent+llm | 新しいPythonツール |
+| Product Hunt | producthunt.com (AI category) | 新サービス・ツール |
+| Changelog.com | site:changelog.com AI | ポッドキャスト要約 |
+| Latent Space | site:latent.space | AI Podcastまとめ |
+| super-skills upstream | `git fetch upstream` | コミュニティスキル |
+| YouTube (タイトルのみ) | "Claude Code" site:youtube.com | チュートリアル傾向 |
+| Discord公開サーバー | Exa検索 | コミュニティ発見 |
+
+## 深掘り戦略（制限なし）
+
+- **リンク追跡**: 発見した記事の参照リンクを全件追跡する。リンク数・深さに制限なし。
+- **GitHubリポジトリ**: README + docs/ + src/ + Issueリスト + PRコメントまで確認
+- **論文**: Abstract → Full text → References → Cited-by（Semantic Scholarで確認）
+- **時間制限なし**: どれだけ時間がかかっても、見落としゼロを優先する
+- **複数エンジン**: SearXNG（優先）→ Exa → WebSearch の順で使い、同じクエリを複数で確認してよい
+- **言語バリア不要**: 日本語・英語・中国語・スペイン語の記事も対象にする
 
 ## 手動実行（今すぐ発見）
 
@@ -204,6 +246,6 @@ const topics = process.argv.slice(1);
 
 - LLM生成SKILL.mdは必ず人間レビューを挟む — 誤った手順が自動デプロイされると危険
 - Exa APIキー必須 — `EXA_API_KEY`環境変数 or `~/.env`
-- ギャップ分析は週1回で十分 — 毎日実行するとノイズが多い
+- ギャップ分析頻度: self-evolveに合わせて週1回が基本だが、AIOS経由で大量のskill-gapが蓄積された場合は随時実行してよい
 - 生成スキルは `origin: discovered` タグを付けて手動作成と区別する
 - 類似スキルが既存にある場合はマージを検討 — スキル数が増えすぎると管理コスト増
