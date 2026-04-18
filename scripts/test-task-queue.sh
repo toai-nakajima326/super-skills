@@ -44,7 +44,7 @@ REQUEST_BODY=$(cat <<EOF
 EOF
 )
 
-SUBMIT_RESP=$(curl -sS -X POST -H 'Content-Type: application/json' --max-time 10 -d "$REQUEST_BODY" "$VCONTEXT/admin/task-request")
+SUBMIT_RESP=$(curl -sS -X POST -H 'Content-Type: application/json' -H 'X-Vcontext-Admin: yes' --max-time 10 -d "$REQUEST_BODY" "$VCONTEXT/admin/task-request")
 if [[ -z "$SUBMIT_RESP" ]]; then
   red "[FAIL] submit returned empty response"
   exit 3

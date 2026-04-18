@@ -7140,9 +7140,21 @@ const server = createServer(async (req, res) => {
           return sendJson(res, 400, { error: `Unknown task_type. Allowed: ${[...ALLOWED_TASK_TYPES].join(', ')}` });
         }
         const payload = (body.payload && typeof body.payload === 'object') ? body.payload : {};
-        // shell-command RCE guard — require explicit user-approval marker
-        if (task_type === 'shell-command' && payload.approved_by_user !== true) {
-          return sendJson(res, 403, { error: 'shell-command task requires payload.approved_by_user === true' });
+        // shell-command RCE guard — admin header + explicit user-approval marker.
+        // Defense-in-depth: header (CSRF/DNS-rebind) + approved_by_user (intent).
+        // Non-shell task types (locomo-eval, skill-discovery-adhoc, etc.) are
+        // intentionally exempt from the header check to preserve adhoc dispatch.
+        // See docs/spec/2026-04-18-task-request-admin-header.md.
+        if (task_type === 'shell-command') {
+          if (req.headers['x-vcontext-admin'] !== 'yes') {
+            return sendJson(res, 403, {
+              error: 'shell-command requires X-Vcontext-Admin: yes header',
+              docs: 'docs/policy/autonomous-commit-gate.md §0',
+            });
+          }
+          if (payload.approved_by_user !== true) {
+            return sendJson(res, 403, { error: 'shell-command task requires payload.approved_by_user === true' });
+          }
         }
         const priority = [1, 2, 3].includes(body.priority) ? body.priority : 2;
         const requested_by = typeof body.requested_by === 'string' ? body.requested_by.slice(0, 120) : 'unknown';
