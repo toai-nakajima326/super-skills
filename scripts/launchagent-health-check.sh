@@ -49,8 +49,9 @@ logfile_for() {
     com.vcontext.server) echo /tmp/vcontext-server.log ;;
     com.vcontext.watchdog) echo /tmp/vcontext-watchdog.log ;;
     com.vcontext.mlx-embed) echo /tmp/mlx-embed-server.log ;;
-    com.vcontext.mlx-generate) echo /tmp/vcontext-mlx-generate.log ;;
+    com.vcontext.mlx-generate) echo /tmp/mlx-generate-server.log ;;
     com.vcontext.ramdisk) echo /tmp/vcontext-setup.log ;;
+    com.vcontext.hooks-setup) echo /tmp/vcontext-hooks-setup.log ;;
     com.vcontext.maintenance) echo /tmp/vcontext-maintenance.log ;;
     com.vcontext.morning-brief) echo /tmp/vcontext-morning-brief.log ;;
     com.vcontext.article-scanner) echo /tmp/vcontext-article-scanner.log ;;
@@ -77,12 +78,14 @@ log_age_mins() {
 
 threshold_ok() {
   local kind="$1" age="$2"
+  # boot-only agents exit after running once; a missing/stale log is expected.
+  # They are healthy as long as the plist is loaded (checked upstream).
+  [[ "$kind" == "boot-only" ]] && return 0
   [[ "$age" == "-" ]] && return 1
   case "$kind" in
     daemon) (( age <= 15 )) ;;
     cron-daily) (( age <= 1560 )) ;;
     cron-weekly) (( age <= 11520 )) ;;
-    boot-only) return 0 ;;
     *) return 1 ;;
   esac
 }
