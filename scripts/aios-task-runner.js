@@ -40,6 +40,16 @@ const LOG_TRUNC_TAIL = 128 * 1024;
 const ORPHAN_THRESHOLD_MS = 30 * 60 * 1000; // 30min
 const LOCOMO_EVAL_TIMEOUT_MS = 20 * 60 * 1000; // 20min
 const DEFAULT_SHELL_TIMEOUT_MS = 5 * 60 * 1000; // 5min
+const SKILL_DISCOVERY_TIMEOUT_MS = 10 * 60 * 1000; // 10min
+const ARTICLE_SCAN_TIMEOUT_MS = 10 * 60 * 1000; // 10min
+const SELF_EVOLVE_TIMEOUT_MS = 15 * 60 * 1000; // 15min
+const REPO_ROOT = '/Users/mitsuru_nakajima/skills';
+// Prefer nvm-installed node for child processes so the script runs with the
+// same interpreter launchd uses for article-scanner / self-evolve LaunchAgents.
+const NODE_BIN = process.env.NODE_BIN ||
+  '/Users/mitsuru_nakajima/.nvm/versions/node/v25.9.0/bin/node';
+const STDOUT_TAIL_BYTES = 4 * 1024;  // per-task: last 4KB stdout captured
+const STDERR_TAIL_BYTES = 4 * 1024;  // per-task: last 4KB stderr captured
 
 let shuttingDown = false;
 let currentTaskId = null;
@@ -180,6 +190,122 @@ async function runLocomoEval(payload) {
   return { stdout: (stdout || '').slice(-16000), stderr: (stderr || '').slice(-4000) };
 }
 
+// ── Helpers for adhoc-script dispatch paths ──
+//
+// isScriptAlreadyRunning — pgrep for a marker substring so we don't double-run
+//   when a LaunchAgent (or a previous task) is mid-cycle.  pgrep uses -f to
+//   match the full command line, which is where the script path appears.
+//   Returns true if at least one process other than this runner matches.
+async function isScriptAlreadyRunning(markerSubstring) {
+  try {
+    // pgrep -f returns exit 0 if a match, 1 if none; use execFile and inspect.
+    const { stdout } = await execFile('pgrep', ['-fl', markerSubstring], {
+      timeout: 5_000,
+      maxBuffer: 256 * 1024,
+    });
+    const lines = (stdout || '').split('\n').filter(Boolean);
+    // Exclude lines owned by this runner itself (in case argv surfaces the
+    // substring via the log-rotate path or similar).  Match by PID.
+    const myPid = String(process.pid);
+    const others = lines.filter((ln) => {
+      const pid = ln.trim().split(/\s+/)[0];
+      return pid && pid !== myPid;
+    });
+    return others.length > 0;
+  } catch (e) {
+    // pgrep exit 1 = no match; any exec error → treat as "not running" but
+    // log so we can notice pgrep absence (it's /usr/bin/pgrep on macOS).
+    if (e && typeof e.code === 'number' && e.code === 1) return false;
+    errlog(`pgrep(${markerSubstring}) failed, assuming not running:`, (e && e.message) || String(e));
+    return false;
+  }
+}
+
+function tailOutput(stdout, stderr) {
+  return {
+    stdout: (stdout || '').slice(-STDOUT_TAIL_BYTES),
+    stderr: (stderr || '').slice(-STDERR_TAIL_BYTES),
+  };
+}
+
+async function runSkillDiscoveryAdhoc(payload) {
+  // payload: {}  — no arguments required; skill-discovery.sh is self-contained.
+  // Idempotence: if a scheduled LaunchAgent run or prior adhoc task is still
+  // running, skip and return a "skipped_already_running" status instead of
+  // stacking concurrent invocations that would race on OUT_DIR + vcontext POSTs.
+  if (await isScriptAlreadyRunning('scripts/skill-discovery.sh')) {
+    return { skipped: 'already_running', stdout: '', stderr: '' };
+  }
+  const { stdout, stderr } = await execFile(
+    '/bin/bash',
+    ['scripts/skill-discovery.sh'],
+    {
+      cwd: REPO_ROOT,
+      timeout: SKILL_DISCOVERY_TIMEOUT_MS,
+      maxBuffer: 10 * 1024 * 1024,
+      env: { ...process.env, TASK_RUNNER: '1' },
+    }
+  );
+  return tailOutput(stdout, stderr);
+}
+
+async function runArticleScanAdhoc(payload) {
+  // payload: { max?: number, dry_run?: boolean, verbose?: boolean, all?: boolean }
+  // Whitelist flags we pass through so a malicious payload cannot inject
+  // arbitrary argv.  --max is the only flag that takes a value.
+  if (await isScriptAlreadyRunning('scripts/article-scanner.js')) {
+    return { skipped: 'already_running', stdout: '', stderr: '' };
+  }
+  const cliArgs = ['scripts/article-scanner.js'];
+  if (payload && payload.dry_run === true) cliArgs.push('--dry-run');
+  if (payload && payload.verbose === true) cliArgs.push('--verbose');
+  if (payload && payload.all === true) cliArgs.push('--all');
+  if (payload && Number.isFinite(+payload.max)) {
+    const maxN = Math.max(1, Math.min(100, Math.floor(+payload.max)));
+    cliArgs.push('--max', String(maxN));
+  }
+  const { stdout, stderr } = await execFile(NODE_BIN, cliArgs, {
+    cwd: REPO_ROOT,
+    timeout: ARTICLE_SCAN_TIMEOUT_MS,
+    maxBuffer: 10 * 1024 * 1024,
+    env: {
+      ...process.env,
+      TASK_RUNNER: '1',
+      VCONTEXT_URL: process.env.VCONTEXT_URL || 'http://127.0.0.1:3150',
+    },
+  });
+  return tailOutput(stdout, stderr);
+}
+
+async function runSelfEvolveDryrun(payload) {
+  // payload: { verbose?: boolean, dry_run_only?: boolean }
+  // Always pass --observation (this dispatch path is defined as dryrun/observation
+  // mode; Phase c-e mutations are skipped by the script in this mode).
+  // If payload.dry_run_only is true, also pass --dry-run so even Phase a-b
+  // writes are suppressed (pure gather+score+log).
+  if (await isScriptAlreadyRunning('self-evolve/scripts/self-evolve.js')) {
+    return { skipped: 'already_running', stdout: '', stderr: '' };
+  }
+  const cliArgs = [
+    'skills/self-evolve/scripts/self-evolve.js',
+    '--observation',
+  ];
+  if (payload && payload.dry_run_only === true) cliArgs.push('--dry-run');
+  if (payload && payload.verbose === true) cliArgs.push('--verbose');
+  const { stdout, stderr } = await execFile(NODE_BIN, cliArgs, {
+    cwd: REPO_ROOT,
+    timeout: SELF_EVOLVE_TIMEOUT_MS,
+    maxBuffer: 10 * 1024 * 1024,
+    env: {
+      ...process.env,
+      TASK_RUNNER: '1',
+      VCONTEXT_URL: process.env.VCONTEXT_URL || 'http://127.0.0.1:3150',
+      MLX_GENERATE_URL: process.env.MLX_GENERATE_URL || 'http://127.0.0.1:3162',
+    },
+  });
+  return tailOutput(stdout, stderr);
+}
+
 async function runShellCommand(payload) {
   // payload: { cmd: string, timeout_ms?: number, approved_by_user: true }
   if (payload.approved_by_user !== true) throw new Error('shell-command requires approved_by_user === true');
@@ -215,12 +341,12 @@ async function dispatch(task) {
       result = await runLocomoEval(payload);
     } else if (task_type === 'shell-command') {
       result = await runShellCommand(payload);
-    } else if (
-      task_type === 'skill-discovery-adhoc' ||
-      task_type === 'article-scan-adhoc' ||
-      task_type === 'self-evolve-dryrun'
-    ) {
-      errorMsg = `task_type '${task_type}' not yet implemented`;
+    } else if (task_type === 'skill-discovery-adhoc') {
+      result = await runSkillDiscoveryAdhoc(payload);
+    } else if (task_type === 'article-scan-adhoc') {
+      result = await runArticleScanAdhoc(payload);
+    } else if (task_type === 'self-evolve-dryrun') {
+      result = await runSelfEvolveDryrun(payload);
     } else {
       errorMsg = `unknown task_type '${task_type}'`;
     }

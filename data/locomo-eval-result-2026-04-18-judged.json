@@ -1,0 +1,438 @@
+{
+  "config": {
+    "model": "mlx-community/Qwen3-8B-4bit",
+    "mlx_port": 3162,
+    "vcontext_port": 3150,
+    "subset": "small",
+    "mock": false,
+    "dry_run": false,
+    "use_llm_judge": true,
+    "k": 5,
+    "judge_prompt_version": "v1-2026-04-18",
+    "mlx_timeout_s": 60.0,
+    "cutoff": "small=first-sample-first-10-Q; full=all-1986-Q",
+    "dataset_sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+    "ts": "2026-04-18T14:42:16+0900"
+  },
+  "summary": {
+    "subset": "small",
+    "mock": false,
+    "dry_run": false,
+    "n_samples": 1,
+    "n_questions": 10,
+    "f1_mean": 0.2684,
+    "em": 0.0,
+    "llm_j": 0.0,
+    "primary_score": 0.2684,
+    "by_category": {
+      "2": {
+        "n": 6,
+        "f1_mean": 0.2608,
+        "primary_mean": 0.2608
+      },
+      "3": {
+        "n": 1,
+        "f1_mean": 0.2857,
+        "primary_mean": 0.2857
+      },
+      "1": {
+        "n": 3,
+        "f1_mean": 0.2778,
+        "primary_mean": 0.2778
+      }
+    },
+    "adversarial_correct_rate": null,
+    "latency_ms_mean": 6414.0,
+    "latency_ms_p95": 13704.1,
+    "wall_seconds": 244.95,
+    "dataset_sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+    "mlx_model": "mlx-community/Qwen3-8B-4bit",
+    "ts": "2026-04-18T14:42:16+0900"
+  },
+  "aggregate": {
+    "n_questions": 10,
+    "accuracy": 0.2684,
+    "em": 0.0,
+    "f1_mean": 0.2684,
+    "llm_j": 0.0,
+    "precision_at_k": 0.1,
+    "recall_at_k": 0.5,
+    "mrr": 0.45,
+    "hit_at_k": 0.5,
+    "non_empty_retrieval_rate": 1.0,
+    "avg_latency_ms": 6414.0,
+    "avg_retrieval_ms": 2103.5,
+    "latency_ms_p95": 13704.1,
+    "total_cost_stub": {
+      "currency": "USD",
+      "amount": 0.0,
+      "model": "mlx-community/Qwen3-8B-4bit",
+      "basis": "local-mlx"
+    },
+    "wall_seconds": 244.95
+  },
+  "per_question": [
+    {
+      "sample_id": "conv-26",
+      "question": "When did Caroline go to the LGBTQ support group?",
+      "gold_answer": "7 May 2023",
+      "evidence": [
+        "D1:3"
+      ],
+      "retrieved_ids": [
+        "D1:3",
+        "D10:5",
+        "D10:3",
+        "D12:1",
+        "D2:12"
+      ],
+      "generated_answer": "Caroline went to the LGBTQ support group on 8 May, 2023.",
+      "judge_verdict": "partial",
+      "judge_rationale": "mlx unavailable",
+      "n_retrieved": 5,
+      "retrieval_ms": 43.5,
+      "latency_ms": 5607.5,
+      "match": false,
+      "score": 0.30769230769230765,
+      "f1": 0.30769230769230765,
+      "em": false,
+      "llm": {
+        "match": false,
+        "score": 0.0,
+        "rationale": "mlx unavailable",
+        "available": false
+      },
+      "category": 2,
+      "precision_at_k": 0.2,
+      "recall_at_k": 1.0,
+      "mrr": 1.0,
+      "hit_at_k": true
+    },
+    {
+      "sample_id": "conv-26",
+      "question": "When did Melanie paint a sunrise?",
+      "gold_answer": 2022,
+      "evidence": [
+        "D1:12"
+      ],
+      "retrieved_ids": [
+        "D1:14",
+        "D13:10",
+        "D14:6",
+        "D3:22",
+        "D12:10"
+      ],
+      "generated_answer": "Melanie painted the sunrise last year.",
+      "judge_verdict": "wrong",
+      "judge_rationale": "mlx unavailable",
+      "n_retrieved": 5,
+      "retrieval_ms": 1693.0,
+      "latency_ms": 5293.5,
+      "match": false,
+      "score": 0.0,
+      "f1": 0.0,
+      "em": false,
+      "llm": {
+        "match": false,
+        "score": 0.0,
+        "rationale": "mlx unavailable",
+        "available": false
+      },
+      "category": 2,
+      "precision_at_k": 0.0,
+      "recall_at_k": 0.0,
+      "mrr": 0.0,
+      "hit_at_k": false
+    },
+    {
+      "sample_id": "conv-26",
+      "question": "What fields would Caroline be likely to pursue in her educaton?",
+      "gold_answer": "Psychology, counseling certification",
+      "evidence": [
+        "D1:9",
+        "D1:11"
+      ],
+      "retrieved_ids": [
+        "D4:14",
+        "D7:8",
+        "D15:15",
+        "D13:7",
+        "D8:15"
+      ],
+      "generated_answer": "Caroline would likely pursue education in the field of counseling or psychology.",
+      "judge_verdict": "wrong",
+      "judge_rationale": "mlx unavailable",
+      "n_retrieved": 5,
+      "retrieval_ms": 4956.2,
+      "latency_ms": 11385.4,
+      "match": false,
+      "score": 0.28571428571428575,
+      "f1": 0.28571428571428575,
+      "em": false,
+      "llm": {
+        "match": false,
+        "score": 0.0,
+        "rationale": "mlx unavailable",
+        "available": false
+      },
+      "category": 3,
+      "precision_at_k": 0.0,
+      "recall_at_k": 0.0,
+      "mrr": 0.0,
+      "hit_at_k": false
+    },
+    {
+      "sample_id": "conv-26",
+      "question": "What did Caroline research?",
+      "gold_answer": "Adoption agencies",
+      "evidence": [
+        "D2:8"
+      ],
+      "retrieved_ids": [
+        "D1:17",
+        "D15:15",
+        "D8:15",
+        "D14:29",
+        "D17:7"
+      ],
+      "generated_answer": "Caroline researched adoption agencies or lawyers.",
+      "judge_verdict": "correct",
+      "judge_rationale": "mlx unavailable",
+      "n_retrieved": 5,
+      "retrieval_ms": 1636.8,
+      "latency_ms": 5908.8,
+      "match": true,
+      "score": 0.5,
+      "f1": 0.5,
+      "em": false,
+      "llm": {
+        "match": false,
+        "score": 0.0,
+        "rationale": "mlx unavailable",
+        "available": false
+      },
+      "category": 1,
+      "precision_at_k": 0.0,
+      "recall_at_k": 0.0,
+      "mrr": 0.0,
+      "hit_at_k": false
+    },
+    {
+      "sample_id": "conv-26",
+      "question": "What is Caroline's identity?",
+      "gold_answer": "Transgender woman",
+      "evidence": [
+        "D1:5"
+      ],
+      "retrieved_ids": [
+        "D3:3",
+        "D13:13",
+        "D15:15",
+        "D11:12",
+        "D8:15"
+      ],
+      "generated_answer": "Caroline's identity is transgender.",
+      "judge_verdict": "partial",
+      "judge_rationale": "mlx unavailable",
+      "n_retrieved": 5,
+      "retrieval_ms": 256.7,
+      "latency_ms": 4952.1,
+      "match": false,
+      "score": 0.3333333333333333,
+      "f1": 0.3333333333333333,
+      "em": false,
+      "llm": {
+        "match": false,
+        "score": 0.0,
+        "rationale": "mlx unavailable",
+        "available": false
+      },
+      "category": 1,
+      "precision_at_k": 0.0,
+      "recall_at_k": 0.0,
+      "mrr": 0.0,
+      "hit_at_k": false
+    },
+    {
+      "sample_id": "conv-26",
+      "question": "When did Melanie run a charity race?",
+      "gold_answer": "The sunday before 25 May 2023",
+      "evidence": [
+        "D2:1"
+      ],
+      "retrieved_ids": [
+        "D2:1",
+        "D2:2",
+        "D3:22",
+        "D12:10",
+        "D15:26"
+      ],
+      "generated_answer": "<|im_start|>\n\nMelanie ran a charity race on 25 May 2023.",
+      "judge_verdict": "partial",
+      "judge_rationale": "mlx unavailable",
+      "n_retrieved": 5,
+      "retrieval_ms": 4969.2,
+      "latency_ms": 9562.3,
+      "match": false,
+      "score": 0.42857142857142855,
+      "f1": 0.42857142857142855,
+      "em": false,
+      "llm": {
+        "match": false,
+        "score": 0.0,
+        "rationale": "mlx unavailable",
+        "available": false
+      },
+      "category": 2,
+      "precision_at_k": 0.2,
+      "recall_at_k": 1.0,
+      "mrr": 1.0,
+      "hit_at_k": true
+    },
+    {
+      "sample_id": "conv-26",
+      "question": "When is Melanie planning on going camping?",
+      "gold_answer": "June 2023",
+      "evidence": [
+        "D2:7"
+      ],
+      "retrieved_ids": [
+        "D2:7",
+        "D10:14",
+        "D18:19",
+        "D6:16",
+        "D8:32"
+      ],
+      "generated_answer": "Melanie is planning on going camping next month.",
+      "judge_verdict": "wrong",
+      "judge_rationale": "mlx unavailable",
+      "n_retrieved": 5,
+      "retrieval_ms": 431.6,
+      "latency_ms": 3137.6,
+      "match": false,
+      "score": 0.0,
+      "f1": 0.0,
+      "em": false,
+      "llm": {
+        "match": false,
+        "score": 0.0,
+        "rationale": "mlx unavailable",
+        "available": false
+      },
+      "category": 2,
+      "precision_at_k": 0.2,
+      "recall_at_k": 1.0,
+      "mrr": 1.0,
+      "hit_at_k": true
+    },
+    {
+      "sample_id": "conv-26",
+      "question": "What is Caroline's relationship status?",
+      "gold_answer": "Single",
+      "evidence": [
+        "D3:13",
+        "D2:14"
+      ],
+      "retrieved_ids": [
+        "D15:15",
+        "D8:15",
+        "D14:29",
+        "D7:21",
+        "D10:15"
+      ],
+      "generated_answer": "I don't know.",
+      "judge_verdict": "wrong",
+      "judge_rationale": "mlx unavailable",
+      "n_retrieved": 5,
+      "retrieval_ms": 129.0,
+      "latency_ms": 1984.4,
+      "match": false,
+      "score": 0.0,
+      "f1": 0.0,
+      "em": false,
+      "llm": {
+        "match": false,
+        "score": 0.0,
+        "rationale": "mlx unavailable",
+        "available": false
+      },
+      "category": 1,
+      "precision_at_k": 0.0,
+      "recall_at_k": 0.0,
+      "mrr": 0.0,
+      "hit_at_k": false
+    },
+    {
+      "sample_id": "conv-26",
+      "question": "When did Caroline give a speech at a school?",
+      "gold_answer": "The week before 9 June 2023",
+      "evidence": [
+        "D3:1"
+      ],
+      "retrieved_ids": [
+        "D3:11",
+        "D3:1",
+        "D18:10",
+        "D2:8",
+        "D5:3"
+      ],
+      "generated_answer": "Caroline gave a speech at a school on 9 June, 2023.",
+      "judge_verdict": "partial",
+      "judge_rationale": "mlx unavailable",
+      "n_retrieved": 5,
+      "retrieval_ms": 6681.7,
+      "latency_ms": 13704.1,
+      "match": false,
+      "score": 0.42857142857142855,
+      "f1": 0.42857142857142855,
+      "em": false,
+      "llm": {
+        "match": false,
+        "score": 0.0,
+        "rationale": "mlx unavailable",
+        "available": false
+      },
+      "category": 2,
+      "precision_at_k": 0.2,
+      "recall_at_k": 1.0,
+      "mrr": 0.5,
+      "hit_at_k": true
+    },
+    {
+      "sample_id": "conv-26",
+      "question": "When did Caroline meet up with her friends, family, and mentors?",
+      "gold_answer": "The week before 9 June 2023",
+      "evidence": [
+        "D3:11"
+      ],
+      "retrieved_ids": [
+        "D3:11",
+        "D16:5",
+        "D2:10",
+        "D19:9",
+        "D6:11"
+      ],
+      "generated_answer": "Caroline met up with her friends, family, and mentors last week on 9 June, 2023.",
+      "judge_verdict": "partial",
+      "judge_rationale": "mlx unavailable",
+      "n_retrieved": 5,
+      "retrieval_ms": 237.4,
+      "latency_ms": 2604.0,
+      "match": false,
+      "score": 0.4,
+      "f1": 0.4,
+      "em": false,
+      "llm": {
+        "match": false,
+        "score": 0.0,
+        "rationale": "mlx unavailable",
+        "available": false
+      },
+      "category": 2,
+      "precision_at_k": 0.2,
+      "recall_at_k": 1.0,
+      "mrr": 1.0,
+      "hit_at_k": true
+    }
+  ]
+}
