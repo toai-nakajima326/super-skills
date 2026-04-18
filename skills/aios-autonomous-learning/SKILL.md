@@ -233,6 +233,24 @@ async function applyPatch(skillName, content) {
 // ... recall / registerSkill / markPatched ヘルパー
 ```
 
+## Stream 4: Dynamic Query Generation (skill_query_trigger)
+
+```python
+# aios/hooks/modules/skill_query_trigger.py
+# セッション終了時または知識ギャップ検出時に skill-query-generator.js をトリガー
+
+from aios.hooks.modules.skill_query_trigger import get_discovery_queries
+
+# AIOS 検索/リサーチエージェントが discovery-query を取得して検索に使用
+queries = get_discovery_queries()  # current week's cycle
+for q in queries:
+    print(f"[{q['lang']}] {q['query']}  ({q['rationale']})")
+```
+
+- **トリガー**: セッション終了時にギャップ数 ≥ 3 なら自動起動
+- **出力**: vcontext に `discovery-query` 型で保存 → self-evolve Phase(a) Stream 6 が消費
+- **フォールバック**: MLX Qwen3-8B → Claude Haiku API
+
 ## aios/config/config.yaml への追加
 
 ```yaml
@@ -247,6 +265,12 @@ hooks:
   on_skill_used:
     - module: "aios.hooks.modules.skill_usage_tracker"
       function: "on_skill_used"
+  on_session_end:
+    - module: "aios.hooks.modules.skill_query_trigger"
+      function: "on_session_end"
+  on_knowledge_gap:
+    - module: "aios.hooks.modules.skill_query_trigger"
+      function: "on_knowledge_gap_detected"
 
 # 自律学習ブリッジ設定
 autonomous_learning:
