@@ -195,15 +195,21 @@ Web検索クエリを**10件**生成してください。
 
 条件:
 1. 既存スキルと重複しない新しい分野を狙う
-2. 日本語クエリと英語クエリを混在させる（各5件ずつ）
-3. arXiv・Zenn・Qiitaなど具体的なサイト指定を含めてもよい
-4. 「2026」などの年号を含め最新情報を狙う
-5. ギャップデータがあればそれを優先的にクエリ化する
+2. 以下のカテゴリから**各2件以上**カバーすること（合計20件以上）:
+   - 日本語技術記事 (Zenn/Qiita/dev.classmethod.jp)
+   - 英語技術記事/チュートリアル (dev.to/Medium/HackerNews)
+   - 学術論文 (arXiv/Semantic Scholar/Papers with Code)
+   - GitHub リポジトリ・トレンド
+   - パッケージ・ライブラリ (npm/PyPI)
+   - コミュニティ (Reddit r/LocalLLaMA / r/MachineLearning)
+3. 「2026」などの年号を含め最新情報を狙う
+4. ギャップデータがあればそれを優先的にクエリ化する
+5. 制限なし — 発見の可能性があるならどんな視点のクエリも歓迎
 
 出力形式（JSONのみ、説明不要）:
 {
   "queries": [
-    {"query": "...", "lang": "ja|en", "rationale": "なぜこのクエリか1行で"},
+    {"query": "...", "lang": "ja|en", "category": "papers|github|community|blog|packages", "rationale": "なぜこのクエリか1行で"},
     ...
   ],
   "analysis_summary": "不足分野を2-3文で説明"
@@ -245,7 +251,7 @@ async function main() {
   console.log(`[query-gen] analysis: ${summary}\n`);
 
   queries.forEach((q, i) => {
-    console.log(`  ${i+1}. [${q.lang}] ${q.query}`);
+    console.log(`  ${i+1}. [${q.lang}][${q.category || 'general'}] ${q.query}`);
     console.log(`     → ${q.rationale}`);
   });
 
@@ -264,13 +270,14 @@ async function main() {
       content: JSON.stringify({
         query: q.query,
         lang: q.lang,
+        category: q.category || 'general',
         rationale: q.rationale,
         cycle_id: cycleId,
         generated_at: new Date().toISOString(),
         source: 'skill-query-generator',
         analysis_summary: summary
       }),
-      tags: ['discovery-query', `cycle:${cycleId}`, `lang:${q.lang}`, 'auto-generated'],
+      tags: ['discovery-query', `cycle:${cycleId}`, `lang:${q.lang}`, `cat:${q.category || 'general'}`, 'auto-generated'],
       session: 'skill-discovery'
     });
     saved.push(r.stored?.id);
