@@ -1249,13 +1249,33 @@ function connectWs() {
       startPolling();
       refresh();
     };
+    // WS event coalescing — without throttle, 30+ new_entry events/min would
+    // each trigger 18-endpoint refresh() = 540 API calls/min just for viewing.
+    // Leading-edge then 10s-blocked window: first event refreshes immediately,
+    // bursts within the window are swallowed (badge still updates live).
+    var _wsRefreshBlockedUntil = 0;
+    var _wsCoalescedRefresh = null;
+    function wsThrottledRefresh() {
+      var now = Date.now();
+      if (now >= _wsRefreshBlockedUntil) {
+        _wsRefreshBlockedUntil = now + 10000;
+        refresh();
+      } else if (!_wsCoalescedRefresh) {
+        // schedule exactly one refresh at the end of the current window
+        _wsCoalescedRefresh = setTimeout(function() {
+          _wsCoalescedRefresh = null;
+          _wsRefreshBlockedUntil = Date.now() + 10000;
+          refresh();
+        }, _wsRefreshBlockedUntil - now);
+      }
+    }
     ws.onmessage = function(e) {
       try {
         var data = JSON.parse(e.data);
         if (data.event === 'new_entry' || data.event === 'conflict_detected' || data.event === 'consultation_updated') {
           liveCount++;
           document.getElementById('live-indicator').textContent = 'Live: ' + liveCount + ' events';
-          refresh();
+          wsThrottledRefresh();
         }
       } catch {}
     };
