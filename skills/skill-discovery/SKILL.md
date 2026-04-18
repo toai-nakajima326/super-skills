@@ -221,6 +221,44 @@ echo "$TODAY" > ~/.skills-discovery-last-run
 - **複数エンジン**: SearXNG（優先）→ Exa → WebSearch の順で使い、同じクエリを複数で確認してよい
 - **言語バリア不要**: 日本語・英語・中国語・スペイン語の記事も対象にする
 
+## Stream: 新機能自動検知（new-feature-watcher）
+
+```
+新製品/新機能リリース → SearXNG検索 → LLMで分析 → SKILL.md生成 → pending-patch登録 → ダッシュボードでレビュー
+```
+
+`scripts/new-feature-watcher.js` が毎日 10:00 に実行される（LaunchAgent: `com.vcontext.new-feature-watcher`）。
+
+### 監視ソース
+- anthropic.com/news — Anthropicの新製品・機能
+- openai.com/blog — OpenAIの新機能
+- techcrunch.com, venturebeat.com — AI製品ニュース
+- Hacker News "Show HN" — コミュニティ発見ツール
+- ai.watch.impress.co.jp, zenn.dev — 日本語AI記事
+
+### 自動化フロー
+1. 前回実行以降の新ツール/製品を検索（SearXNG経由）
+2. LLMが「スキル化すべきか」を判断（confidence ≥ 0.7のみ通過）
+3. 既存スキルと重複チェック
+4. SKILL.md候補をLLMで自動生成
+5. `pending-patch` として vcontext に登録（fitness ≤ 0.75 — 必ずダッシュボードレビュー）
+6. `skill-suggestion` も同時登録（self-evolveが次サイクルで参照）
+
+### 手動実行
+```bash
+# 実際に実行（vcontextに保存）
+node ~/skills/scripts/new-feature-watcher.js
+
+# ドライラン（保存しない）
+node ~/skills/scripts/new-feature-watcher.js --dry-run
+```
+
+### レビュー
+```
+http://127.0.0.1:3150/dashboard → pending-patch セクション
+```
+自動生成スキルは `requires-review` タグ付き。必ず内容を確認してから承認すること。
+
 ## 手動実行（今すぐ発見）
 
 ```bash
