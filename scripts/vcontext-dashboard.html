@@ -730,9 +730,18 @@ async function refresh() {
     const si = document.getElementById('status-indicator');
     si.innerHTML = '<span class="status-dot status-' + (health.status === 'healthy' ? 'green' : 'red') + '"></span>' + escapeHtml(health.status);
     document.getElementById('uptime').textContent = 'Uptime: ' + Math.floor(health.uptime_seconds / 60) + 'm';
+    // 2026-04-18: post RAM-disk → SSD migration, the "RAM Disk" health dot
+    // glowed red 24/7 in the intended SSD-only mode. Hide the dot when the
+    // server is not in USE_RAMDISK mode — presence of /Volumes/VContext is
+    // no longer a correctness signal. Fall back to `health.ram_disk` for
+    // backward-compat with older server builds that don't emit use_ramdisk.
+    var showRamDiskDot = (health.use_ramdisk === true) || (health.use_ramdisk == null && health.ram_disk);
+    var ramDiskRow = showRamDiskDot
+      ? ('<div><span class="status-dot status-' + (health.ram_disk ? 'green' : 'red') + '"></span>RAM Disk</div>')
+      : '';
     document.getElementById('health-content').innerHTML =
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">' +
-        '<div><span class="status-dot status-' + (health.ram_disk ? 'green' : 'red') + '"></span>RAM Disk</div>' +
+        ramDiskRow +
         '<div><span class="status-dot status-' + (health.database ? 'green' : 'red') + '"></span>Database</div>' +
         '<div><span class="status-dot status-' + (health.ssd_database ? 'green' : 'red') + '"></span>SSD DB</div>' +
         '<div><span class="status-dot status-' + (health.cloud_configured ? 'green' : 'yellow') + '"></span>Cloud</div>' +
@@ -744,9 +753,28 @@ async function refresh() {
   // Tiers + AI
   if (tiers) {
     const maxEntries = Math.max(tiers.ram.entries, tiers.ssd.entries, 1);
+    // 2026-04-18 post RAM→SSD migration: rename "RAM"/"SSD" labels to
+    // "Primary"/"Archive" when the server reports use_ramdisk=false or
+    // unified=true. The underlying tier concept (hot/cold store) is still
+    // accurate; only the storage substrate changed. Fall back to the
+    // original RAM/SSD labels if the server hasn't been upgraded yet.
+    var primaryLabel, archiveLabel;
+    if (tiers.use_ramdisk === true) {
+      primaryLabel = 'RAM';
+      archiveLabel = 'SSD';
+    } else {
+      primaryLabel = 'Primary';
+      archiveLabel = tiers.unified ? '(unified)' : 'Archive';
+    }
     var tiersHtml =
-      '<div class="chart-bar"><span class="label">RAM (' + escapeHtml(tiers.ram.size) + ')</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (tiers.ram.entries / maxEntries * 100) + '%;background:var(--accent)"></div></div><span style="margin-left:8px;font-size:13px;">' + tiers.ram.entries + '</span></div>' +
-      '<div class="chart-bar"><span class="label">SSD (' + escapeHtml(tiers.ssd.size) + ')</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (tiers.ssd.entries / maxEntries * 100) + '%;background:var(--green)"></div></div><span style="margin-left:8px;font-size:13px;">' + tiers.ssd.entries + '</span></div>' +
+      '<div class="chart-bar"><span class="label">' + primaryLabel + ' (' + escapeHtml(tiers.ram.size) + ')</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (tiers.ram.entries / maxEntries * 100) + '%;background:var(--accent)"></div></div><span style="margin-left:8px;font-size:13px;">' + tiers.ram.entries + '</span></div>';
+    // When unified, primary and archive are the same file — showing a
+    // duplicate bar is noise. Collapse to a single "Primary" bar + Cloud.
+    if (!tiers.unified) {
+      tiersHtml +=
+        '<div class="chart-bar"><span class="label">' + archiveLabel + ' (' + escapeHtml(tiers.ssd.size) + ')</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (tiers.ssd.entries / maxEntries * 100) + '%;background:var(--green)"></div></div><span style="margin-left:8px;font-size:13px;">' + tiers.ssd.entries + '</span></div>';
+    }
+    tiersHtml +=
       '<div class="chart-bar"><span class="label">Cloud</span><div class="bar" style="flex:1"><div class="bar-fill" style="width:' + (tiers.cloud.entries > 0 ? tiers.cloud.entries / maxEntries * 100 : 0) + '%;background:var(--yellow)"></div></div><span style="margin-left:8px;font-size:13px;">' + (tiers.cloud.configured ? tiers.cloud.entries : 'stub') + '</span></div>';
 
     // Local AI status inline
