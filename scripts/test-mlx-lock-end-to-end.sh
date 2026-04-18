@@ -236,6 +236,215 @@ import("'"$REPO"'/scripts/aios-mlx-lock.js").then(async m => {
 stale_acq=$(python3 -c 'import json; print(json.load(open("'"$SCRATCH"'/stale.log")).get("acquired"))')
 check "stale lock auto-cleared on acquire" True "$stale_acq"
 
+# ───────── Scenario 6: Dead-PID stale detection (D1 2026-04-18) ─────────
+echo
+echo "Scenario 6: mlxLockStatus detects dead-PID holder <1s (D1)."
+
+rm -f "$LOCK"
+# Fork a Python child, capture its PID, kill it, then write a lock file
+# containing that now-dead PID. mlxLockStatus should flag stale=true with
+# pidDead=true and immediately reclaim the file.
+DEAD_PID=$(python3 -c 'import os,sys,time
+pid = os.fork()
+if pid == 0:
+    time.sleep(0.05); os._exit(0)
+else:
+    os.waitpid(pid, 0)
+    print(pid)')
+echo "  dead pid (child, waited): $DEAD_PID"
+# Double-check — the PID should be truly gone.
+if kill -0 "$DEAD_PID" 2>/dev/null; then
+  echo "  FAIL  PID $DEAD_PID is still alive, skipping scenario 6"
+  fail=$((fail+1))
+else
+  printf 'fake-holder:pid-%s\n' "$DEAD_PID" > "$LOCK"
+  # Give it a fresh mtime (now) so mtime-stale is false — only PID-dead
+  # should trigger reclaim.
+  touch "$LOCK"
+
+  # Check timing: status should return stale=true AND reclaim the file.
+  status_json=$(node -e '
+  import("'"$REPO"'/scripts/aios-mlx-lock.js").then(async m => {
+    const t0 = Date.now();
+    const s = m.mlxLockStatus();
+    const took = Date.now() - t0;
+    console.log(JSON.stringify({ ...s, took_ms: took }));
+    process.exit(0);
+  });
+  ')
+  echo "  status: $status_json"
+  s_stale=$(python3 -c "import json; print(json.loads('''$status_json''').get('stale'))")
+  s_piddead=$(python3 -c "import json; print(json.loads('''$status_json''').get('pidDead'))")
+  s_took=$(python3 -c "import json; print(json.loads('''$status_json''').get('took_ms'))")
+  check "stale flagged true on dead PID" True "$s_stale"
+  check "pidDead flagged true on dead PID" True "$s_piddead"
+  if [ "$s_took" -lt 1000 ]; then
+    echo "  PASS  dead-PID detection took ${s_took}ms (< 1000ms budget)"
+    pass=$((pass+1))
+  else
+    echo "  FAIL  dead-PID detection took ${s_took}ms (>= 1000ms)"
+    fail=$((fail+1))
+  fi
+  # Status is supposed to RECLAIM the lock file when pidDead==true.
+  if [ ! -f "$LOCK" ]; then
+    echo "  PASS  dead-PID lock was reclaimed by status call"
+    pass=$((pass+1))
+  else
+    echo "  FAIL  dead-PID lock survived status call — expected reclaim"
+    fail=$((fail+1))
+  fi
+
+  # Python side should see the same: dead PID → reclaim.
+  printf 'fake-holder:pid-%s\n' "$DEAD_PID" > "$LOCK"
+  touch "$LOCK"
+  py_status_json=$(python3 -c '
+import json, sys
+sys.path.insert(0, "'"$REPO"'/scripts")
+from aios_mlx_lock import mlx_lock_status
+print(json.dumps(mlx_lock_status()))
+')
+  echo "  py status: $py_status_json"
+  py_stale=$(python3 -c "import json; print(json.loads('''$py_status_json''').get('stale'))")
+  py_piddead=$(python3 -c "import json; print(json.loads('''$py_status_json''').get('pid_dead'))")
+  check "python stale flagged on dead PID" True "$py_stale"
+  check "python pid_dead flagged on dead PID" True "$py_piddead"
+
+  # Shell side: parse of pid and kill -0 behaviour.
+  printf 'fake-holder:pid-%s\n' "$DEAD_PID" > "$LOCK"
+  touch "$LOCK"
+  sh_status=$("$REPO/scripts/aios-mlx-lock.sh" status)
+  echo "  sh status: $sh_status"
+  sh_stale=$(python3 -c "import json; print(json.loads('''$sh_status''').get('stale'))")
+  sh_piddead=$(python3 -c "import json; print(json.loads('''$sh_status''').get('pid_dead'))")
+  check "shell stale flagged on dead PID" True "$sh_stale"
+  check "shell pid_dead flagged on dead PID" True "$sh_piddead"
+fi
+
+# ───────── Scenario 7: task-runner re-entrancy via exported env ─────────
+echo
+echo "Scenario 7: parent holds, child spawned with AIOS_MLX_LOCK_HOLDER env."
+echo "            child's acquire is an instant no-op (re-entrant)."
+
+rm -f "$LOCK"
+# Parent acquires via Node helper.
+node -e '
+import("'"$REPO"'/scripts/aios-mlx-lock.js").then(async m => {
+  const ok = await m.tryMlxLock("task-runner:scn7-parent", { waitMs: 1000 });
+  if (!ok) { console.error("parent failed to acquire"); process.exit(2); }
+  console.log("parent acquired");
+  process.exit(0);
+});
+' > "$SCRATCH/scn7-parent.log" 2>&1
+# Now spawn a child with the env var set, mimicking what task-runner's
+# execFile with { env: { ..., AIOS_MLX_LOCK_HOLDER: "task-runner:scn7-parent" } } does.
+export AIOS_MLX_LOCK_HOLDER="task-runner:scn7-parent"
+child_py=$(python3 -c '
+import json, sys, time
+sys.path.insert(0, "'"$REPO"'/scripts")
+from aios_mlx_lock import try_mlx_lock, release_mlx_lock
+t0 = time.time() * 1000
+ok = try_mlx_lock("locomo-eval:pid-1234", wait_s=0.1)
+t1 = time.time() * 1000
+release_mlx_lock("locomo-eval:pid-1234")
+print(json.dumps({"acquired": ok, "wait_ms": int(t1-t0)}))
+')
+echo "  python child: $child_py"
+cpy_acq=$(python3 -c "import json; print(json.loads('''$child_py''').get('acquired'))")
+cpy_wait=$(python3 -c "import json; print(json.loads('''$child_py''').get('wait_ms'))")
+check "python child (task-runner env) acquired instantly" True "$cpy_acq"
+if [ "$cpy_wait" -lt 100 ]; then
+  echo "  PASS  python child wait=${cpy_wait}ms < 100ms (no-op)"
+  pass=$((pass+1))
+else
+  echo "  FAIL  python child wait=${cpy_wait}ms >= 100ms (not a no-op)"
+  fail=$((fail+1))
+fi
+# Parent lock must survive.
+if [ -f "$LOCK" ]; then
+  echo "  PASS  parent lock survived task-runner-style child"
+  pass=$((pass+1))
+else
+  echo "  FAIL  child release clobbered parent lock"
+  fail=$((fail+1))
+fi
+unset AIOS_MLX_LOCK_HOLDER
+
+# Parent releases.
+node -e '
+import("'"$REPO"'/scripts/aios-mlx-lock.js").then(async m => {
+  m.releaseMlxLock("task-runner:scn7-parent");
+  process.exit(0);
+});
+' > /dev/null 2>&1
+
+# ───────── Scenario 8: SIGKILL orphan recovery (D1) ─────────
+echo
+echo "Scenario 8: SIGKILL-orphan lock is recovered in <1s via PID-liveness."
+
+rm -f "$LOCK"
+# Spawn a Python child that acquires and then exec-replaces itself with
+# `sleep infinity` so we have a known-PID holder we can SIGKILL. We write
+# its PID into the lock (using a format the helper recognises).
+python3 -c '
+import os, sys
+sys.path.insert(0, "'"$REPO"'/scripts")
+from aios_mlx_lock import _try_acquire_atomic
+hid = f"orphan-test:pid-{os.getpid()}"
+assert _try_acquire_atomic(hid), "child acquire failed"
+# exec replaces process with `sleep infinity` — PID stays the same.
+os.execvp("sleep", ["sleep", "60"])
+' &
+ORPHAN_PID=$!
+# Wait briefly for the child to acquire and exec.
+sleep 0.5
+# Confirm the lock is held by the child's PID.
+on_disk=$(cat "$LOCK" 2>/dev/null || echo "")
+echo "  lock held by: $on_disk (orphan pid=$ORPHAN_PID)"
+if ! echo "$on_disk" | grep -q "pid-$ORPHAN_PID"; then
+  echo "  FAIL  orphan didn't acquire; skipping scenario 8"
+  kill -9 "$ORPHAN_PID" 2>/dev/null || true
+  fail=$((fail+1))
+else
+  # Now SIGKILL the orphan without giving it a chance to clean up.
+  kill -9 "$ORPHAN_PID" 2>/dev/null || true
+  wait "$ORPHAN_PID" 2>/dev/null || true
+  # The lock file still exists (finally/__exit__ didn't fire).
+  if [ ! -f "$LOCK" ]; then
+    echo "  FAIL  lock file vanished before PID-liveness check (unexpected)"
+    fail=$((fail+1))
+  else
+    # mlxLockStatus should detect dead-PID and reclaim < 1s.
+    t0=$(python3 -c 'import time; print(int(time.time()*1000))')
+    node -e '
+    import("'"$REPO"'/scripts/aios-mlx-lock.js").then(async m => {
+      const s = m.mlxLockStatus();
+      console.log(JSON.stringify(s));
+      process.exit(0);
+    });
+    ' > "$SCRATCH/scn8.log" 2>&1
+    t1=$(python3 -c 'import time; print(int(time.time()*1000))')
+    took=$(( t1 - t0 ))
+    s_json=$(cat "$SCRATCH/scn8.log")
+    echo "  status after SIGKILL: $s_json (took=${took}ms)"
+    s_piddead=$(python3 -c "import json; print(json.loads('''$s_json''').get('pidDead'))")
+    check "SIGKILL orphan flagged pidDead=true" True "$s_piddead"
+    if [ "$took" -lt 1000 ]; then
+      echo "  PASS  orphan-lock reclaimed in ${took}ms (< 1000ms)"
+      pass=$((pass+1))
+    else
+      echo "  FAIL  orphan-lock reclaim took ${took}ms (>= 1000ms)"
+      fail=$((fail+1))
+    fi
+    if [ ! -f "$LOCK" ]; then
+      echo "  PASS  orphan-lock file was unlinked"
+      pass=$((pass+1))
+    else
+      echo "  FAIL  orphan-lock file still present"
+      fail=$((fail+1))
+    fi
+  fi
+fi
+
 # ───────── Summary ─────────
 echo
 echo "════════════════════════════════════════════"
