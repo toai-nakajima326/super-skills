@@ -2054,8 +2054,12 @@ function handleHealth(req, res) {
     } catch { /* not ok */ }
   }
 
-  sendJson(res, mounted && dbOk ? 200 : 503, {
-    status: mounted && dbOk ? 'healthy' : 'degraded',
+  // Post-migration (2026-04-18): primary DB lives on SSD by default.
+  // Only require mount when explicitly running in ramdisk mode — otherwise
+  // the absence of /Volumes/VContext is the intended state, not a fault.
+  const isHealthy = USE_RAMDISK ? (mounted && dbOk) : dbOk;
+  sendJson(res, isHealthy ? 200 : 503, {
+    status: isHealthy ? 'healthy' : 'degraded',
     ram_disk: mounted,
     database: dbOk,
     ssd_database: ssdExists,
