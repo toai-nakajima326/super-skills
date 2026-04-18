@@ -28,6 +28,7 @@ import { URL } from 'node:url';
 import { readFileSync, appendFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -190,6 +191,76 @@ async function gatherSkillSuggestions(since) {
   }
 }
 
+// ── Cross-stream deduplication ───────────────────────────────
+//
+// Without this, the same article found by both article-scanner
+// (as pending-idea) and skill-discovery (as skill-suggestion)
+// produces two candidates for the same thing, wastes fitness cycles,
+// and can emit duplicate pending-patches for the same target skill.
+//
+// Key strategy (first match wins):
+//   1. source_url hash    — same upstream article regardless of stream
+//   2. target_skill name  — same target even if source URLs differ
+//   3. content_hash       — final fallback (substring of proposed_content)
+//
+// Merges: keep the highest-confidence candidate, record all source
+// streams in `merged_sources` so downstream scoring can boost
+// multi-stream confirmations (handled in scoreCandidate later).
+
+function candidateKey(c) {
+  const p = c.proposed_content || {};
+  const url = p.url || p.source_url;
+  if (url) {
+    try {
+      const u = new URL(url);
+      // Strip query + fragment, lowercase host, drop trailing slash
+      const norm = (u.protocol + '//' + u.host.toLowerCase() + u.pathname.replace(/\/$/, '')).slice(0, 200);
+      return 'url:' + crypto.createHash('sha256').update(norm).digest('hex').slice(0, 16);
+    } catch { /* bad URL — fall through */ }
+  }
+  if (c.target_skill) return 'skill:' + String(c.target_skill).toLowerCase().slice(0, 80);
+  // Last resort: first 400 chars of the textual payload
+  const text = typeof p === 'string' ? p : (p.idea_transfer || p.summary_ja || p.proposal || JSON.stringify(p));
+  return 'content:' + crypto.createHash('sha256').update(String(text).slice(0, 400)).digest('hex').slice(0, 16);
+}
+
+const CONFIDENCE_RANK = { high: 3, medium: 2, low: 1 };
+
+function confidenceScore(c) {
+  const pc = c.proposed_content || {};
+  // Agent-supplied numeric `score` (1-10) beats categorical if present
+  if (typeof pc.score === 'number') return pc.score / 10;
+  const conf = c.confidence || pc.confidence || 'medium';
+  return (CONFIDENCE_RANK[conf] || 2) / 3;
+}
+
+function dedupeCandidates(raw) {
+  const seen = new Map();   // key → candidate
+  const kept = [];
+  let dupes = 0;
+  for (const c of raw) {
+    const key = candidateKey(c);
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, { ...c, merged_sources: [c.source] });
+      kept.push(key);
+      continue;
+    }
+    dupes++;
+    // Merge: keep the higher-confidence candidate as the base,
+    // but record the other source so Phase (b) can reward consensus.
+    const a = confidenceScore(existing);
+    const b = confidenceScore(c);
+    if (b > a) {
+      const merged = { ...c, merged_sources: [...new Set([...existing.merged_sources, c.source])] };
+      seen.set(key, merged);
+    } else {
+      existing.merged_sources = [...new Set([...existing.merged_sources, c.source])];
+    }
+  }
+  return { deduped: kept.map(k => seen.get(k)), dropped: dupes };
+}
+
 // ── Phase (b)-(e) — stubs ─────────────────────────────────────
 
 function scoreCandidate(_c, _config) {
@@ -267,9 +338,17 @@ async function main() {
     gatherSkillSuggestions(since),
   ]);
 
-  const candidates = [...ideas, ...patches, ...suggestions];
+  const raw = [...ideas, ...patches, ...suggestions];
+  const perSourceRaw = raw.reduce((acc, c) => { acc[c.source] = (acc[c.source] || 0) + 1; return acc; }, {});
+  log(`gathered ${raw.length} raw candidates`, JSON.stringify(perSourceRaw));
+
+  // Cross-stream dedup — merges duplicate candidates that share source URL
+  // or target skill, preserves the higher-confidence version, and records
+  // all streams that found it (used by scoreCandidate for consensus boost).
+  const { deduped: candidates, dropped } = dedupeCandidates(raw);
   const perSource = candidates.reduce((acc, c) => { acc[c.source] = (acc[c.source] || 0) + 1; return acc; }, {});
-  log(`gathered ${candidates.length} candidates`, JSON.stringify(perSource));
+  if (dropped > 0) log(`deduped: ${dropped} duplicate candidate(s) merged across streams`);
+  log(`after dedup: ${candidates.length} unique candidates`, JSON.stringify(perSource));
 
   // Phase (b) — Score (stub: freshness + bias only)
   const scored = candidates.map(c => ({ c, fitness: scoreCandidate(c, config) }));

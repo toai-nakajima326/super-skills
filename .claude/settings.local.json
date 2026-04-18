@@ -220,7 +220,8 @@
       "Bash(mkdir -p .claude/skills)",
       "Bash(node scripts/build-all.js)",
       "Bash(rm -f /Users/mitsuru_nakajima/skills/.git/index.lock)",
-      "Bash(git commit -m 'fix: self-evolve auto-router → super-skills:*)"
+      "Bash(git commit -m 'fix: self-evolve auto-router → super-skills:*)",
+      "WebFetch(domain:support.apple.com)"
     ]
   }
 }
