@@ -2074,6 +2074,8 @@ function handleHealth(req, res) {
   sendJson(res, isHealthy ? 200 : 503, {
     status: isHealthy ? 'healthy' : 'degraded',
     ram_disk: mounted,
+    use_ramdisk: USE_RAMDISK,  // 2026-04-18: lets dashboards hide RAM-disk
+                                // health dot when SSD-only mode is intended
     database: dbOk,
     ssd_database: ssdExists,
     cloud_configured: cloudStore.isConfigured(),
@@ -2313,6 +2315,21 @@ function handleTierStats(req, res) {
   // Cloud stats
   const cloudCfg = loadCloudConfig();
 
+  // AC5 (2026-04-18 RAM-disk cleanup): surface the unified-mode signal so
+  // callers (dashboard, smoke tests, /admin dashboards) can collapse the
+  // historical RAM / SSD / Cloud 3-tier display into Primary / Archive /
+  // Cloud when the "RAM" tier is no longer a RAM disk.
+  //
+  //   unified === true   when primary and archive DBs point at the same
+  //                      file (post-merge; safe to show only one tier).
+  //   unified === false  when they are separate files (today's default:
+  //                      primary=vcontext-primary.sqlite, archive=ssd.db).
+  //   ram_disk_mounted   reflects whether /Volumes/VContext is live so
+  //                      dashboards can hide the "RAM Disk" red health
+  //                      dot when SSD-only mode is the intended state.
+  const unified = DB_PATH === SSD_DB_PATH;
+  const ramDiskMounted = existsSync(MOUNT_POINT);
+
   sendJson(res, 200, {
     ram: {
       entries: ramCount[0]?.count || 0,
@@ -2332,6 +2349,9 @@ function handleTierStats(req, res) {
       bucket: cloudCfg?.bucket || null,
       entries: 0, // stub — no cloud entry count available yet
     },
+    unified,
+    ram_disk_mounted: ramDiskMounted,
+    use_ramdisk: USE_RAMDISK,
   });
 }
 
