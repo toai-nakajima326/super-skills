@@ -4,12 +4,89 @@ Auto-maintained by the `self-evolve` skill. Records all upstream syncs, web disc
 
 ---
 
-## 2026-04-18 — web-discovery + upstream-sync
+## 2026-04-18 — 論文ソース補足 + 参照先リンク再帰チェック
 
 **Search window**: 2026-04-16 → 2026-04-18
-**Queries executed**: 8
-**New sources checked**: 14（WebFetch deep dives: 7ページ）
-**Candidates found**: 5 | **Adopted (pending-patch)**: 3 | **Skipped**: 2
+**調査カテゴリ**: arXiv 論文 / Papers with Code / Semantic Scholar / 既発見記事の参照先リンク
+**論文ソース数**: arXiv 9本確認（うち深掘り 6本）
+**参照先リンク数**: 4記事 × 最大3リンク = 12リンク確認（深掘り 7ページ）
+**新規候補**: 4件 | **採用（pending-patch 登録）**: 2件 | **スキップ**: 2件
+
+### 論文ソース評価（Fitness スコア）
+
+weights: novelty 0.25, proven 0.25, safe 0.20, actionable 0.20, freshness 0.10
+
+| Candidate | novelty | proven | safe | actionable | freshness | fitness | source |
+|-----------|---------|--------|------|-----------|-----------|---------|--------|
+| tool-context-budget | 0.80 | 0.90 | 1.00 | 0.90 | 0.85 | **0.88** | azukiazusa.dev + Anthropic Engineering Blog |
+| skill-security-audit | 0.85 | 0.80 | 1.00 | 0.80 | 0.80 | **0.83** | arXiv:2602.12430 |
+| speculative-tool-exec | 0.85 | 0.85 | 0.95 | 0.65 | 0.90 | **0.83** | arXiv:2603.18897 |
+| dynamic-workflow-graph | 0.75 | 0.85 | 1.00 | 0.60 | 0.90 | **0.78** | arXiv:2603.22386 |
+
+### Action: pending-patch 登録 — tool-context-budget (fitness=0.88)
+
+- **Source**: azukiazusa.dev「MCP Tool Context Overflow — Solutions and Patterns」(2026) + Anthropic Engineering「Equipping Agents for the Real World with Agent Skills」
+- **Reasoning**: MCP ツール定義のトークン消費管理ワークフロー（3パターン）。実測で 55.7k tokens の 27.9% がツール定義に消費されることが確認済み。既存の `mcp-server-patterns` はプロトコル仕様・セキュリティが中心で、コンテキスト予算管理ワークフローは不在。3パターン（progressive disclosure / code-execution bridge / search-based discovery）は具体的 actionable チェックリストあり。2独立ソース確認済み。
+- **vcontext id**: 129212
+- **Risk assessment**: low — 新スキル、既存スキルへの変更なし
+
+### Action: pending-patch 登録 — skill-security-audit (fitness=0.83)
+
+- **Source**: arXiv:2602.12430「Agent Skills for Large Language Models: Architecture, Acquisition, Security, and the Path Forward」(2026-02-12, Renjun Xu, Yang Yan)
+- **Reasoning**: コミュニティ提供スキルの 26.1% に脆弱性が含まれることが実証済み（arXiv 論文）。Anthropic Engineering ブログでも「信頼できるソースのみからインストールし、スクリプトを審査すること」と明示。既存の `security-review` はコードレビュー対象。`skill-security-audit` はスキルファイル自体の supply chain attack / prompt injection / exfiltration 審査ワークフローで差別化。具体的な 5カテゴリ チェックリスト + リスク分類表あり。
+- **vcontext id**: 129215
+- **Risk assessment**: low — 新スキル、既存スキルへの変更なし
+
+### Skipped: speculative-tool-exec (fitness=0.83)
+
+- **Source**: arXiv:2603.18897「Act While Thinking: Accelerating LLM Agents via Pattern-Aware Speculative Tool Execution」(2026-03-19, PASTE)
+- **Reasoning**: ツール実行待機時間を 48.5% 削減するパターン（制御フロー予測 + データ依存性予測）。novelty・freshness は高いが、actionable スコアが低い（実装がエージェントランタイム深部への組み込みを要する）。SKILL.md ワークフローとして表現しにくい。次サイクルで PASTE の実装が成熟したら再評価。
+
+### Skipped: dynamic-workflow-graph (fitness=0.78)
+
+- **Source**: arXiv:2603.22386「From Static Templates to Dynamic Runtime Graphs: A Survey of Workflow Optimization for LLM Agents」(2026-03-23, RPI & IBM Research)
+- **Reasoning**: 実行時にトポロジを生成・編集する動的エージェントグラフ。`supervisor-worker` との差別化はあるが、actionable スコアが低い（具体的な手順より理論的なフレームワーク）。かつ実装にはグラフ管理インフラが必要。`supervisor-worker` の注記に追加する形で対応可能。
+
+### 論文調査 — スキップ論文（参照のみ）
+
+| 論文 | arXiv ID | スキップ理由 |
+|------|----------|------------|
+| The Evolution of Tool Use in LLM Agents | 2603.22862 | 調査論文。6次元フレームワークは概念的で actionable なワークフロー不在 |
+| Learning to Rewrite Tool Descriptions | 2602.20426 | カリキュラム学習ベース。SKILL.md ワークフローとして実装不可 |
+| Multi-Agent Teams Hold Experts Back | 2602.01011 | 発見（合意志向の落とし穴）は confidence-filter / debate-consensus で既カバー |
+| SciFi (Scientific Agentic Workflow) | 2604.13180 | 科学計算特化、汎用スキルとして抽出不可 |
+| How Well Do Agentic Skills Work in the Wild | 2604.04323 | ベンチマーク論文。設計への示唆あり（query-specific refinement）だがスキル化不要 |
+| Externalization in LLM Agents | 2604.08224 | 調査論文。Memory/Skills/Protocols/Harness の4層フレームワークは既存設計を支持するが新スキル不要 |
+
+### 参照先リンク 再帰チェック — 新規発見なし
+
+| 元記事 | 確認リンク | 結果 |
+|--------|-----------|------|
+| Zenn nanahiryu Claude Code Skills | azukiazusa.dev (context-overflow) | **採用** → tool-context-budget |
+| Zenn nanahiryu Claude Code Skills | builder.io/blog/agent-skills-rules-commands | `careful` / rules vs skills 区別は既知。新スキル不要 |
+| Zenn nanahiryu Claude Code Skills | agentskills.io/home | 標準仕様確認。新スキル不要 |
+| Qiita 53スキル記事 | 404 | アクセス不可 |
+| DevelopersIO Agent Teams | code.claude.com/docs/ja/agent-teams | 実験的機能、前回スキップ済み |
+| AI Watch Claude Managed Agents | claude.com/blog/claude-managed-agents | 前回 fitness=0.73 でスキップ済み、評価変更なし |
+
+### 今回サイクル合計 pending-patch
+
+| ID | スキル名 | fitness | cycle_id |
+|----|---------|---------|---------|
+| 129030 | ultraplan | 0.93 | 2026-18 |
+| 129033 | autofix-pr | 0.89 | 2026-18 |
+| 129036 | generator-verifier | 0.84 | 2026-18 |
+| **129212** | **tool-context-budget** | **0.88** | **2026-18** |
+| **129215** | **skill-security-audit** | **0.83** | **2026-18** |
+
+---
+
+## 2026-04-18 — web-discovery + upstream-sync (+ 日本語サイト追加検索)
+
+**Search window**: 2026-04-16 → 2026-04-18
+**Queries executed**: 8 + 5（日本語サイト追加分）
+**New sources checked**: 14（WebFetch deep dives: 7ページ）+ 14（日本語サイト: WebSearch 5クエリ + WebFetch 5ページ）
+**Candidates found**: 5 + 4（日本語ソース） | **Adopted (pending-patch)**: 3 | **Skipped**: 2 + 4（日本語ソース、top-3 変更なし）
 
 ### Upstream Sync: 変更なし
 - **Reasoning**: `git fetch upstream` + `git log upstream/main ^HEAD --since=2026-04-16` で新規コミットなし。upstream に採用対象の変更なし。
@@ -48,6 +125,37 @@ Auto-maintained by the `self-evolve` skill. Records all upstream syncs, web disc
 
 ### Skipped: message-bus-agents (fitness=0.82)
 - **Reasoning**: Anthropic 公式ブログで5パターンの一つとして確認。ただし、具体的な実装ステップが `supervisor-worker` パターンとの差別化に不十分。イベントバス/パブサブ基盤の実装詳細を含む独立したワークフローとして成立させるにはさらなる情報源が必要。次サイクルで再評価。
+
+### 日本語ソース追加検索（2026-04-18 追記）
+
+**追加検索ソース:**
+- `site:zenn.dev` — "Claude Code スキル 2026" + "AIエージェント パターン 2026"
+- `site:qiita.com` — "Claude Code スキル 2026"
+- `site:dev.classmethod.jp` — "AIエージェント 2026 Claude Code"
+- `site:ai.watch.impress.co.jp` — 最新AI記事（2026年4月）
+
+**日本語候補の Fitness スコア**（weights デフォルト: novelty 0.25, proven 0.25, safe 0.20, actionable 0.20, freshness 0.10）
+
+| Candidate | novelty | proven | safe | actionable | freshness | fitness | source |
+|-----------|---------|--------|------|-----------|-----------|---------|--------|
+| skills-evolve | 0.80 | 0.75 | 0.90 | 0.85 | 0.55 | **0.77** | Qiita (2026-03-14) |
+| review-squad | 0.70 | 0.75 | 1.00 | 0.80 | 0.55 | **0.75** | Qiita (2026-03-14) |
+| Claude Managed Agents | 0.65 | 0.90 | 1.00 | 0.55 | 0.65 | **0.73** | AI Watch (2026-04-10) |
+| agent-teams | 0.70 | 0.80 | 0.85 | 0.65 | 0.60 | **0.72** | DevelopersIO (2026-02-09) |
+
+**判定: top-3 変更なし**（ultraplan 0.93 / autofix-pr 0.89 / generator-verifier 0.84 が依然上位）
+
+**次サイクル再評価候補:**
+
+- **skills-evolve** (fitness=0.77): ツール呼び出し履歴と SKILL.md 定義の乖離を検出→自動修正するメタレイヤー（Qiita: Claude Code に53個のスキルを仕込んだら、AIが自分自身を改善し始めた話 / 2026-03-14）。`self-evolve` スキルとはアプローチが異なる（実行履歴ベースの差分検出）が、英語ソースでの独立確認が取れていない。freshness 0.55（2026-04-16 以前）。次サイクルで英語 counterpart を探索。
+- **review-squad** (fitness=0.75): 差分ファイル数に応じて 3〜10 体のレビューエージェントを自動スケーリング選択（Qiita: 2026-03-14）。`confidence-filter` + `supervisor-worker` の組み合わせに部分的に収まるが、「PR サイズベース動的スケーリング」という具体的ロジックは不在。英語ソース確認待ち。
+- **Claude Managed Agents** (fitness=0.73): Anthropic が4/8 発表の本番エージェントインフラ（サンドボックス、チェックポイント、認証情報管理、E2E トレース）。スキルとして抽象化するには actionable が低い。`claude-routines` スキルへの注記追加で対応可能。AI Watch 記事: https://ai.watch.impress.co.jp/docs/news/2100770.html
+- **agent-teams** (fitness=0.72): ピアツーピアのエージェント直接通信（DevelopersIO: 2026-02-09）。2026-04-17 run で既に「実験的機能、supervisor-worker と重複」として Skipped。評価変更なし。
+
+**Skipped（このサイクル）:**
+
+- ReAct / Self-Reflection パターン (Zenn: 2026-02-14) — freshness 低（2026-04-16 以前）、かつ既存 `verification-loop` + `debate-consensus` でカバー済み。
+- マルチエージェントオーケストレーション比較 (Zenn: 2026-01-19) — 英語ソースで既確認のパターン集で novelty 低。
 
 ### Skipped: ultrareview (fitness計測外)
 - **Reasoning**: 4/16 以前に Week 14 でリリース済み (v2.1.86)。フレッシュネス条件（2026-04-16以降）を満たさないため対象外。
