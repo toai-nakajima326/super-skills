@@ -1399,7 +1399,8 @@ async function handleStore(req, res) {
       try {
         let embedding = null;
         try {
-          embedding = await mlxEmbed(content.slice(0, 1000));
+          // Code-point-aware slice + mlxEmbed's internal sanitize = no surrogate half-cut (2026-04-18)
+          embedding = await mlxEmbed(safeSliceCodePoints(content, 1000));
         } catch (e) {
           console.log(`[store] MLX embed failed: ${e.message}`);
         }
@@ -3311,14 +3312,16 @@ async function startEmbedLoop() {
           // shows embed+generate pairing ALSO OOMs, wrap this call in
           // aios-mlx-lock too (docs/analysis/2026-04-18-embed-backlog).
           //
-          // sanitizeEmbedText strips lone UTF-16 surrogates introduced
-          // when .slice(0, 1000) cuts between a surrogate pair. A single
-          // poisoned row would otherwise pin the loop forever: MLX
-          // (Python) rejects lone surrogates as 400, the whole batch
-          // fails, the loop retries the SAME DESC rows at 10 req/s
-          // (2026-04-18 incident — embed pace fell to 0 emb/s while
-          //  /store path at ~0.2 emb/s kept backlog growing).
-          embeddings = await _mlxEmbedBatchRaw(rows.map(r => sanitizeEmbedText(String(r.content).slice(0, 1000))));
+          // Defense-in-depth for the 2026-04-18 embed-backlog incident:
+          //   (1) safeSliceCodePoints avoids cutting surrogate pairs —
+          //       preserves the trailing emoji character that would
+          //       otherwise be half-truncated by plain .slice(0, 1000).
+          //   (2) sanitizeEmbedText catches any unpaired surrogate that
+          //       slipped in from other sources (not just slice). Without
+          //       either, a single poisoned row pinned the loop forever
+          //       (MLX Python rejects lone surrogates as 400, loop retries
+          //       the SAME DESC rows at 10 req/s; embed pace → 0 emb/s).
+          embeddings = await _mlxEmbedBatchRaw(rows.map(r => sanitizeEmbedText(safeSliceCodePoints(String(r.content), 1000))));
         } catch (e) {
           console.log(`[embed-loop] batch failed (${rows.length} rows): ${e.message}`);
         }
@@ -4816,6 +4819,31 @@ function sanitizeEmbedText(s) {
   // Drop any unpaired high (D800-DBFF) or low (DC00-DFFF) surrogate.
   // Regex: \p{Surrogate} requires u flag; simpler: keep valid BMP + valid pairs.
   return s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
+}
+
+// Code-point-aware slice (2026-04-18 followup to the embed-backlog fix).
+// String.prototype.slice counts UTF-16 code UNITS, so an emoji (2 code units,
+// 1 code point) at the cutoff is chopped in half — losing the character
+// AND producing an unpaired surrogate. [...s] iterator yields code points,
+// so slicing the array preserves whole characters.
+//
+// Trade-off: slight CPU (O(n) string → array, O(n) join) but N≤4000 so
+// negligible vs MLX inference cost.  Callers should still pass the result
+// through sanitizeEmbedText as defense-in-depth — if any exotic sequence
+// slips through (e.g., non-surrogate control chars), sanitize catches it.
+function safeSliceCodePoints(s, n) {
+  if (!s || s.length <= n) return s;
+  // Fast-path: ASCII-only strings have no astral chars, regular slice is safe.
+  // Detect by checking for any char > 0x7F in the window we're about to slice.
+  // If none found, plain slice is identical to code-point slice and faster.
+  let hasMultiByte = false;
+  for (let i = 0; i < Math.min(s.length, n + 2); i++) {
+    if (s.charCodeAt(i) > 0x7F) { hasMultiByte = true; break; }
+  }
+  if (!hasMultiByte) return s.slice(0, n);
+  const arr = [...s];
+  if (arr.length <= n) return s;  // code-point length within limit
+  return arr.slice(0, n).join('');
 }
 
 // Mutex for MLX embed — prevents GPU contention between embed loop and inline store
