@@ -123,6 +123,25 @@ Other AIOS instances can federate through the protocol.
 **AIOS assets that plug in** — vcontext server (already on port 3150), `aios-skill-bridge`
 (protocol translation layer), MCP ecosystem Claude already speaks.
 
+### Dogfooding principle (2026-04-18 addition)
+
+AIOS 自身がホストする infrastructure を Claude Code などのクライアントが
+**優先して使う** こと。外部ツール (WebSearch 等) は fallback。これにより:
+- 検索履歴が SearXNG + vcontext に蓄積 → Pillar 1 Episodic memory の
+  一部として再利用可能
+- Dogfood によって SearXNG/MLX/Langfuse/Dashboard の不具合や遅延が
+  自分の日常で先に顕在化 → 外部ユーザー露出前に修正できる
+- AIOS が自立した IT 基盤として機能する証拠を日々積み上げる
+
+**具体ルール** (`~/.claude/CLAUDE.md` に記載済):
+
+| 用途 | 第1選択 | Fallback |
+|------|---------|---------|
+| 既知 URL の取得 | WebFetch | — |
+| クエリ (要検索) | **SearXNG** (`http://127.0.0.1:8888/search?q=...&format=json`) | WebSearch |
+| semantic search on AIOS memory | vcontext `/search/semantic` | — |
+| LLM generate | MLX Qwen3-8B ローカル | Claude API (明示指示時のみ) |
+
 **Research**
 - Anthropic MCP spec — https://modelcontextprotocol.io/docs
 - MIRIX multi-tier memory schema — https://arxiv.org/abs/2507.07957
