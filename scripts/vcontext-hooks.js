@@ -2198,7 +2198,15 @@ async function handleSkillContext(skillName) {
 
 // ── OS primitives: paths & shared helpers ───────────────────────
 
-const VCTX_RAM_DB   = '/Volumes/VContext/vcontext.db';
+// Primary DB path resolution — matches vcontext-server.js:65-71.
+// After 2026-04-18 RAM→SSD migration (commit d621456), the default is
+// the SSD primary DB. RAM-disk mode is opt-in via VCONTEXT_USE_RAMDISK=1.
+// Constant name kept as VCTX_RAM_DB to avoid touching 17 call sites;
+// it now means "currently active primary DB path".
+const VCTX_RAM_DB   = process.env.VCONTEXT_DB_PATH ||
+  (process.env.VCONTEXT_USE_RAMDISK === '1'
+    ? '/Volumes/VContext/vcontext.db'
+    : join(homedir(), 'skills', 'data', 'vcontext-primary.sqlite'));
 const VCTX_SSD_DIR  = join(homedir(), 'skills', 'data');
 const VCTX_SSD_DB   = join(VCTX_SSD_DIR, 'vcontext-ssd.db');
 const VCTX_AUDIT_DB = join(VCTX_SSD_DIR, 'vcontext-audit.db'); // append-only
@@ -2355,7 +2363,8 @@ async function cmdIntegrity() {
   console.error('DB integrity: FAILED');
   console.error(out);
   auditWrite({ event: 'integrity.fail', detail: out.slice(0, 500) });
-  // Offer restore path
+  // Offer restore path — target the currently active DB (primary on SSD,
+  // or RAM path when VCONTEXT_USE_RAMDISK=1).
   const backup = join(VCTX_SSD_DIR, 'vcontext-backup.sqlite');
   if (existsSync(backup)) {
     console.error(`Restore candidate: ${backup}`);
