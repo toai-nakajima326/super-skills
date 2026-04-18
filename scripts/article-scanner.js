@@ -33,28 +33,82 @@ const MLX_MODEL = process.env.MLX_GENERATE_MODEL || 'mlx-community/Qwen3-8B-4bit
 // Sources — add here to expand coverage. `domain` is the site: operator.
 // `link_pattern` selects "follow-worthy" internal links (we want the deeper
 // technical refs, not nav/profile pages).
+// Sources — day-of-week rotation keeps load predictable while expanding breadth.
+// `days` is a set of weekday numbers (0=Sun .. 6=Sat) this source runs on.
+// `everyday:true` sources run daily regardless.
+// `category` is metadata for the digest output.
+// `link_pattern` restricts 1-hop link following to in-site technical refs.
 const SOURCES = [
+  // ── JP tech blogs (daily — core loop, user-provided list) ──
   {
-    name: 'qiita',
+    name: 'qiita', category: 'jp-blog', everyday: true,
     domain: 'qiita.com',
     link_pattern: /^https?:\/\/qiita\.com\/[^/]+\/items\/[a-f0-9]+$/i,
   },
   {
-    name: 'zenn',
+    name: 'zenn', category: 'jp-blog', everyday: true,
     domain: 'zenn.dev',
     link_pattern: /^https?:\/\/zenn\.dev\/[^/]+\/articles\/[a-z0-9-]+$/i,
   },
   {
-    name: 'classmethod',
+    name: 'classmethod', category: 'jp-blog', everyday: true,
     domain: 'dev.classmethod.jp',
     link_pattern: /^https?:\/\/dev\.classmethod\.jp\/articles\/[^/]+\/?$/i,
+  },
+  // ── Papers (weekend-heavy, deeper reads) ──
+  {
+    name: 'arxiv', category: 'paper', days: [1, 4], // Mon, Thu
+    domain: 'arxiv.org',
+    // Abstract pages only (PDFs would overwhelm stripHtml)
+    link_pattern: /^https?:\/\/arxiv\.org\/abs\/\d{4}\.\d{4,5}(v\d+)?$/i,
+  },
+  {
+    name: 'huggingface-papers', category: 'paper', days: [2, 5], // Tue, Fri
+    domain: 'huggingface.co',
+    link_pattern: /^https?:\/\/huggingface\.co\/papers\/\d{4}\.\d{4,5}$/i,
+  },
+  // ── OSS / GitHub releases ──
+  {
+    name: 'github', category: 'oss', days: [3, 6], // Wed, Sat
+    domain: 'github.com',
+    // README or release pages are useful; issues/PRs are too noisy
+    link_pattern: /^https?:\/\/github\.com\/[^/]+\/[^/]+\/(releases\/tag|blob\/[^/]+\/README|tree)[^?]*$/i,
+  },
+  // ── Vendor blogs (weekly or twice-weekly news) ──
+  {
+    name: 'anthropic', category: 'vendor-blog', days: [0, 3], // Sun, Wed
+    domain: 'anthropic.com',
+    link_pattern: /^https?:\/\/(www\.)?anthropic\.com\/(news|research|engineering)\/[a-z0-9-]+$/i,
+  },
+  {
+    name: 'openai', category: 'vendor-blog', days: [1, 4], // Mon, Thu
+    domain: 'openai.com',
+    link_pattern: /^https?:\/\/openai\.com\/index\/[a-z0-9-]+\/?$/i,
+  },
+  {
+    name: 'google-ai', category: 'vendor-blog', days: [2, 5], // Tue, Fri
+    domain: 'ai.google.dev',
+    link_pattern: /^https?:\/\/ai\.google\.dev\/(gemini-api|edge|responsible-ai)/i,
+  },
+  // ── News aggregators (high signal, low cost) ──
+  {
+    name: 'hackernews', category: 'news', days: [0, 2, 4, 6], // 週4回
+    domain: 'news.ycombinator.com',
+    // HN item pages — scanner will hit these via search, body = comments + title
+    link_pattern: /^https?:\/\/news\.ycombinator\.com\/item\?id=\d+$/i,
+  },
+  {
+    name: 'deeplearning-batch', category: 'newsletter', days: [5], // Fri
+    domain: 'deeplearning.ai',
+    link_pattern: /^https?:\/\/www\.deeplearning\.ai\/the-batch\/[a-z0-9-]+\/?$/i,
   },
 ];
 
 // Keywords — rotate subset each run to cover breadth over ~week.
-// Biased toward AIOS-relevant topics: local LLM, memory hierarchy,
-// agent skills, self-improve, MCP, observability, MLX.
+// Mixed ja/en; ja keywords tend to land on qiita/zenn/classmethod,
+// en keywords on arxiv/hn/vendor blogs. SearXNG handles language auto.
 const KEYWORDS = [
+  // AIOS core interests (high reuse across sources)
   'MLX Apple Silicon LLM',
   'Claude Code agent skills',
   'MCP protocol Anthropic',
@@ -70,11 +124,25 @@ const KEYWORDS = [
   'OpenTelemetry GenAI',
   'LLM memory hierarchy',
   'multi-agent orchestration',
+  // Paper-leaning keywords (arxiv, huggingface papers)
+  'hierarchical attention long context',
+  'KV cache compression',
+  'agentic retrieval benchmark',
+  'evolutionary code generation LLM',
+  'small language model fine-tuning',
+  // Observability / infra
+  'Langfuse LLM observability',
+  'GenAI semantic conventions OpenTelemetry',
+  // Tooling / ecosystem
+  'Model Context Protocol server',
+  'Apple MLX quantization 4bit',
+  'Qwen3 local inference',
 ];
 
 // Tunables — all overridable via env for one-off runs
-const MAX_ARTICLES_PER_SOURCE = parseInt(process.env.SCANNER_MAX_PER_SOURCE) || 3;
-const MAX_KEYWORDS_PER_RUN    = parseInt(process.env.SCANNER_MAX_KEYWORDS) || 5;
+const MAX_ARTICLES_PER_SOURCE = parseInt(process.env.SCANNER_MAX_PER_SOURCE) || 2;
+const MAX_KEYWORDS_PER_RUN    = parseInt(process.env.SCANNER_MAX_KEYWORDS) || 4;
+const FORCE_ALL_SOURCES       = process.env.SCANNER_ALL_SOURCES === '1';
 const MAX_LINK_HOPS           = parseInt(process.env.SCANNER_MAX_LINKS) || 2;
 const FETCH_TIMEOUT_MS        = parseInt(process.env.SCANNER_FETCH_TIMEOUT) || 15000;
 const POLITE_SLEEP_MS         = parseInt(process.env.SCANNER_POLITE_SLEEP) || 2000;
@@ -399,10 +467,21 @@ function pickKeywords() {
   return keywords.slice(0, MAX_KEYWORDS_PER_RUN);
 }
 
+function sourcesForToday() {
+  // Bypass toggle for one-off "scan everything" runs (env SCANNER_ALL_SOURCES=1
+  // or CLI --all).  Useful for post-launch verification or catch-up scans.
+  if (FORCE_ALL_SOURCES || process.argv.includes('--all')) return SOURCES.slice();
+  const today = new Date().getUTCDay(); // 0 Sun .. 6 Sat (UTC — aligned with LaunchAgent)
+  return SOURCES.filter(s => s.everyday || (Array.isArray(s.days) && s.days.includes(today)));
+}
+
 async function main() {
   const t0 = Date.now();
   const keywords = pickKeywords();
-  log(`starting scan — ${SOURCES.length} sources × ${keywords.length} keywords × up to ${MAX_ARTICLES_PER_SOURCE} articles each`);
+  const sources = sourcesForToday();
+  const totalArticles = sources.length * keywords.length * MAX_ARTICLES_PER_SOURCE;
+  log(`starting scan — ${sources.length}/${SOURCES.length} sources × ${keywords.length} keywords × up to ${MAX_ARTICLES_PER_SOURCE} articles = ${totalArticles} max`);
+  log(`sources today: ${sources.map(s => s.name).join(', ')}`);
   log(`keywords today: ${keywords.map(k => `"${k}"`).join(', ')}`);
   if (DRY_RUN) log('DRY RUN — no writes');
 
@@ -417,15 +496,16 @@ async function main() {
 
   const summary = {
     started_at: new Date(t0).toISOString(),
-    sources_scanned: SOURCES.length,
+    sources_scanned: sources.map(s => s.name),
+    sources_skipped_today: SOURCES.filter(s => !sources.includes(s)).map(s => s.name),
     keywords_used: keywords,
     per_source: {},
     total_stored: 0,
     total_high_impact: 0,
   };
 
-  for (const source of SOURCES) {
-    summary.per_source[source.name] = { stored: 0, high_impact: 0 };
+  for (const source of sources) {
+    summary.per_source[source.name] = { stored: 0, high_impact: 0, category: source.category };
     for (const keyword of keywords) {
       try {
         const res = await scanOne(keyword, source);
