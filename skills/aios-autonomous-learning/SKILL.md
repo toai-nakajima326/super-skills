@@ -28,7 +28,7 @@ origin: unified
 └──────────────────────┬──────────────────────────────────┘
                        ↓  (approve/auto-approve)
 ┌─────────────────────────────────────────────────────────┐
-│              aios-learning-bridge.js                     │
+│              aios-learning-bridge.cjs                     │
 │  pending-patch を監視 → 承認済みを SKILL.md に適用         │
 │  → validate → vcontext skill-registry を更新             │
 └──────────────────────┬──────────────────────────────────┘
@@ -131,7 +131,7 @@ def on_skill_used(agent, skill_name: str, result: dict):
 ## Stream 3: pending-patch 自動適用ブリッジ
 
 ```javascript
-// scripts/aios-learning-bridge.js
+// scripts/aios-learning-bridge.cjs
 // LaunchAgent または BullMQ ジョブとして定期実行
 // pending-patch を監視し、条件付きで自動承認・適用
 
@@ -237,7 +237,7 @@ async function applyPatch(skillName, content) {
 
 ```python
 # aios/hooks/modules/skill_query_trigger.py
-# セッション終了時または知識ギャップ検出時に skill-query-generator.js をトリガー
+# セッション終了時または知識ギャップ検出時に skill-query-generator.cjs をトリガー
 
 from aios.hooks.modules.skill_query_trigger import get_discovery_queries
 
@@ -275,7 +275,7 @@ hooks:
 # 自律学習ブリッジ設定
 autonomous_learning:
   enabled: true
-  bridge_script: "~/skills/scripts/aios-learning-bridge.js"
+  bridge_script: "~/skills/scripts/aios-learning-bridge.cjs"
   auto_approve_threshold: 0.85
   run_interval_minutes: 60
 ```
@@ -286,7 +286,7 @@ autonomous_learning:
 2. `skill_gap_detector.py` が `skill-suggestion` を vcontext に登録
 3. 週次 self-evolve サイクルが `skill-suggestion` を Stream 5 で収集
 4. fitness スコアリング → top-K を pending-patch として vcontext に保存
-5. `aios-learning-bridge.js` が定期実行 → fitness ≥ 0.85 を自動適用
+5. `aios-learning-bridge.cjs` が定期実行 → fitness ≥ 0.85 を自動適用
 6. 新スキルが `~/skills/skills/` に追加 → `SkillsTool` が自動検出
 7. `skill-usage` トラッキングで adoption_rate が蓄積 → 次サイクルの精度向上
 

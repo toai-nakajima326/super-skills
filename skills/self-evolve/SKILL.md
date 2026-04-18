@@ -53,9 +53,9 @@ const dynamicQueries = await vcRecall(`type=discovery-query&tag=cycle:${cycleId}
 // dynamicQueries は MLX/Claude が分析した「今不足している分野」のクエリ
 // skill-usage, skill-gap, skill-suggestion を分析して自動生成済み
 ```
-- **生成元**: `scripts/skill-query-generator.js` (MLX Qwen3-8B → Claude Haiku fallback)
+- **生成元**: `scripts/skill-query-generator.cjs` (MLX Qwen3-8B → Claude Haiku fallback)
 - **クエリ数**: 最大10件 (日本語5 + 英語5)
-- **更新頻度**: self-evolveサイクル前に `node scripts/skill-query-generator.js` を実行
+- **更新頻度**: self-evolveサイクル前に `node scripts/skill-query-generator.cjs` を実行
 
 ### Phase (b) — Score
 
@@ -159,7 +159,7 @@ Design reference: `docs/analysis/2026-04-18-self-evolve-redesign.md` section 4.
 3. If first run or no date found, use "after:{30_days_ago}"
 
 ### Step 0 (pre-step): Generate dynamic queries
-Run `node scripts/skill-query-generator.js` to generate this cycle's dynamic queries, then include `discovery-query` results from vcontext in the search queue.
+Run `node scripts/skill-query-generator.cjs` to generate this cycle's dynamic queries, then include `discovery-query` results from vcontext in the search queue.
 
 ### Step 1: Broad search (cast a wide net)
 Search across ALL of these categories. Do not skip any.

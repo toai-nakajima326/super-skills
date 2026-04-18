@@ -3,7 +3,7 @@ skill_query_trigger.py — AIOS hook for triggering skill-query-generator
 Place at: aios/hooks/modules/skill_query_trigger.py
 
 Called at end of each AIOS session or when skill-gap density exceeds threshold.
-Runs skill-query-generator.js which feeds discovery-query entries into vcontext
+Runs skill-query-generator.cjs which feeds discovery-query entries into vcontext
 for the next self-evolve cycle to consume.
 """
 
@@ -16,7 +16,7 @@ from pathlib import Path
 
 VCONTEXT_URL = "http://127.0.0.1:3150"
 SKILLS_ROOT = Path.home() / "skills"
-GENERATOR_SCRIPT = SKILLS_ROOT / "scripts" / "skill-query-generator.js"
+GENERATOR_SCRIPT = SKILLS_ROOT / "scripts" / "skill-query-generator.cjs"
 
 # セッションあたりのギャップ数がこれを超えたらクエリ生成をトリガー
 GAP_THRESHOLD = 3
@@ -85,7 +85,7 @@ def get_discovery_queries(cycle_id: str = None) -> list[dict]:
 # ── Internal helpers ────────────────────────────────────────────────────────
 
 def _run_query_generator(reason: str = ""):
-    """Fire skill-query-generator.js as a subprocess (non-blocking)."""
+    """Fire skill-query-generator.cjs as a subprocess (non-blocking)."""
     if not GENERATOR_SCRIPT.exists():
         return
     try:

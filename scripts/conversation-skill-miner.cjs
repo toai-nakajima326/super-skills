@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * conversation-skill-miner.js
+ * conversation-skill-miner.cjs
  *
  * vcontextに蓄積された過去の会話履歴を分析し、
  * 「こういうスキルがあれば便利だった」という機会を検出して
@@ -9,7 +9,7 @@
  * new-feature-watcherが「外部の新製品」を追跡するのに対し、
  * これは「ユーザー自身のニーズ」から逆算する内向きのマイナー。
  *
- * 実行: node scripts/conversation-skill-miner.js
+ * 実行: node scripts/conversation-skill-miner.cjs
  * LaunchAgent: com.vcontext.conversation-skill-miner (毎日 11:00)
  */
 

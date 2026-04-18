@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * aios-learning-bridge.js
+ * aios-learning-bridge.cjs
  *
  * self-evolve の pending-patch を監視し、自動承認条件を満たすものを
  * 自動で SKILL.md に適用する自律学習ブリッジ。
  *
  * 実行方法:
- *   node scripts/aios-learning-bridge.js         # 1回実行
- *   node scripts/aios-learning-bridge.js --watch  # 定期実行 (60分ごと)
+ *   node scripts/aios-learning-bridge.cjs         # 1回実行
+ *   node scripts/aios-learning-bridge.cjs --watch  # 定期実行 (60分ごと)
  */
 
 'use strict';
@@ -62,7 +62,7 @@ function vcGet(path_) {
 
 // ── クエリ生成トリガー ────────────────────────────
 function triggerQueryGenerator() {
-  const script = path.join(process.env.HOME, 'skills', 'scripts', 'skill-query-generator.js');
+  const script = path.join(process.env.HOME, 'skills', 'scripts', 'skill-query-generator.cjs');
   if (!fs.existsSync(script)) return;
   const nodePath = fs.existsSync(path.join(process.env.HOME, '.nvm/versions/node/v25.9.0/bin/node'))
     ? path.join(process.env.HOME, '.nvm/versions/node/v25.9.0/bin/node')
@@ -73,7 +73,7 @@ function triggerQueryGenerator() {
     stdio: 'ignore'
   });
   child.unref();
-  log('triggered skill-query-generator.js (background)');
+  log('triggered skill-query-generator.cjs (background)');
 }
 
 // ── メイン処理 ──────────────────────────────────

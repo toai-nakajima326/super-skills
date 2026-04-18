@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * skill-query-generator.js
+ * skill-query-generator.cjs
  *
  * past skill-usage / skill-gap / skill-suggestion を vcontext から読み取り、
  * MLX (Qwen3-8B) または Claude API で「今不足している分野」を分析し、
@@ -10,8 +10,8 @@
  * self-evolve の Phase(a) Step1 で固定クエリと組み合わせて使用される。
  *
  * 使用方法:
- *   node scripts/skill-query-generator.js
- *   node scripts/skill-query-generator.js --dry-run  # vcontextに保存しない
+ *   node scripts/skill-query-generator.cjs
+ *   node scripts/skill-query-generator.cjs --dry-run  # vcontextに保存しない
  */
 
 'use strict';

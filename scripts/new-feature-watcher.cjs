@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * new-feature-watcher.js
+ * new-feature-watcher.cjs
  *
  * 新しいAIツール・製品リリース・概念・パターンを毎日監視し、スキルが存在しない場合に
  * SKILL.md候補を自動生成してvcontextのpending-patchに登録する。
  *
- * 実行: node scripts/new-feature-watcher.js
+ * 実行: node scripts/new-feature-watcher.cjs
  * LaunchAgent: com.vcontext.new-feature-watcher (毎日 10:00)
  */
 
