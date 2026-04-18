@@ -90,11 +90,89 @@ threshold_ok() {
   esac
 }
 
+# next_fire_for: for cron-{daily,weekly} agents, parse launchctl print's
+# StartCalendarInterval descriptor (Hour/Minute/Weekday) and return the
+# next scheduled fire time as "YYYY-MM-DD HH:MM" in local tz.
+# Returns "-" for non-cron agents or if no schedule is found.
+# Returns "MALFORMED" if the plist is loaded but has no parseable descriptor.
+next_fire_for() {
+  local agent="$1" kind="$2"
+  case "$kind" in
+    cron-daily|cron-weekly) ;;
+    *) echo "-"; return ;;
+  esac
+
+  local print_out
+  print_out=$(launchctl print "gui/$(id -u)/$agent" 2>/dev/null) || {
+    echo "NOT-LOADED"
+    return
+  }
+
+  # Interval-based agents (StartInterval) have "run interval = N seconds"
+  # instead of a calendar descriptor. Report as interval=Ns, not malformed.
+  local run_interval
+  run_interval=$(printf '%s\n' "$print_out" | sed -n 's/^[[:space:]]*run interval = \([0-9]*\) seconds.*/\1/p' | head -1)
+  if [[ -n "$run_interval" ]]; then
+    echo "every ${run_interval}s"
+    return
+  fi
+
+  # Extract the descriptor block (between the { after "descriptor =" and
+  # the matching }). Then grep "Hour"/"Minute"/"Weekday" lines.
+  local desc
+  desc=$(printf '%s\n' "$print_out" | awk '/descriptor = \{/{flag=1;next} flag && /\}/{flag=0} flag')
+  if [[ -z "$desc" ]]; then
+    echo "MALFORMED"
+    return
+  fi
+
+  local hour minute weekday
+  hour=$(printf '%s\n' "$desc"    | sed -n 's/.*"Hour" => \([0-9]*\).*/\1/p'    | head -1)
+  minute=$(printf '%s\n' "$desc"  | sed -n 's/.*"Minute" => \([0-9]*\).*/\1/p'  | head -1)
+  weekday=$(printf '%s\n' "$desc" | sed -n 's/.*"Weekday" => \([0-9]*\).*/\1/p' | head -1)
+
+  if [[ -z "$hour" || -z "$minute" ]]; then
+    echo "MALFORMED"
+    return
+  fi
+
+  # Compute next fire using python3 (portable date math). Falls back to
+  # plain "HH:MM" if python3 unavailable.
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$hour" "$minute" "${weekday:-}" <<'PY'
+import sys, datetime
+hour = int(sys.argv[1]); minute = int(sys.argv[2])
+weekday_raw = sys.argv[3]
+now = datetime.datetime.now()
+target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+if weekday_raw == "":
+    # daily: next occurrence >= now
+    if target <= now:
+        target += datetime.timedelta(days=1)
+else:
+    # weekly: launchd Weekday — 0=Sun, 1=Mon, ... 6=Sat. Python
+    # weekday(): 0=Mon..6=Sun. Convert launchd→python: (w-1) % 7, except
+    # launchd 7 also means Sunday.
+    w = int(weekday_raw) % 7
+    target_wd = (w - 1) % 7  # python weekday
+    delta = (target_wd - now.weekday()) % 7
+    target += datetime.timedelta(days=delta)
+    if delta == 0 and target <= now:
+        target += datetime.timedelta(days=7)
+print(target.strftime("%Y-%m-%d %H:%M"))
+PY
+  else
+    printf '%02d:%02d\n' "$hour" "$minute"
+  fi
+}
+
 GREEN=$'\033[0;32m'; RED=$'\033[0;31m'; YELLOW=$'\033[1;33m'; RESET=$'\033[0m'
 [[ ! -t 1 ]] && { GREEN=""; RED=""; YELLOW=""; RESET=""; }
 
 total=0; ok=0; warn=0; fail=0
 rows=""
+
+malformed_cron=0
 
 while IFS= read -r agent; do
   [[ -z "$agent" ]] && continue
@@ -103,6 +181,11 @@ while IFS= read -r agent; do
   logf=$(logfile_for "$agent")
   pid=$(loaded_pid "$agent")
   age=$(log_age_mins "$logf")
+  next_fire=$(next_fire_for "$agent" "$kind")
+
+  if [[ "$next_fire" == "MALFORMED" ]]; then
+    malformed_cron=$((malformed_cron+1))
+  fi
 
   if [[ -z "$pid" ]]; then
     status="NOT-LOADED"; color="$RED"; fail=$((fail+1))
@@ -115,11 +198,11 @@ while IFS= read -r agent; do
   fi
 
   if [[ $JSON_MODE -eq 1 ]]; then
-    row="{\"agent\":\"$agent\",\"kind\":\"$kind\",\"pid\":\"${pid:-}\",\"log_age_min\":\"$age\",\"status\":\"$status\"}"
+    row="{\"agent\":\"$agent\",\"kind\":\"$kind\",\"pid\":\"${pid:-}\",\"log_age_min\":\"$age\",\"status\":\"$status\",\"next_fire\":\"$next_fire\"}"
     [[ -z "$rows" ]] && rows="$row" || rows="$rows,$row"
   else
-    printf "  %b%-12s%b  %-40s  kind=%-12s  pid=%-8s  log_age=%s min\n" \
-      "$color" "$status" "$RESET" "$agent" "$kind" "${pid:-}" "$age"
+    printf "  %b%-12s%b  %-40s  kind=%-12s  pid=%-8s  log_age=%-4s min  next_fire=%s\n" \
+      "$color" "$status" "$RESET" "$agent" "$kind" "${pid:-}" "$age" "$next_fire"
   fi
 done <<< "$AGENTS"
 
@@ -133,6 +216,11 @@ else
   echo ""
   echo "━━━ Summary ━━━"
   echo "  Total: $total | ${GREEN}OK: $ok${RESET} | ${YELLOW}STALE: $warn${RESET} | ${RED}FAIL: $fail${RESET}"
+  if (( malformed_cron > 0 )); then
+    echo ""
+    echo "${RED}Malformed schedule:${RESET} $malformed_cron cron agent(s) have no parseable StartCalendarInterval descriptor."
+    echo "  Inspect with: launchctl print gui/\$(id -u)/<label>"
+  fi
   if (( fail > 0 )); then
     echo ""
     echo "${RED}Action needed:${RESET} $fail agent(s) not loaded or not running."
