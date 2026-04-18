@@ -183,18 +183,42 @@ while true; do
     check_searxng
   fi
 
-  # MLX Embed health check every 5 minutes (every 5th iteration)
-  # Restart if: unresponsive or memory > 10GB (cache 5GB + model 4.5GB = 9.5GB normal)
+  # MLX Embed health check every minute.
+  # 2026-04-18 INCIDENT (44 restarts in 2h): the previous check used
+  #   curl --max-time 5  on /health  AND  restart on first failure.
+  # But the server's /health handler shares Python's asyncio event loop
+  # with /embed_batch; an 8B batch can block the loop for 5-45s, so
+  # /health times out legitimately. The watchdog was killing the server
+  # mid-batch, causing the vcontext embed backlog to grow instead of shrink.
+  # Fix:
+  #   (a) extend curl timeout 5s -> 30s  (longer than typical embed batch)
+  #   (b) require TWO consecutive failures before kill (one transient
+  #       block during a batch is not a hang)
+  #   (c) cap memory-based restart at MLX_EMBED_MAX_MB only AFTER the
+  #       health probe passes — a 9-10GB spike during a batch is normal,
+  #       not a leak.
+  # State file tracks consecutive failures across watchdog iterations.
+  EMBED_FAIL_FILE="/tmp/vcontext-watchdog-mlx-embed-fails"
   if [[ $((SEARXNG_CHECK_COUNTER % 1)) -eq 0 ]]; then
     EMBED_PID=$(pgrep -f "mlx-embed-server" | head -1)
     if [[ -n "$EMBED_PID" ]]; then
-      EMBED_HEALTH=$(curl -s --max-time 5 http://127.0.0.1:3161/health 2>/dev/null)
+      EMBED_HEALTH=$(curl -s --max-time 30 http://127.0.0.1:3161/health 2>/dev/null)
       EMBED_MB=$(footprint -p "$EMBED_PID" 2>/dev/null | grep Footprint | grep -o '[0-9]* MB' | grep -o '[0-9]*')
-      if [[ -z "$EMBED_HEALTH" ]] || { [[ -n "$EMBED_MB" ]] && [[ "$EMBED_MB" -gt $MLX_EMBED_MAX_MB ]]; }; then
-        log "MLX Embed restart: health=${EMBED_HEALTH:+ok}${EMBED_HEALTH:-timeout} mem=${EMBED_MB:-?}MB"
+      if [[ -z "$EMBED_HEALTH" ]]; then
+        EMBED_FAILS=$(cat "$EMBED_FAIL_FILE" 2>/dev/null || echo 0)
+        EMBED_FAILS=$((EMBED_FAILS + 1))
+        echo "$EMBED_FAILS" > "$EMBED_FAIL_FILE"
+      else
+        EMBED_FAILS=0
+        echo 0 > "$EMBED_FAIL_FILE"
+      fi
+      # Only restart when: (probe failed twice in a row) OR (probe OK but memory over cap)
+      if [[ "$EMBED_FAILS" -ge 2 ]] || { [[ -n "$EMBED_HEALTH" ]] && [[ -n "$EMBED_MB" ]] && [[ "$EMBED_MB" -gt $MLX_EMBED_MAX_MB ]]; }; then
+        log "MLX Embed restart: fails=${EMBED_FAILS} health=${EMBED_HEALTH:+ok}${EMBED_HEALTH:-timeout} mem=${EMBED_MB:-?}MB"
         launchctl unload ~/Library/LaunchAgents/com.vcontext.mlx-embed.plist 2>/dev/null
         sleep 1; kill -9 "$EMBED_PID" 2>/dev/null; lsof -ti :3161 | xargs kill -9 2>/dev/null
         sleep 1; launchctl load ~/Library/LaunchAgents/com.vcontext.mlx-embed.plist 2>/dev/null
+        echo 0 > "$EMBED_FAIL_FILE"
         log "MLX Embed restarted"
       fi
     else
