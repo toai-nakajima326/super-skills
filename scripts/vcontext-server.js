@@ -5418,6 +5418,159 @@ Violation: ${violations.trim().slice(0, 300)}`;
   });
 }
 
+/**
+ * GET /predict/next — Pillar 4 (Predictive Ambience).
+ *
+ * Surface the top-K likely next actions given recent activity, so
+ * Claude Code / the dashboard can pre-warm context instead of waiting
+ * for the user to ask.
+ *
+ * Pure-SQL, no MLX round-trip — fits under 30ms so it can be called
+ * on every session turn without tax. Heavier prediction (MLX
+ * skill-suggestion generation) still runs in the 30-min background
+ * loop; this endpoint just surfaces what's already been computed plus
+ * cheap statistical signals.
+ *
+ * Signals (each contributes a candidate with a score 0-1):
+ *   1. tool_name transitions in last 24h — if Read often follows Bash,
+ *      and the latest tool was Bash, Read scores high.
+ *   2. top skills used in last 24h (usage recency + frequency).
+ *   3. open skill-gap prompts (unmatched user asks) — highest signal:
+ *      if they reappear the system should have something ready.
+ *   4. recent skill-suggestion entries from runOnePrediction().
+ *
+ * Query params:
+ *   session=<id>   — scope tool-transition signal to this session
+ *   limit=<int>    — default 5, max 20
+ *
+ * Shape: { generated_at, signals: { last_tool, active_gaps, top_skills },
+ *          predictions: [{ kind, label, score, reason }] }
+ */
+function handlePredictNext(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+
+  const url = new URL(req.url, 'http://x');
+  const sessionId = url.searchParams.get('session') || null;
+  let limit = parseInt(url.searchParams.get('limit') || '5', 10);
+  if (!Number.isFinite(limit) || limit < 1) limit = 5;
+  if (limit > 20) limit = 20;
+
+  const predictions = [];
+
+  // Signal 1 — tool transitions. Find last tool in the (optionally
+  // session-scoped) window, then count what followed it historically.
+  let lastTool = null;
+  try {
+    const sessionClause = sessionId ? `AND session = ${esc(sessionId)}` : '';
+    const lastRow = dbQuery(`SELECT tool_name FROM entry_index WHERE tool_name IS NOT NULL ${sessionClause} ORDER BY entry_id DESC LIMIT 1;`);
+    lastTool = lastRow[0]?.tool_name || null;
+    if (lastTool) {
+      // Get ordered tool stream in last 24h, then count pair frequencies.
+      // Small enough that an in-memory scan is fine — entry_index is indexed
+      // by entry_id and we bound to 500 rows.
+      const stream = dbQuery(`SELECT tool_name FROM entry_index WHERE tool_name IS NOT NULL AND created_at >= datetime('now', '-24 hours') ORDER BY entry_id ASC LIMIT 500;`);
+      const followCounts = {};
+      let total = 0;
+      for (let i = 0; i < stream.length - 1; i++) {
+        if (stream[i].tool_name === lastTool) {
+          const next = stream[i + 1].tool_name;
+          if (next && next !== lastTool) {
+            followCounts[next] = (followCounts[next] || 0) + 1;
+            total++;
+          }
+        }
+      }
+      const ranked = Object.entries(followCounts).sort((a, b) => b[1] - a[1]).slice(0, 3);
+      for (const [tool, cnt] of ranked) {
+        predictions.push({
+          kind: 'tool',
+          label: tool,
+          score: Number((cnt / Math.max(total, 1)).toFixed(3)),
+          reason: `followed "${lastTool}" ${cnt}× in last 24h`,
+        });
+      }
+    }
+  } catch (e) { /* best-effort */ }
+
+  // Signal 2 — most-used skills (last 24h, from skill-usage entries).
+  let topSkills = [];
+  try {
+    const usageRows = dbQuery(`SELECT content FROM entries WHERE type = 'skill-usage' AND created_at >= datetime('now', '-24 hours') ORDER BY id DESC LIMIT 200;`);
+    const counts = {};
+    for (const row of usageRows) {
+      try {
+        const d = JSON.parse(row.content);
+        for (const n of (d.skills || [])) counts[n] = (counts[n] || 0) + 1;
+      } catch {}
+    }
+    topSkills = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 3);
+    const maxCnt = Math.max(1, topSkills[0]?.[1] || 1);
+    for (const [name, cnt] of topSkills) {
+      predictions.push({
+        kind: 'skill',
+        label: name,
+        score: Number((cnt / maxCnt * 0.8).toFixed(3)),
+        reason: `used ${cnt}× in last 24h`,
+      });
+    }
+  } catch {}
+
+  // Signal 3 — open skill-gaps. Highest-signal: user literally asked for
+  // something that had no matching skill. Likely to recur.
+  let activeGaps = [];
+  try {
+    const gapRows = dbQuery(`SELECT id, content, created_at FROM entries WHERE type = 'skill-gap' AND created_at >= datetime('now', '-48 hours') ORDER BY id DESC LIMIT 5;`);
+    for (const row of gapRows) {
+      try {
+        const d = JSON.parse(row.content);
+        if (!d.prompt) continue;
+        activeGaps.push({ id: row.id, prompt: d.prompt, created_at: row.created_at });
+        predictions.push({
+          kind: 'gap',
+          label: d.prompt.slice(0, 80),
+          score: 0.9,
+          reason: 'recently unmatched user prompt (likely to recur)',
+          parent_id: row.id,
+        });
+      } catch {}
+    }
+  } catch {}
+
+  // Signal 4 — surface fresh skill-suggestion entries (already predicted
+  // by runOnePrediction's MLX call; this just exposes them via HTTP).
+  try {
+    const sugRows = dbQuery(`SELECT id, content, created_at FROM entries WHERE type = 'skill-suggestion' AND created_at >= datetime('now', '-24 hours') ORDER BY id DESC LIMIT 3;`);
+    for (const row of sugRows) {
+      try {
+        const d = JSON.parse(row.content);
+        if (!d.suggestion) continue;
+        predictions.push({
+          kind: 'suggestion',
+          label: d.suggestion.slice(0, 120),
+          score: 0.7,
+          reason: 'MLX-generated skill suggestion (background loop)',
+          parent_id: row.id,
+        });
+      } catch {}
+    }
+  } catch {}
+
+  // Sort combined predictions by score, cap to limit
+  predictions.sort((a, b) => b.score - a.score);
+  const top = predictions.slice(0, limit);
+
+  sendJson(res, 200, {
+    generated_at: new Date().toISOString(),
+    signals: {
+      last_tool: lastTool,
+      active_gap_count: activeGaps.length,
+      top_skills: topSkills.map(([n, c]) => ({ name: n, count: c })),
+    },
+    predictions: top,
+  });
+}
+
 async function handlePredictiveSearch(req, res) {
   const auth = validateApiKey(req);
   if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
@@ -5794,6 +5947,7 @@ function handleMetricsReport(req, res) {
 const ENDPOINTS_LIST = [
   'POST   /store             — store context entry (body: {type,content,tags?,session?,namespace?,group?,reasoning?,conditions?,supersedes?,confidence?,status?,parent_id?})',
   'GET    /trace/:id         — Pillar 3: causal ancestry walk via parent_id (root -> target + children)',
+  'GET    /predict/next      — Pillar 4: ranked next-likely tools/skills/gaps (?session=&limit=)',
   'GET    /recall?q=         — full-text search (cascading tiers, &namespace=project-name)',
   'GET    /recent?n=         — recent entries (cascading tiers, &namespace=project-name)',
   'GET    /session/:id       — session entries',
@@ -7153,6 +7307,10 @@ const server = createServer(async (req, res) => {
       handleMetricsReport(req, res);
     } else if (method === 'GET' && path === '/skills/effectiveness') {
       handleSkillEffectiveness(req, res);
+    } else if (method === 'GET' && path === '/predict/next') {
+      // Pillar 4 — Predictive Ambience: ranked next-likely tool / skill
+      // / open-gap candidates from recent activity. Pure-SQL, no MLX.
+      handlePredictNext(req, res);
     } else if (method === 'POST' && path === '/predictive-search') {
       await handlePredictiveSearch(req, res);
     } else if (method === 'POST' && path === '/completion-check') {
