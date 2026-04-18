@@ -1479,7 +1479,12 @@ async function handleStore(req, res) {
               auto: true,
             };
 
-            consultations.set(consultId, consultation);
+            // 2026-04-18: was `consultations.set(...)` — referenced an undeclared
+            // Map. The consultation state actually lives in the SQL table
+            // (ensureConsultationsTable at L2694); persist via saveConsultation.
+            try { saveConsultation(consultation); } catch (e) {
+              console.error('[auto-consult] saveConsultation failed:', e.message?.slice(0, 120));
+            }
             entry._auto_consultation = consultId;
 
             // If MLX generate available, auto-resolve immediately
@@ -3481,13 +3486,18 @@ function detectAnomalies() {
     alerts.push({ level: 'medium', msg: `RAM ahead of SSD by ${gap} entries — tier migration may be failing` });
   }
 
-  // 4. Disk usage >80%
-  try {
-    const ramSize = statSync(DB_PATH).size;
-    if (ramSize > 3 * 1024 * 1024 * 1024) {
-      alerts.push({ level: 'high', msg: `RAM disk >3GB (${(ramSize/1024/1024/1024).toFixed(1)}GB)` });
-    }
-  } catch {}
+  // 4. Disk usage >3GB — ONLY meaningful in RAM-disk mode (18GB budget tight).
+  // Post-2026-04-18 migration we run on SSD where 3GB is normal DB size, and
+  // this alarm was firing every 5-min cycle, triggering migrateRamToSsd() in
+  // an infinite loop that starved the HTTP handler. Gate on USE_RAMDISK.
+  if (USE_RAMDISK) {
+    try {
+      const ramSize = statSync(DB_PATH).size;
+      if (ramSize > 3 * 1024 * 1024 * 1024) {
+        alerts.push({ level: 'high', msg: `RAM disk >3GB (${(ramSize/1024/1024/1024).toFixed(1)}GB)` });
+      }
+    } catch {}
+  }
 
   // 5. Latency regression: recall or store avg > 3x the 24h baseline.
   // Compares last 30min vs 7d-prior baseline (excluding the last 1h so
