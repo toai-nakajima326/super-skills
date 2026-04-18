@@ -23,15 +23,21 @@ const VCONTEXT = 'http://127.0.0.1:3150';
 const SKILLS_ROOT = path.join(process.env.HOME, 'skills', 'skills');
 const DRY_RUN = process.argv.includes('--dry-run');
 
-// 会話ソースタイプ（vcontextのtype値）
+// 会話ソースタイプ（vcontextの実際のtype値）
 const CONVERSATION_TYPES = [
-  'user-prompt',
-  'assistant-response',
-  'session-summary',
-  'skill-gap',
-  'skill-suggestion',
-  'pain-point',
-  'unresolved-question'
+  'assistant-response',    // Claudeの回答（ユーザー意図の反映）
+  'decision',              // 決定事項（繰り返しパターンの源）
+  'session-summary',       // セッション要約
+  'working-state',         // 現在の作業文脈
+  'anomaly-response',      // 異常時対応（スキルギャップの強シグナル）
+  'anomaly-alert',         // 異常検知
+  'skill-gap',             // 検出済みギャップ
+  'skill-suggestion',      // 既存のスキル提案
+  'pain-point',            // 困りごと
+  'unresolved-question',   // 未解決質問
+  'handoff',               // セッション間引き継ぎ
+  'chunk-summary',         // 記事要約
+  'pending-idea'           // アイデア蓄積
 ];
 
 // ── vcontext ヘルパー ─────────────────────────────
@@ -130,9 +136,22 @@ function getExistingSkills() {
 
 async function collectConversations(sinceDate) {
   const all = [];
+  const seen = new Set();
+  // /recall は q= 必須 — 広範囲クエリで日英両対応、並列実行
+  const broadQueries = ['a', 'の'];
+  const tasks = [];
   for (const type of CONVERSATION_TYPES) {
-    const data = await vcGet(`/recall?type=${type}&limit=100`);
-    for (const r of (data.results || [])) {
+    for (const q of broadQueries) {
+      tasks.push(vcGet(`/recall?q=${encodeURIComponent(q)}&type=${type}&limit=100`)
+        .then(data => ({ type, results: data.results || [] }))
+        .catch(() => ({ type, results: [] })));
+    }
+  }
+  const all_data = await Promise.all(tasks);
+  for (const { type, results } of all_data) {
+    for (const r of results) {
+      if (seen.has(r.id)) continue;
+      seen.add(r.id);
       try {
         const ts = r.created_at || r.timestamp;
         if (ts && new Date(ts) > new Date(sinceDate)) {
