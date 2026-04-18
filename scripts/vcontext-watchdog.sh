@@ -116,6 +116,8 @@ while true; do
       send_recovery "Server recovered and is healthy again"
       WAS_DOWN=false
     fi
+    # Reset fail counter on success (2026-04-18 aggressive recovery mode)
+    rm -f /tmp/vcontext-watchdog-server-fails 2>/dev/null
   else
     WAS_DOWN=true
     if should_notify; then
@@ -156,9 +158,6 @@ while true; do
         fi
       fi
     fi
-  else
-    # Reset fail counter on success
-    rm -f /tmp/vcontext-watchdog-server-fails 2>/dev/null
   fi
 
   # Self-heal: ensure launchd is managing com.vcontext.server.
