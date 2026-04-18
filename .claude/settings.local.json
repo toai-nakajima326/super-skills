@@ -226,7 +226,8 @@
       "WebFetch(domain:www.pcmag.com)",
       "WebFetch(domain:www.tomshardware.com)",
       "WebFetch(domain:dongknows.com)",
-      "WebFetch(domain:www.amazon.co.jp)"
+      "WebFetch(domain:www.amazon.co.jp)",
+      "WebFetch(domain:www.dospara.co.jp)"
     ]
   }
 }

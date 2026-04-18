@@ -32,7 +32,7 @@
     "safety_skills_protected": ["guard", "freeze", "careful", "checkpoint"]
   },
   "observation_mode": {
-    "_comment": "When true, cycle runs Gather+Score+Log but skips Mutate/Validate/Apply. Useful for dry-run tuning.",
-    "enabled": false
+    "_comment": "When true, cycle runs Gather+Score+Log but skips Mutate/Validate/Apply. Default ON for safety — flip to false only after reviewing evolution-digest entries for a few weeks and confirming fitness/mutation quality. LaunchAgent also passes --observation as a belt-and-suspenders safeguard.",
+    "enabled": true
   }
 }

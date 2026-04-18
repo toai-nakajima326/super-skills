@@ -6190,6 +6190,37 @@ const server = createServer(async (req, res) => {
           rotate_threshold_mb: ENTRIES_WAL_MAX_BYTES / 1024 / 1024
         });
       } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'GET' && path === '/admin/ramdisk-stats') {
+      // RAM disk capacity / usage — surfaces the 2026-04-18 death-spiral
+      // root cause (98% fill → WAL write fail → DB corruption loop) as a
+      // proactive dashboard metric. Thresholds mirror vcontext-watchdog.sh:
+      // 80% warn, 95% critical.
+      try {
+        const mountPoint = '/Volumes/VContext';
+        // `df -k` output: Filesystem 1K-blocks Used Avail Capacity ...
+        const df = execFileSync('/bin/df', ['-k', mountPoint], { encoding: 'utf-8' });
+        const lines = df.trim().split('\n');
+        if (lines.length < 2) throw new Error('unexpected df output');
+        // Fields: fs, total, used, avail, capacity, ...
+        const parts = lines[1].trim().split(/\s+/);
+        const totalKB = parseInt(parts[1]);
+        const usedKB = parseInt(parts[2]);
+        const availKB = parseInt(parts[3]);
+        const capacity = parts[4]; // "98%"
+        const pctNum = parseInt(capacity);
+        let status = 'ok';
+        if (pctNum >= 95) status = 'critical';
+        else if (pctNum >= 80) status = 'warn';
+        sendJson(res, 200, {
+          mount: mountPoint,
+          total_gb: Math.round(totalKB / 1024 / 1024 * 100) / 100,
+          used_gb: Math.round(usedKB / 1024 / 1024 * 100) / 100,
+          avail_gb: Math.round(availKB / 1024 / 1024 * 100) / 100,
+          used_pct: pctNum,
+          status,
+          thresholds: { warn_pct: 80, critical_pct: 95 },
+        });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'GET' && path === '/admin/health-report') {
       // Human-readable daily/weekly brief — formatted string + structured data.
       // ?days=1 for yesterday, ?days=7 for weekly. Used by vcontext-morning-brief.sh.
