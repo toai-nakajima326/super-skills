@@ -82,7 +82,7 @@ for (const skillName of skillDirs) {
   ensureFile(path.join(ROOT, ".claude", "skills", skillName, "SKILL.md"));
 }
 
-const mcpValidation = runNodeScript(["scripts/build-mcp-config.js", "--validate"]);
+const mcpValidation = runNodeScript(["scripts/build-mcp-config.cjs", "--validate"]);
 const installValidation = runNodeScript(["scripts/install-validate.mjs", "--profile", "core", "--target", "codex"]);
 
 console.log("Config validation passed.");

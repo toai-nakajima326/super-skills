@@ -69,7 +69,7 @@ Default behavior is conservative:
 ## Build flow
 
 1. Author or update `skills/<name>/SKILL.md`
-2. Run `node scripts/build-skills.js`
+2. Run `node scripts/build-skills.cjs`
 3. Generated files appear in `.agents/skills/<name>/`
 4. Run `node scripts/build-claude-skills.js`
 5. Generated Claude skill copies appear in `.claude/skills/<name>/`

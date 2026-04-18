@@ -57,6 +57,49 @@ function _isStale() {
   } catch { return false; }
 }
 
+// Extract PID from a holder-id string. Known formats embed the PID as
+// `:pid-<digits>` (e.g. `self-evolve:pid-12345:cycle-abc`, `locomo-eval:pid-82515`,
+// `vcontext-server:45755:1776497618489` — second colon token is a PID).
+// Returns the PID integer, or null if no PID can be parsed (e.g. task-runner's
+// `task-runner:<uuid>` format has no PID and falls back to mtime-based stale).
+export function _parseHolderPid(holder) {
+  if (typeof holder !== 'string' || !holder) return null;
+  // Prefer explicit `:pid-<digits>` marker.
+  let m = holder.match(/:pid-(\d+)\b/);
+  if (m) return parseInt(m[1], 10);
+  // Fallback: second colon-token is all-digits (vcontext-server pattern).
+  // Don't treat a single-word numeric suffix as a PID (avoid misparsing
+  // `task-runner:12345` — unlikely today but keep a narrow rule).
+  const parts = holder.split(':');
+  if (parts.length >= 3 && /^\d+$/.test(parts[1])) {
+    return parseInt(parts[1], 10);
+  }
+  return null;
+}
+
+// PID-liveness stale check (D1 2026-04-18).
+//
+// `kill(pid, 0)` is a permission-free POSIX liveness probe — returns
+// without signaling, throws ESRCH if the PID is dead. Used to detect
+// orphan locks left behind when a holder was killed (SIGKILL, OOM,
+// execFile timeout) before its `finally`/__exit__ could run.
+//
+// Returns true if holder is dead (lock is stale by PID). False if holder
+// is alive OR we cannot determine liveness (malformed holder id, missing
+// kill permission — EPERM means the process exists but is in another uid).
+function _isPidDead(holder) {
+  const pid = _parseHolderPid(holder);
+  if (pid === null || !Number.isFinite(pid) || pid <= 1) return false;
+  try {
+    process.kill(pid, 0);
+    return false; // alive
+  } catch (e) {
+    if (e && e.code === 'ESRCH') return true;      // no such process → dead
+    if (e && e.code === 'EPERM') return false;     // exists but other uid — treat as alive
+    return false;                                   // unknown error → conservative: treat as alive
+  }
+}
+
 // Parent already holds the lock? (e.g. task-runner launched this script)
 // Check env var AND that the file actually contains that holder (not stale).
 function _parentHolds(myHolderId) {
@@ -72,9 +115,11 @@ function _parentHolds(myHolderId) {
 
 // Atomic create — returns true if we successfully acquired, false if EEXIST
 // and the existing lock is NOT stale. Clears stale locks on the way.
+// Stale = mtime >25min OR holder PID is dead (ESRCH on kill(pid, 0)).
 function _tryAcquireAtomic(holderId) {
   if (existsSync(MLX_LOCK_FILE)) {
-    if (_isStale()) {
+    const holder = _readHolder();
+    if (_isStale() || _isPidDead(holder)) {
       try { unlinkSync(MLX_LOCK_FILE); } catch {}
     } else {
       return false;
@@ -164,13 +209,23 @@ export async function withMlxLock(holderId, fn, opts = {}) {
  */
 export function mlxLockStatus() {
   try {
-    if (!existsSync(MLX_LOCK_FILE)) return { held: false, holder: null, ageMs: 0, stale: false };
+    if (!existsSync(MLX_LOCK_FILE)) return { held: false, holder: null, ageMs: 0, stale: false, pidDead: false };
     const st = statSync(MLX_LOCK_FILE);
     const ageMs = Date.now() - st.mtimeMs;
-    const stale = ageMs > MLX_LOCK_STALE_MS;
+    const mtimeStale = ageMs > MLX_LOCK_STALE_MS;
     const holder = _readHolder();
-    return { held: !stale, holder, ageMs, stale };
-  } catch { return { held: false, holder: null, ageMs: 0, stale: false }; }
+    const pidDead = _isPidDead(holder);
+    const stale = mtimeStale || pidDead;
+    // D1 2026-04-18: if we detect a dead holder PID, reclaim immediately
+    // rather than letting the next acquirer hit the 25-min mtime timer.
+    // Status is a read-only peek, but this is safe because the holder is
+    // provably dead — any observer seeing the lock file was going to have
+    // to wait otherwise.
+    if (pidDead && !mtimeStale) {
+      try { unlinkSync(MLX_LOCK_FILE); } catch {}
+    }
+    return { held: !stale, holder, ageMs, stale, pidDead };
+  } catch { return { held: false, holder: null, ageMs: 0, stale: false, pidDead: false }; }
 }
 
 // CLI mode: `node aios-mlx-lock.js status` — prints JSON status. Useful for

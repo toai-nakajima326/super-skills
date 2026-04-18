@@ -86,7 +86,7 @@ These belong in generated artifacts or host adapters, not the shared source skil
 
 ## Generator Responsibilities
 
-- `scripts/build-skills.js` copies the source skill into `.agents/skills/` and generates `agents/openai.yaml`.
+- `scripts/build-skills.cjs` copies the source skill into `.agents/skills/` and generates `agents/openai.yaml`.
 - `scripts/build-claude-skills.js` copies the source skill tree into `.claude/skills/`.
 - `scripts/validate-skills.js` enforces the source contract and blocks host-specific frontmatter drift.
 

@@ -23,6 +23,6 @@ Additional source rules:
 - `description` should read like a trigger, typically `Use when ...` or `Use for ...`
 - a `Gotchas` section is recommended for high-signal failure modes
 
-Run `node scripts/build-skills.js` to generate Codex-facing metadata in `.agents/skills/`.
+Run `node scripts/build-skills.cjs` to generate Codex-facing metadata in `.agents/skills/`.
 
 See [SKILL-AUTHORING.md](/Volumes/Storage/src/infinite-skills/docs/SKILL-AUTHORING.md) for the full contract.

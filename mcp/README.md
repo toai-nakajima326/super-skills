@@ -61,7 +61,7 @@ Each catalog entry includes:
 
 ## Helper Script
 
-Use `scripts/build-mcp-config.js` to render selected MCP profiles as:
+Use `scripts/build-mcp-config.cjs` to render selected MCP profiles as:
 
 - a `.codex/config.toml` fragment
 - a plain install guidance block
@@ -69,10 +69,10 @@ Use `scripts/build-mcp-config.js` to render selected MCP profiles as:
 
 Examples:
 
-- `node scripts/build-mcp-config.js`
-- `node scripts/build-mcp-config.js --profile core --profile research --format toml`
-- `node scripts/build-mcp-config.js --profile browser --format guidance`
-- `node scripts/build-mcp-config.js --validate`
+- `node scripts/build-mcp-config.cjs`
+- `node scripts/build-mcp-config.cjs --profile core --profile research --format toml`
+- `node scripts/build-mcp-config.cjs --profile browser --format guidance`
+- `node scripts/build-mcp-config.cjs --validate`
 
 Behavior:
 
