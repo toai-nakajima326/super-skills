@@ -161,6 +161,28 @@ adding `[auto]` would break hash-anchored references.
 **Forward action**: add a note to the evolution log acknowledging the
 gap and referencing this policy.
 
+## 5.5 Implementation status (2026-04-18)
+
+Option C shipped. See `docs/design/2026-04-18-auto-commit-tag.md` for the
+tag contract.
+
+| Piece | Location | Status |
+|-------|----------|--------|
+| Tag contract (`^\[auto\] `) | `docs/design/2026-04-18-auto-commit-tag.md` | Documented |
+| Gate script | `scripts/auto-commit-gate.sh` | Executable |
+| Git hook (opt-in via `core.hooksPath`) | `.githooks/pre-commit` | Present; activation via `git config core.hooksPath .githooks` (user-run once per clone, not auto-set) |
+| aios-learning-bridge commit format | `scripts/aios-learning-bridge.cjs` L195-198 | Emits `[auto] ` prefix + `Auto-Applied-By:` trailer |
+| Test harness | `scripts/test-auto-commit-gate.sh` | 4 cases: low-stakes allow, high-stakes block, HUMAN_APPROVED override, non-`[auto]` bypass |
+| Rollout | `core.hooksPath` not auto-set — user runs `git config core.hooksPath .githooks` after review. `aios-learning-bridge` does the right thing regardless (it emits the prefix); the hook only becomes a hard block once activated. |
+
+**Known limitation**: activation is per-clone. Worktrees outside
+`~/skills` need their own `core.hooksPath` pointing to the same script,
+or they won't enforce the gate.
+
+**Not modified**: existing `scripts/pre-commit-gate.sh` (Claude
+PreToolUse hook for `CHECKER_VERIFIED=1`) and `.git/hooks/post-commit`
+(auto-deploy). Both stack with the new gate.
+
 ## 6. Open questions (for next session)
 
 - Should `skills/**/SKILL.md` creations require a fitness floor even

@@ -1,0 +1,22 @@
+#!/bin/bash
+# .githooks/pre-commit — delegates to scripts/auto-commit-gate.sh
+#
+# Enforces the [auto] commit tag contract (Option C of
+# autonomous-commit-gate.md). Additive: existing CHECKER_VERIFIED=1 and
+# INFINITE_SKILLS_OK=1 PreToolUse gates run upstream and are unaffected.
+#
+# Activation: `git config core.hooksPath .githooks` (done once per clone).
+# Added: 2026-04-18. See docs/design/2026-04-18-auto-commit-tag.md.
+
+set -u
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+GATE="$REPO_ROOT/scripts/auto-commit-gate.sh"
+
+# If gate script missing (fresh clone without full payload), allow.
+[[ -x "$GATE" ]] || exit 0
+
+# Git writes the pending commit message to .git/COMMIT_EDITMSG.
+export GIT_COMMIT_MSG_FILE="$REPO_ROOT/.git/COMMIT_EDITMSG"
+
+exec "$GATE"

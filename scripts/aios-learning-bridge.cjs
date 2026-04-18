@@ -192,8 +192,10 @@ async function applyPatch(skillName, content, patchId) {
   try {
     const gitRoot = path.join(process.env.HOME, 'skills');
     execFileSync('git', ['add', `skills/${skillName}/SKILL.md`], { cwd: gitRoot, stdio: 'pipe' });
+    // [auto] prefix → auto-commit-gate.sh recognizes autonomous origin
+    // and classifies by path list. See docs/design/2026-04-18-auto-commit-tag.md.
     execFileSync('git', ['commit', '-m',
-      `feat: auto-apply ${skillName} (fitness=${content.fitness}, source=${content.source || '?'})\n\nCycle: ${content.cycle_id || '?'}\nReasoning: ${(content.reasoning || '').slice(0, 200)}\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>`
+      `[auto] feat: auto-apply ${skillName} (fitness=${content.fitness}, source=${content.source || '?'})\n\nAuto-Applied-By: aios-learning-bridge\nFitness: ${content.fitness}\nSource: ${content.source || '?'}\nCycle: ${content.cycle_id || '?'}\nReasoning: ${(content.reasoning || '').slice(0, 200)}\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>`
     ], { cwd: gitRoot, stdio: 'pipe' });
   } catch (err) {
     log(`git commit failed for ${skillName}: ${err.message}`);
