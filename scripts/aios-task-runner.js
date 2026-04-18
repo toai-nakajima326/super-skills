@@ -401,9 +401,69 @@ async function recoverOrphans() {
 
 // ── Main loop ──
 
+// ── MLX concurrency guard ─────────────────────────────────────────
+// Tasks that heavily exercise the MLX generate server (:3162, ~8GB
+// unified memory for Qwen3-8B-4bit). Never run more than one at once,
+// and never run concurrently with agent-initiated MLX work elsewhere
+// (detected via a shared lock file).
+//
+// Context (2026-04-18 incident): when 5 MLX-heavy tasks were queued
+// alongside 5 Claude-launched agents doing their own MLX work, unified
+// memory blew past 30GB (on a 36GB box), putting MLX generate into an
+// uninterruptible-sleep (U state) wedge. Server OOM-cascade followed.
+// Serial queue dispatch alone was insufficient because agents bypass
+// the queue entirely.
+const MLX_HEAVY_TYPES = new Set([
+  'locomo-eval',
+  'self-evolve-dryrun',
+  'article-scan-adhoc',
+  'skill-discovery-adhoc',
+]);
+const MLX_LOCK_FILE = '/tmp/aios-mlx-lock';
+const MLX_LOCK_STALE_MS = 25 * 60 * 1000;  // lock older than 25min = stale
+
+function isMlxHeavy(task_type) { return MLX_HEAVY_TYPES.has(task_type); }
+
+// Check whether someone else (agent, adhoc script) is holding the MLX
+// generate lock. Returns { held: bool, holder: string|null, age_ms: number }.
+function mlxLockStatus() {
+  try {
+    const fs = require('fs');
+    if (!fs.existsSync(MLX_LOCK_FILE)) return { held: false, holder: null, age_ms: 0 };
+    const st = fs.statSync(MLX_LOCK_FILE);
+    const age = Date.now() - st.mtimeMs;
+    if (age > MLX_LOCK_STALE_MS) {
+      try { fs.unlinkSync(MLX_LOCK_FILE); } catch {}
+      return { held: false, holder: 'stale-cleared', age_ms: age };
+    }
+    const holder = fs.readFileSync(MLX_LOCK_FILE, 'utf-8').trim();
+    return { held: true, holder, age_ms: age };
+  } catch { return { held: false, holder: null, age_ms: 0 }; }
+}
+function mlxLockAcquire(holderId) {
+  try {
+    const fs = require('fs');
+    fs.writeFileSync(MLX_LOCK_FILE, holderId + '\n');
+  } catch {}
+}
+function mlxLockRelease(holderId) {
+  try {
+    const fs = require('fs');
+    if (fs.existsSync(MLX_LOCK_FILE)) {
+      const who = fs.readFileSync(MLX_LOCK_FILE, 'utf-8').trim();
+      if (who === holderId) fs.unlinkSync(MLX_LOCK_FILE);
+    }
+  } catch {}
+}
+
 async function pollOnce() {
   maybeRotateLog();
   if (shuttingDown) return;
+  // Explicit re-entry guard: if the previous dispatch is still running
+  // (shouldn't normally happen — loop is setTimeout-chained — but belt
+  // and suspenders), skip this tick. Prevents accidental concurrent
+  // dispatch if someone later wraps the loop in setInterval.
+  if (currentTaskId) return;
   let queue;
   try {
     queue = await httpRequestJson('GET', '/admin/task-queue', null, 10_000);
@@ -420,7 +480,29 @@ async function pollOnce() {
     errlog('skipping malformed queue entry:', JSON.stringify(next).slice(0, 200));
     return;
   }
-  await dispatch(next);
+  // MLX concurrency guard: if the next task is MLX-heavy, check whether
+  // an agent/other process is already holding the MLX lock. If so, skip
+  // this poll cycle (log once every 5 min to avoid noise). Non-MLX tasks
+  // (shell-command) always proceed.
+  if (isMlxHeavy(next.task_type)) {
+    const lock = mlxLockStatus();
+    if (lock.held) {
+      const ageMin = Math.round(lock.age_ms / 60000);
+      if (!pollOnce._lastLockLogAt || Date.now() - pollOnce._lastLockLogAt > 5 * 60 * 1000) {
+        log(`MLX busy — ${next.task_type} (${next.request_id.slice(0,8)}) waiting (holder=${lock.holder}, age=${ageMin}min)`);
+        pollOnce._lastLockLogAt = Date.now();
+      }
+      return;
+    }
+    mlxLockAcquire(`task-runner:${next.request_id}`);
+  }
+  try {
+    await dispatch(next);
+  } finally {
+    if (isMlxHeavy(next.task_type)) {
+      mlxLockRelease(`task-runner:${next.request_id}`);
+    }
+  }
 }
 
 function onSigterm() {
