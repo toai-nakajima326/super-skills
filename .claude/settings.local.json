@@ -221,7 +221,12 @@
       "Bash(node scripts/build-all.js)",
       "Bash(rm -f /Users/mitsuru_nakajima/skills/.git/index.lock)",
       "Bash(git commit -m 'fix: self-evolve auto-router → super-skills:*)",
-      "WebFetch(domain:support.apple.com)"
+      "WebFetch(domain:support.apple.com)",
+      "WebFetch(domain:www.nytimes.com)",
+      "WebFetch(domain:www.pcmag.com)",
+      "WebFetch(domain:www.tomshardware.com)",
+      "WebFetch(domain:dongknows.com)",
+      "WebFetch(domain:www.amazon.co.jp)"
     ]
   }
 }
