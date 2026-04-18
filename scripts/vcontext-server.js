@@ -3296,7 +3296,7 @@ async function startEmbedLoop() {
 }
 
 // ── Periodic migration check (piggybacks on backup timer) ─────
-function doBackupAndMigrate() {
+async function doBackupAndMigrate() {
   doBackup();
   // Sync any entries that write-through missed (RAM → SSD catch-up)
   try {
@@ -3339,9 +3339,16 @@ function doBackupAndMigrate() {
   } catch {}
   // Recheck AI availability
   checkMlxGenerate();
-  checkMlx(); // MLX embed server (always-on embedding)
-  // Ensure embed loop is running (self-healing — restarts if stopped)
+  // 2026-04-18: await checkMlx so the self-heal decision below sees
+  // the fresh probe result, not stale false. Without await, mlxAvailable
+  // could still be false from startup (when MLX was booting concurrently
+  // with vcontext) even though MLX is now healthy — leaving embed loop
+  // stopped indefinitely.
+  await checkMlx(); // MLX embed server (always-on embedding)
+  // Ensure embed loop is running (self-healing — restarts if stopped).
+  // Also handle: loop flag stuck true but the while() has exited — restart.
   if (mlxAvailable && !embedLoopRunning) {
+    console.log('[embed-loop] self-heal: restarting (was stopped)');
     startEmbedLoop().catch(() => {});
   }
   // Content hash backfill — other INSERT paths (anomaly-alert,
@@ -7578,11 +7585,19 @@ process.on('uncaughtException', (err) => {
 });
 
 // Check local AI availability + start background loops
+// 2026-04-18: Always start the embed loop regardless of initial probe
+// result. The loop has an internal `!mlxAvailable` guard that awaits
+// checkMlx() and retries every 60s until MLX comes up. Previously, a
+// concurrent restart where MLX was still booting when vcontext started
+// left mlxAvailable=false and the loop was never started — forcing a
+// wait for the 5-min self-heal cycle (which itself had an await bug).
 checkMlx().then(() => {
-  if (mlxAvailable) {
-    startEmbedLoop().catch(() => {});
-  }
-}).catch(() => {});
+  startEmbedLoop().catch(() => {});
+}).catch(() => {
+  // Even if the probe throws, start the loop — its internal retry
+  // handles MLX unavailability gracefully.
+  startEmbedLoop().catch(() => {});
+});
 checkMlxGenerate().then(() => {
   if (mlxGenerateAvailable) {
     startDiscoveryLoop().catch(() => {});
