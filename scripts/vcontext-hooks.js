@@ -528,6 +528,14 @@ async function routeSkills(prompt, sessionId, label = '[infinite-skills]') {
       lines.push(`\n### Skill: ${skill.name}`);
       lines.push(skill.full_content || skill.description || '');
       matchedNames.push(skill.name);
+    } else {
+      // Server unreachable or skill-registry entry missing — still record
+      // the routing decision. Without this fallback, transient server
+      // restarts (watchdog kills during MLX OOM) silently drop every
+      // skill-usage write, turning the pipeline-health skill-routing
+      // signal RED even though rule-matching actually succeeded.
+      lines.push(`\n### Skill: ${name}`);
+      matchedNames.push(name);
     }
   }
   for (const r of semanticResults.slice(0, 3 - matchedNames.length)) {
@@ -1145,10 +1153,224 @@ function extractNewAssistantMessages(transcriptPath, sessionId) {
   return messages;
 }
 
+// ── AIOS hard-gate: block AIOS-connected writes without routing ──
+//
+// User rule (~/.claude/CLAUDE.md): any file under ~/skills, any
+// com.vcontext.* LaunchAgent plist, any vcontext/MLX-adjacent edit MUST
+// route through `infinite-skills` before the write fires. Soft
+// enforcement (docs + agent-prompt reminders) has failed. This gate
+// halts the PreToolUse event via the same JSON-block mechanism as
+// pre-commit-gate.sh (hookSpecificOutput + continue:false + stopReason).
+//
+// Fail-open: DB/server errors → allow the tool (soft-enforcement
+// fallback). The gate must never make the session worse than no-gate.
+
+const AIOS_SKILL_USAGE_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+const AIOS_COLD_START_GRACE_MS = 30 * 1000;               // 30s
+const AIOS_SESSION_STARTS_DIR = '/tmp';
+
+function expandHome(p) {
+  if (!p) return '';
+  if (p.startsWith('~/')) return join(homedir(), p.slice(2));
+  if (p === '~') return homedir();
+  return p;
+}
+
+function normalizeForMatch(p) {
+  if (!p) return '';
+  let s = expandHome(String(p));
+  // Collapse /private/tmp → /tmp so match patterns work on macOS where
+  // /tmp is a symlink to /private/tmp (appears both ways in hook input).
+  if (s.startsWith('/private/tmp/')) s = '/tmp/' + s.slice('/private/tmp/'.length);
+  else if (s === '/private/tmp') s = '/tmp';
+  return s;
+}
+
+function isAiosConnectedPath(rawPath) {
+  const p = normalizeForMatch(rawPath);
+  if (!p) return false;
+  const home = homedir();
+  // ~/skills/** — the AIOS repo itself
+  if (p === join(home, 'skills') || p.startsWith(join(home, 'skills') + '/')) return true;
+  // ~/Library/LaunchAgents/com.vcontext.*
+  if (p.startsWith(join(home, 'Library/LaunchAgents/com.vcontext.'))) return true;
+  // RAM-disk mounts
+  if (p === '/Volumes/VContext' || p.startsWith('/Volumes/VContext/')) return true;
+  // vcontext logs in /tmp (write only — caller checks tool type)
+  if (p.startsWith('/tmp/vcontext-') && p.endsWith('.log')) return true;
+  return false;
+}
+
+// Scan a Bash command for AIOS-touching writes (redirects, rm, mv,
+// launchctl, git against the skills repo, etc.). Cheap regex pass.
+function bashCommandTouchesAios(cmd) {
+  if (!cmd) return false;
+  const lower = cmd.toLowerCase();
+  // Obvious write / destructive verbs against AIOS paths
+  const paths = [
+    '~/skills/', '/users/mitsuru_nakajima/skills/',
+    '~/library/launchagents/com.vcontext.', '/users/mitsuru_nakajima/library/launchagents/com.vcontext.',
+    '/volumes/vcontext/',
+  ];
+  const touchesPath = paths.some(p => lower.includes(p));
+  if (!touchesPath) return false;
+  // Verbs that write / mutate
+  const writeVerbs = /\b(rm|mv|cp|mkdir|rmdir|touch|tee|dd|chmod|chown|ln|git\s+(add|commit|push|reset|checkout|rebase|merge|branch|stash|cherry-pick|rm|mv|restore|clean)|launchctl\s+(load|unload|bootstrap|bootout|kickstart|enable|disable)|npm\s+(install|i|uninstall|remove|rm|ci|publish)|yarn\s+(add|remove)|pnpm\s+(add|remove|install)|pip\s+(install|uninstall))\b/;
+  if (writeVerbs.test(cmd)) return true;
+  // Shell redirections writing into AIOS paths
+  if (/>\s*["']?(~\/skills|\/Users\/mitsuru_nakajima\/skills|~\/Library\/LaunchAgents\/com\.vcontext\.|\/Volumes\/VContext)/i.test(cmd)) return true;
+  return false;
+}
+
+function aiosCacheFlagPath(sessionId) {
+  const safe = String(sessionId || '').replace(/[^a-zA-Z0-9-]/g, '');
+  return join(AIOS_SESSION_STARTS_DIR, `vcontext-skill-usage-${safe}.flag`);
+}
+
+function aiosSessionStartPath(sessionId) {
+  const safe = String(sessionId || '').replace(/[^a-zA-Z0-9-]/g, '');
+  return join(AIOS_SESSION_STARTS_DIR, `vcontext-session-start-${safe}.flag`);
+}
+
+function aiosSessionStartedAt(sessionId) {
+  const f = aiosSessionStartPath(sessionId);
+  try {
+    const t = parseInt(readFileSync(f, 'utf-8').trim(), 10);
+    if (Number.isFinite(t) && t > 0) return t;
+  } catch {}
+  // First time this gate sees the session — record it now.
+  const now = Date.now();
+  try { writeFileSync(f, String(now), 'utf-8'); } catch {}
+  return now;
+}
+
+function aiosCacheRead(sessionId) {
+  try {
+    const f = aiosCacheFlagPath(sessionId);
+    const st = statSync(f);
+    if (Date.now() - st.mtimeMs < AIOS_SKILL_USAGE_CACHE_TTL_MS) return true;
+  } catch {}
+  return false;
+}
+
+function aiosCacheWrite(sessionId) {
+  try { writeFileSync(aiosCacheFlagPath(sessionId), '1', 'utf-8'); } catch {}
+}
+
+async function sessionHasSkillUsage(sessionId) {
+  if (aiosCacheRead(sessionId)) return true;
+  // Query vcontext. /session endpoint supports ?type= filter.
+  const r = await get(`/session/${encodeURIComponent(sessionId)}?type=skill-usage&limit=1`);
+  if (r && Array.isArray(r.results) && r.results.length > 0) {
+    aiosCacheWrite(sessionId);
+    return true;
+  }
+  return false;
+}
+
+function emitAiosBlock(toolName, reasonJa) {
+  const payload = {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      additionalContext:
+        '\n⚠️  AIOS-connected write detected.\n' +
+        '  This session has not consulted `infinite-skills` routing yet.\n' +
+        '  Required before any edit under ~/skills, com.vcontext.*,\n' +
+        '  /Volumes/VContext, or /tmp/vcontext-*.log.\n\n' +
+        '  Options:\n' +
+        '  □ Consult infinite-skills routing (recommended)\n' +
+        '  □ Re-run with INFINITE_SKILLS_OK=1 prefix for emergency override',
+    },
+    continue: false,
+    stopReason: reasonJa,
+  };
+  process.stdout.write(JSON.stringify(payload) + '\n');
+}
+
+// Main gate. Returns true if the tool should be BLOCKED (caller exits).
+async function handlePreToolGate() {
+  const input = await readStdin();
+  if (!input) return { blocked: false, input: '' };
+
+  // Escape hatch — highest priority.
+  if (process.env.INFINITE_SKILLS_OK === '1') return { blocked: false, input };
+
+  let data;
+  try { data = JSON.parse(input); } catch { return { blocked: false, input }; }
+
+  const toolName = data.tool_name || '';
+  const toolInput = data.tool_input || {};
+  const sessionId = extractSessionId(input);
+
+  // Only gate mutating tools. Read/Glob/Grep/Agent/etc always pass.
+  const writeTools = new Set(['Edit', 'Write', 'NotebookEdit', 'MultiEdit']);
+  const isWriteTool = writeTools.has(toolName);
+  const isBash = toolName === 'Bash';
+  if (!isWriteTool && !isBash) return { blocked: false, input };
+
+  // Does the target path / command touch AIOS?
+  let touchesAios = false;
+  if (isWriteTool) {
+    const target = toolInput.file_path || toolInput.notebook_path || '';
+    touchesAios = isAiosConnectedPath(target);
+  } else if (isBash) {
+    const cmd = toolInput.command || '';
+    touchesAios = bashCommandTouchesAios(cmd);
+  }
+  if (!touchesAios) return { blocked: false, input };
+
+  // Cold-start grace: the very first 30s of a session may not have
+  // routed yet (session-recall + user-prompt run in parallel with the
+  // first tool use). Record on first sighting.
+  const sessionStart = aiosSessionStartedAt(sessionId);
+  if (Date.now() - sessionStart < AIOS_COLD_START_GRACE_MS) {
+    return { blocked: false, input };
+  }
+
+  // Has infinite-skills routing fired in this session?
+  let hasRouted = false;
+  try {
+    hasRouted = await sessionHasSkillUsage(sessionId);
+  } catch (e) {
+    // Fail open on infra errors — soft-enforcement fallback.
+    errorLog('aios_gate_query_failed', String(e && e.message || e));
+    return { blocked: false, input };
+  }
+  if (hasRouted) return { blocked: false, input };
+
+  // BLOCK.
+  const reason = `AIOS-connected write detected. infinite-skills routing has not fired in this session. Consult routing or retry with INFINITE_SKILLS_OK=1.`;
+  emitAiosBlock(toolName, reason);
+  // Best-effort audit record so the gate is observable.
+  post('/store', {
+    type: 'aios-gate-block',
+    content: JSON.stringify({
+      session: sessionId,
+      tool: toolName,
+      target: toolInput.file_path || toolInput.command || '',
+      at: new Date().toISOString(),
+    }),
+    tags: ['aios-gate', 'block', `tool:${toolName}`],
+    session: sessionId,
+  }).catch(() => {});
+  return { blocked: true, input };
+}
+
+// Dispatcher for pre-tool: gate first, then record.
+// If the gate blocks, we emit the JSON block payload and return —
+// exit 2 is reserved for infrastructure errors in Claude Code; the
+// JSON payload already carries continue:false, which is what halts
+// the tool (same convention as pre-commit-gate.sh).
+async function handlePreTool() {
+  const { blocked, input } = await handlePreToolGate();
+  if (blocked) return; // skip recording — gate already emitted block
+  if (input) await recordEvent('pre-tool', input);
+}
+
 // ── Universal recorder ───────────────────────────────────────────
 
-async function recordEvent(eventName) {
-  const input = await readStdin();
+async function recordEvent(eventName, preReadInput) {
+  const input = preReadInput !== undefined ? preReadInput : await readStdin();
   if (!input) return;
 
   const sessionId = extractSessionId(input);
@@ -1341,12 +1563,62 @@ async function recordEvent(eventName) {
     } catch {}
   }
 
+  // Per-tool-call working-state snapshot. Previously working-state was
+  // only written on user-prompt / subagent-start, so during long
+  // tool-heavy stretches the pipeline-health "Per-turn snapshot" signal
+  // would age past its 10 min yellow threshold even though Claude was
+  // actively working. Writing on tool-use (with a 30 s per-session
+  // throttle to avoid DB pressure) keeps the signal green for the
+  // intended cadence: "should fire every tool call".
+  if (eventName === 'tool-use') {
+    try {
+      const data = JSON.parse(input);
+      const cwd = data.cwd || '';
+      if (cwd && rateLimitOk(sessionId) && workingStateThrottleOk(sessionId)) {
+        const worktree = cwd.split('/').filter(Boolean).slice(-1)[0] || '';
+        const namespace = process.env.VCONTEXT_NAMESPACE || deriveNamespace(cwd);
+        const tool = data.tool_name || '';
+        post('/store', {
+          type: 'working-state',
+          content: JSON.stringify({
+            session: sessionId,
+            cwd,
+            worktree,
+            namespace,
+            last_tool: tool,
+            at: new Date().toISOString(),
+          }),
+          tags: ['working-state', `cwd:${cwd}`, `worktree:${worktree}`, `ns:${namespace}`, 'source:tool-use'],
+          session: sessionId,
+        }).catch(() => {});
+      }
+    } catch {}
+  }
+
   // Check for pending consultations from other AIs (piggyback on tool-use)
   if (eventName === 'tool-use') {
     try {
       await checkPendingConsultations();
     } catch {} // Non-fatal
   }
+}
+
+// Per-session throttle for tool-use working-state writes — avoids dozens
+// of near-identical snapshots on tool-heavy turns while still keeping
+// the "Per-turn snapshot" signal green (<10 min recency). 30 s cadence
+// = ≤2 writes/min/session.
+function workingStateThrottleOk(sessionId) {
+  if (!sessionId) return true;
+  try {
+    const safe = String(sessionId).replace(/[^a-zA-Z0-9-]/g, '');
+    const f = `/tmp/vcontext-ws-throttle-${safe}`;
+    let last = 0;
+    try { last = parseInt(readFileSync(f, 'utf-8'), 10) || 0; } catch {}
+    const now = Date.now();
+    if (now - last < 30000) return false;
+    writeFileSync(f, String(now), 'utf-8');
+    return true;
+  } catch { return true; }
 }
 
 // ── Auto-consult: check for pending consultations ────────────────
@@ -2385,6 +2657,8 @@ switch (command) {
     handleUserPrompt().catch(() => process.exit(0));
     break;
   case 'pre-tool':
+    handlePreTool().catch(() => process.exit(0));
+    break;
   case 'tool-use':
   case 'tool-error':
     recordEvent(command).catch(() => process.exit(0));
