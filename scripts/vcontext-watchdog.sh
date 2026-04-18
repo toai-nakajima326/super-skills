@@ -25,6 +25,11 @@ HEALTH_URL="http://localhost:3150/health"
 WEBHOOK_URL="${VCONTEXT_ALERT_WEBHOOK:-}"  # Set env var for Slack/Discord/LINE
 LAST_NOTIFY_FILE="/tmp/vcontext-watchdog-last-notify.txt"
 
+# Log-path note (2026-04-18 audit M6): watchdog stdout/stderr goes to
+# /tmp/vcontext-watchdog.log via com.vcontext.watchdog.plist, distinct
+# from the server's /tmp/vcontext-server.log (com.vcontext.server.plist).
+# No collision — both plists write to their own file.
+
 # ── Tunables (override via env) ───────────────────────────────
 # All thresholds here so ops can tune without editing code.
 # Memory thresholds reflect steady-state + buffer, not leak detection:
@@ -177,13 +182,16 @@ while true; do
     fi
   fi
 
-  # Check SearXNG every 5 minutes (every 5th iteration)
+  # Check SearXNG every cycle (commit 3698c3b, 2026-04-16: simplified
+  # from a 5-iteration sub-sample to every iteration so recovery time
+  # tracks CHECK_INTERVAL, not 5*CHECK_INTERVAL). Counter is retained
+  # for any future sub-sampling without renaming.
   SEARXNG_CHECK_COUNTER=$((SEARXNG_CHECK_COUNTER + 1))
   if [[ $((SEARXNG_CHECK_COUNTER % 1)) -eq 0 ]]; then
     check_searxng
   fi
 
-  # MLX Embed health check every minute.
+  # MLX Embed health check every cycle (was a 5-iter sub-sample pre-3698c3b).
   # 2026-04-18 INCIDENT (44 restarts in 2h): the previous check used
   #   curl --max-time 5  on /health  AND  restart on first failure.
   # But the server's /health handler shares Python's asyncio event loop
@@ -227,10 +235,15 @@ while true; do
     fi
   fi
 
-  # MLX Generate health check every 5 minutes (every 5th iteration).
+  # MLX Generate health check every cycle (was a 5-iter sub-sample pre-3698c3b).
   # /health responds even when generation hangs — so we probe an ACTUAL
   # completion with 15s timeout. This is how the 2026-04-14 halt went
   # undetected for a day: /health was up but generation was dead.
+  # Note: on the fallback /v1/chat/completions probe this block can take up
+  # to ~90s (> CHECK_INTERVAL=60s). The outer `sleep CHECK_INTERVAL` still
+  # runs after, so worst-case cycle is ~90+60=150s — still far below the
+  # 5*CHECK_INTERVAL=300s the old sub-sampled design took, so every-iter
+  # sampling strictly improves detection latency.
   if [[ $((SEARXNG_CHECK_COUNTER % 1)) -eq 0 ]]; then
     # Process identity: mlx-generate-wrapper.sh execs `python3 -m mlx_lm.server`,
     # so the running command line contains mlx_lm.server (NOT mlx-generate-server).
