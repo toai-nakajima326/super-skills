@@ -259,6 +259,49 @@ http://127.0.0.1:3150/dashboard → pending-patch セクション
 ```
 自動生成スキルは `requires-review` タグ付き。必ず内容を確認してから承認すること。
 
+## Stream: 会話からスキル推論（conversation-skill-miner）
+
+```
+過去の会話 → LLMで「繰り返し言及される作業」を検出 → SKILL.md生成 → pending-patch登録
+```
+
+`scripts/conversation-skill-miner.js` が毎日 11:00 に実行される（LaunchAgent: `com.vcontext.conversation-skill-miner`）。
+
+### new-feature-watcher との違い
+
+| 観点 | new-feature-watcher | conversation-skill-miner |
+|------|---------------------|--------------------------|
+| ソース | 外部ニュース（Anthropic/OpenAI等） | ユーザー自身の会話履歴 |
+| トリガー | 新製品リリース | 繰り返しパターン・未解決の要求 |
+| スキルの性格 | 新ツールの使い方 | ユーザー固有のワークフロー・関心 |
+| 例 | Claude Design リリース → skill化 | 「PDF編集したい」を3回言及 → pdf-editingスキル化 |
+
+### 監視対象
+vcontext内の以下のtypeを最低2回以上言及されたパターンで検索:
+- `user-prompt` — ユーザーの依頼文
+- `assistant-response` — 自分の回答
+- `session-summary` — セッションサマリー
+- `skill-gap` — 検出済みギャップ
+- `pain-point` — 困ったポイント
+- `unresolved-question` — 未解決の質問
+
+### 採用基準
+- confidence ≥ 0.5
+- 会話内での出現頻度 ≥ 2
+- 既存スキルと重複しない
+- fitness ≤ 0.70（必ずダッシュボードレビュー）
+
+### 手動実行
+```bash
+node ~/skills/scripts/conversation-skill-miner.js          # 実行
+node ~/skills/scripts/conversation-skill-miner.js --dry-run # 確認のみ
+```
+
+### 狙い
+「Claudeの新機能」だけでなく「ユーザーが頻繁にやる作業」「ユーザーが繰り返し聞く概念」も
+スキル化することで、Claude以外のAIツール・ドメイン知識・個人ワークフローまで広くカバーする。
+使い道が不明瞭でも、ユーザーが言及している時点で潜在ニーズがあると判断して作成する。
+
 ## 手動実行（今すぐ発見）
 
 ```bash
