@@ -131,38 +131,50 @@ next_fire_for() {
   minute=$(printf '%s\n' "$desc"  | sed -n 's/.*"Minute" => \([0-9]*\).*/\1/p'  | head -1)
   weekday=$(printf '%s\n' "$desc" | sed -n 's/.*"Weekday" => \([0-9]*\).*/\1/p' | head -1)
 
-  if [[ -z "$hour" || -z "$minute" ]]; then
+  # Require at least a minute. Hour may be absent — that's an hourly schedule
+  # firing every hour at :MM (e.g., com.vcontext.maintenance Minute=45).
+  if [[ -z "$minute" ]]; then
     echo "MALFORMED"
     return
   fi
 
   # Compute next fire using python3 (portable date math). Falls back to
-  # plain "HH:MM" if python3 unavailable.
+  # plain "HH:MM" or ":MM" if python3 unavailable.
   if command -v python3 >/dev/null 2>&1; then
-    python3 - "$hour" "$minute" "${weekday:-}" <<'PY'
+    python3 - "${hour:-}" "$minute" "${weekday:-}" <<'PY'
 import sys, datetime
-hour = int(sys.argv[1]); minute = int(sys.argv[2])
+hour_raw = sys.argv[1]; minute = int(sys.argv[2])
 weekday_raw = sys.argv[3]
 now = datetime.datetime.now()
-target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-if weekday_raw == "":
-    # daily: next occurrence >= now
+if hour_raw == "":
+    # Hourly schedule pinned to :MM — next fire is this hour's :MM if
+    # still in the future, else next hour's :MM.
+    target = now.replace(minute=minute, second=0, microsecond=0)
     if target <= now:
-        target += datetime.timedelta(days=1)
+        target += datetime.timedelta(hours=1)
 else:
-    # weekly: launchd Weekday — 0=Sun, 1=Mon, ... 6=Sat. Python
-    # weekday(): 0=Mon..6=Sun. Convert launchd→python: (w-1) % 7, except
-    # launchd 7 also means Sunday.
-    w = int(weekday_raw) % 7
-    target_wd = (w - 1) % 7  # python weekday
-    delta = (target_wd - now.weekday()) % 7
-    target += datetime.timedelta(days=delta)
-    if delta == 0 and target <= now:
-        target += datetime.timedelta(days=7)
+    hour = int(hour_raw)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if weekday_raw == "":
+        # daily: next occurrence >= now
+        if target <= now:
+            target += datetime.timedelta(days=1)
+    else:
+        # weekly: launchd Weekday — 0=Sun, 1=Mon, ... 6=Sat. Python
+        # weekday(): 0=Mon..6=Sun. Convert launchd→python: (w-1) % 7, except
+        # launchd 7 also means Sunday.
+        w = int(weekday_raw) % 7
+        target_wd = (w - 1) % 7  # python weekday
+        delta = (target_wd - now.weekday()) % 7
+        target += datetime.timedelta(days=delta)
+        if delta == 0 and target <= now:
+            target += datetime.timedelta(days=7)
 print(target.strftime("%Y-%m-%d %H:%M"))
 PY
-  else
+  elif [[ -n "$hour" ]]; then
     printf '%02d:%02d\n' "$hour" "$minute"
+  else
+    printf ':%02d\n' "$minute"
   fi
 }
 
