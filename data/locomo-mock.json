@@ -1,0 +1,44 @@
+{
+  "sample_id": "mock-1",
+  "description": "10-QA synthetic conversation for harness smoke testing without MLX dependency",
+  "conversation": {
+    "speaker_a": "Alice",
+    "speaker_b": "Bob",
+    "session_1_date_time": "1 Jan 2026, 10:00 am",
+    "session_1": [
+      {"speaker": "Alice", "dia_id": "D1:1", "text": "I just adopted a golden retriever named Rusty."},
+      {"speaker": "Bob", "dia_id": "D1:2", "text": "Amazing! How old is Rusty?"},
+      {"speaker": "Alice", "dia_id": "D1:3", "text": "He's three years old. I got him from the shelter on Fremont Street."},
+      {"speaker": "Bob", "dia_id": "D1:4", "text": "I volunteered there last summer. Great place."},
+      {"speaker": "Alice", "dia_id": "D1:5", "text": "I'm taking him to obedience classes starting next Monday."}
+    ],
+    "session_2_date_time": "15 Jan 2026, 7:30 pm",
+    "session_2": [
+      {"speaker": "Bob", "dia_id": "D2:1", "text": "How did the obedience classes go?"},
+      {"speaker": "Alice", "dia_id": "D2:2", "text": "Really well! Rusty is a fast learner. The trainer is Marcus from Berkeley."},
+      {"speaker": "Bob", "dia_id": "D2:3", "text": "By the way, I'm moving to Seattle in March for a job at a fintech startup."},
+      {"speaker": "Alice", "dia_id": "D2:4", "text": "Congrats! Is that the company that makes the budgeting app?"},
+      {"speaker": "Bob", "dia_id": "D2:5", "text": "Yes, LedgerPal. They offered me the senior backend role."},
+      {"speaker": "Alice", "dia_id": "D2:6", "text": "I've been using LedgerPal for two years. Small world!"}
+    ],
+    "session_3_date_time": "20 Feb 2026, 9:00 am",
+    "session_3": [
+      {"speaker": "Alice", "dia_id": "D3:1", "text": "Rusty had his first agility competition yesterday. He placed 4th."},
+      {"speaker": "Bob", "dia_id": "D3:2", "text": "Out of how many?"},
+      {"speaker": "Alice", "dia_id": "D3:3", "text": "22 dogs. I'm really proud of him."},
+      {"speaker": "Bob", "dia_id": "D3:4", "text": "I closed on my Seattle apartment last week. Moving the 5th of March."}
+    ]
+  },
+  "qa": [
+    {"question": "What is the name of Alice's dog?", "answer": "Rusty", "evidence": ["D1:1"], "category": 1},
+    {"question": "How old is Rusty?", "answer": "3", "evidence": ["D1:3"], "category": 1},
+    {"question": "Where did Alice adopt Rusty from?", "answer": "the shelter on Fremont Street", "evidence": ["D1:3"], "category": 1},
+    {"question": "Who is Rusty's obedience trainer?", "answer": "Marcus", "evidence": ["D2:2"], "category": 1},
+    {"question": "What company is Bob moving to Seattle for?", "answer": "LedgerPal", "evidence": ["D2:5"], "category": 2},
+    {"question": "What role did LedgerPal offer Bob?", "answer": "senior backend role", "evidence": ["D2:5"], "category": 2},
+    {"question": "When is Bob moving to Seattle?", "answer": "5 March 2026", "evidence": ["D2:3", "D3:4"], "category": 2},
+    {"question": "What place did Rusty get in his first agility competition?", "answer": "4th", "evidence": ["D3:1"], "category": 1},
+    {"question": "How many dogs competed in Rusty's agility competition?", "answer": "22", "evidence": ["D3:3"], "category": 1},
+    {"question": "What is Alice's favorite color?", "evidence": [], "category": 5, "adversarial_answer": "Not mentioned"}
+  ]
+}
