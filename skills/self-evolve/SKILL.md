@@ -174,13 +174,26 @@ Search across ALL of these categories. Do not skip any.
 - "awesome claude code {year}"
 - "awesome AI coding agent {year}"
 
-### Step 2: Deep dive on promising results
+**日本語技術サイト（必須 — 毎回検索すること）:**
+- site:zenn.dev "Claude Code" OR "AIエージェント" after:{last_run_date}
+- site:qiita.com "Claude Code スキル" OR "AIエージェント" after:{last_run_date}
+- site:dev.classmethod.jp "Claude Code" OR "AIエージェント" after:{last_run_date}
+- site:ai.watch.impress.co.jp (最新AI記事を直接確認) after:{last_run_date}
+
+**論文・研究ソース（必須 — 毎回検索すること）:**
+- site:arxiv.org "AI agent workflow" OR "LLM tool use" OR "agentic coding" after:{last_run_date}
+- site:arxiv.org "multi-agent coordination" OR "LLM skill composition" after:{last_run_date}
+- paperswithcode.com "agent skill" {year}
+- "agentic AI coding assistant" site:semanticscholar.org {year}
+
+### Step 2: Deep dive on promising results + 参照先リンクの再帰チェック
 For each promising result found in Step 1:
 1. Fetch the full page content with WebFetch — don't rely on search snippets
 2. If it's a GitHub repo, explore the directory structure and key files
 3. If it's a blog/article, read the complete content for implementation details
-4. Cross-reference: search for the same pattern/concept in other sources
-5. Check for criticism or known issues with the pattern
+4. **参照先リンクを1段階深掘り** — 記事中の「参考文献」「関連リンク」から最大3リンクをWebFetchで確認
+5. Cross-reference: search for the same pattern/concept in other sources
+6. Check for criticism or known issues with the pattern
 
 ### Step 3: Evaluate against existing skills
 For each candidate pattern:
