@@ -29,13 +29,14 @@ com.vcontext.article-scanner
 com.vcontext.article-scanner-evening
 com.vcontext.self-evolve
 com.vcontext.keyword-expander
-com.vcontext.skill-discovery"
+com.vcontext.skill-discovery
+com.vcontext.task-runner"
 
 kind_for() {
   # ramdisk: one-shot at boot (exits after mounting), treat like boot-only
   # hooks-setup: same pattern
   case "$1" in
-    com.vcontext.server|com.vcontext.watchdog|com.vcontext.mlx-embed|com.vcontext.mlx-generate) echo daemon ;;
+    com.vcontext.server|com.vcontext.watchdog|com.vcontext.mlx-embed|com.vcontext.mlx-generate|com.vcontext.task-runner) echo daemon ;;
     com.vcontext.ramdisk|com.vcontext.hooks-setup) echo boot-only ;;
     com.vcontext.maintenance|com.vcontext.morning-brief|com.vcontext.article-scanner|com.vcontext.article-scanner-evening|com.vcontext.self-evolve|com.vcontext.keyword-expander) echo cron-daily ;;
     com.vcontext.skill-discovery) echo cron-weekly ;;
@@ -57,6 +58,7 @@ logfile_for() {
     com.vcontext.self-evolve) echo /tmp/vcontext-self-evolve.log ;;
     com.vcontext.keyword-expander) echo /tmp/vcontext-keyword-expander.log ;;
     com.vcontext.skill-discovery) echo /tmp/vcontext-skill-discovery.log ;;
+    com.vcontext.task-runner) echo /tmp/vcontext-task-runner.log ;;
     *) echo "" ;;
   esac
 }

@@ -5737,6 +5737,8 @@ const ENDPOINTS_LIST = [
   'GET    /summaries?level=  — hierarchical chunk summaries (level=1 ?hours=N, level=2 ?days=N, level=3 ?weeks=N)',
   'POST   /admin/trigger-l2-summary — force-generate L2 daily summary {date?: "YYYY-MM-DD"}',
   'POST   /admin/trigger-l3-summary — force-generate L3 weekly summary {week?: "YYYY-Www"}',
+  'POST   /admin/task-request       — submit an AIOS task queue job',
+  'GET    /admin/task-queue         — snapshot of pending/running/recent task queue',
 ];
 
 const server = createServer(async (req, res) => {
@@ -6513,6 +6515,145 @@ const server = createServer(async (req, res) => {
         },
       };
       sendJson(res, 200, { summary, features: features_out, loops });
+    } else if (method === 'POST' && path === '/admin/task-request') {
+      // AIOS Task Queue — submit long-running work that survives Claude Code
+      // crashes. Stores a type='task-request' entry; aios-task-runner.js
+      // (independent LaunchAgent) polls and dispatches. Result lands back as
+      // type='task-result' so the next Claude Code session can /recall it.
+      try {
+        const body = await readBody(req);
+        const ALLOWED_TASK_TYPES = new Set([
+          'locomo-eval',
+          'skill-discovery-adhoc',
+          'article-scan-adhoc',
+          'self-evolve-dryrun',
+          'shell-command',
+        ]);
+        const task_type = typeof body.task_type === 'string' ? body.task_type : '';
+        if (!ALLOWED_TASK_TYPES.has(task_type)) {
+          return sendJson(res, 400, { error: `Unknown task_type. Allowed: ${[...ALLOWED_TASK_TYPES].join(', ')}` });
+        }
+        const payload = (body.payload && typeof body.payload === 'object') ? body.payload : {};
+        // shell-command RCE guard — require explicit user-approval marker
+        if (task_type === 'shell-command' && payload.approved_by_user !== true) {
+          return sendJson(res, 403, { error: 'shell-command task requires payload.approved_by_user === true' });
+        }
+        const priority = [1, 2, 3].includes(body.priority) ? body.priority : 2;
+        const requested_by = typeof body.requested_by === 'string' ? body.requested_by.slice(0, 120) : 'unknown';
+        const request_id = require('node:crypto').randomUUID();
+        const created_at = new Date().toISOString();
+        const taskEntry = {
+          request_id,
+          task_type,
+          payload,
+          priority,
+          requested_by,
+          status: 'pending',
+          created_at,
+        };
+        const tags = JSON.stringify(['task-queue', `task-type:${task_type}`, `priority:${priority}`, `request:${request_id}`]);
+        dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate) VALUES ('task-request', ${esc(JSON.stringify(taskEntry))}, ${esc(tags)}, 'task-queue', 0);`);
+        // queue_position = count of pending task-request entries (minus terminal ones)
+        let queue_position = 1;
+        try {
+          const pendingCount = dbQuery(
+            `SELECT COUNT(*) as c FROM entries WHERE type='task-request' AND tags LIKE '%task-queue%';`
+          )[0]?.c || 1;
+          queue_position = pendingCount;
+        } catch {}
+        sendJson(res, 200, { request_id, status: 'pending', queue_position, created_at });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'GET' && path === '/admin/task-queue') {
+      // Snapshot of the task queue for dashboard + runner polling.
+      // Derives pending/running/completed from type='task-request',
+      // type='task-status-update', type='task-result' entries.
+      try {
+        const LIMIT = 20;
+        // Pull the last ~200 task-request entries (newest first) and join in
+        // status-updates + results via request_id. Keep lists bounded at LIMIT.
+        const requestRows = dbQuery(
+          `SELECT id, content, created_at FROM entries WHERE type='task-request' ORDER BY id DESC LIMIT 200;`
+        );
+        const statusRows = dbQuery(
+          `SELECT id, content, created_at FROM entries WHERE type='task-status-update' ORDER BY id DESC LIMIT 400;`
+        );
+        const resultRows = dbQuery(
+          `SELECT id, content, created_at FROM entries WHERE type='task-result' ORDER BY id DESC LIMIT 200;`
+        );
+        const statusByReq = new Map();
+        for (const r of statusRows) {
+          try {
+            const d = JSON.parse(r.content || '{}');
+            if (!d.request_id) continue;
+            if (!statusByReq.has(d.request_id)) statusByReq.set(d.request_id, []);
+            statusByReq.get(d.request_id).push({ ...d, entry_id: r.id, created_at: r.created_at });
+          } catch {}
+        }
+        const resultByReq = new Map();
+        for (const r of resultRows) {
+          try {
+            const d = JSON.parse(r.content || '{}');
+            if (!d.request_id) continue;
+            if (!resultByReq.has(d.request_id)) {
+              resultByReq.set(d.request_id, { ...d, entry_id: r.id, created_at: r.created_at });
+            }
+          } catch {}
+        }
+        const pending = [];
+        const running = [];
+        const recent_results = [];
+        for (const r of requestRows) {
+          let req;
+          try { req = JSON.parse(r.content || '{}'); } catch { continue; }
+          const reqId = req.request_id;
+          if (!reqId) continue;
+          const result = resultByReq.get(reqId);
+          if (result) {
+            if (recent_results.length < LIMIT) {
+              recent_results.push({
+                request_id: reqId,
+                task_type: req.task_type,
+                status: result.status || 'completed',
+                duration_ms: result.duration_ms || null,
+                completed_at: result.completed_at || result.created_at,
+                created_at: r.created_at,
+                entry_id: r.id,
+                error: result.error || null,
+              });
+            }
+            continue;
+          }
+          const updates = statusByReq.get(reqId) || [];
+          const latest = updates[0];
+          if (latest && latest.status === 'running') {
+            if (running.length < LIMIT) {
+              running.push({
+                request_id: reqId,
+                task_type: req.task_type,
+                started_at: latest.started_at || latest.created_at,
+                created_at: r.created_at,
+                entry_id: r.id,
+              });
+            }
+            continue;
+          }
+          // No result, no running-update → still pending.
+          if (pending.length < LIMIT) {
+            pending.push({
+              request_id: reqId,
+              task_type: req.task_type,
+              priority: req.priority || 2,
+              requested_by: req.requested_by || 'unknown',
+              payload: req.payload || {},
+              created_at: r.created_at,
+              entry_id: r.id,
+            });
+          }
+        }
+        // Sort pending by priority asc (1 = highest), then by created_at asc (FIFO).
+        pending.sort((a, b) => (a.priority - b.priority) || (a.created_at || '').localeCompare(b.created_at || ''));
+        sendJson(res, 200, { pending, running, recent_results });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'POST' && path === '/admin/trigger-l2-summary') {
       // Manually generate an L2 (daily) summary for a given UTC date.
       // Body: {date: "YYYY-MM-DD"}.  Omit date → default to yesterday.
