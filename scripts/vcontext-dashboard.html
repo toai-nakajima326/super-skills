@@ -182,6 +182,47 @@
     <div id="task-queue-content" style="max-height:420px;overflow-y:auto;font-size:12px;">Loading...</div>
   </div>
 
+  <!-- Pillar 3 — Causal Trace. User enters an entry id, we walk the
+       parent_id chain via GET /trace/:id and show root→target→children.
+       Not auto-fetched (needs an id the user provides). -->
+  <div class="card">
+    <h2>🔗 Causal Trace</h2>
+    <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;">
+      <input id="trace-input" type="number" min="1" placeholder="Entry ID" style="flex:1;padding:5px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:12px;" onkeydown="if(event.key==='Enter')doTrace()">
+      <button class="btn" style="font-size:11px;padding:4px 10px;" onclick="doTrace()">Trace</button>
+    </div>
+    <div id="trace-content" style="max-height:340px;overflow-y:auto;font-size:12px;color:var(--text-dim);">Enter an entry ID to trace causal chain</div>
+  </div>
+
+  <!-- Pillar 4 — Predictive Ambience. Auto-refreshed on the normal
+       refresh() cycle. Shows top-K "likely next" signals so the owner
+       gets ambient hints without asking. -->
+  <div class="card">
+    <h2>🔮 Predict Next</h2>
+    <div id="predict-content" style="max-height:340px;overflow-y:auto;font-size:12px;">Loading...</div>
+  </div>
+
+  <!-- Pillar 5 — Open Substrate. Single button triggers a confirmation
+       modal; on confirm streams /export as NDJSON and saves via Blob.
+       NEVER auto-fetched (response can be very large). wide to make
+       the danger obvious. -->
+  <div class="card wide">
+    <h2>📦 Export Substrate</h2>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;line-height:1.55;">
+      Dumps ALL entries as NDJSON for fork / archive / migration. Owner role only.
+      Secrets are masked; api-key / credential types are excluded unless you opt in.
+      Response can be hundreds of MB — <b style="color:var(--red);">do not share the file carelessly</b>.
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <button class="btn" style="font-size:12px;padding:5px 14px;background:#b42c2c;color:#fff;border-color:#b42c2c;" onclick="confirmExport()">📦 Export AIOS Data (owner only)</button>
+      <label style="font-size:11px;color:var(--text-muted);display:inline-flex;align-items:center;gap:4px;">
+        <input id="export-include-sensitive" type="checkbox" style="margin:0;">
+        include sensitive (api-key / credential types)
+      </label>
+      <span id="export-status" style="font-size:11px;color:var(--text-muted);"></span>
+    </div>
+  </div>
+
   <!-- Recent Entries -->
   <div class="card wide">
     <h2>Recent Entries</h2>
@@ -362,6 +403,137 @@ function showStoppedBanner(restartCmd) {
     '</code>';
 }
 
+// ── Pillar 3 — Causal Trace (GET /trace/:id) ─────────────────────
+// User-triggered only. Shape:
+//   { id, found, depth, truncated, ancestry:[{id,type,session,parent_id,
+//     created_at,preview}], children:[...] }
+// ancestry is root-first (oldest cause at index 0, target last).
+async function doTrace() {
+  var input = document.getElementById('trace-input');
+  var el = document.getElementById('trace-content');
+  var raw = (input.value || '').trim();
+  var id = parseInt(raw, 10);
+  if (!Number.isFinite(id) || id <= 0) {
+    el.innerHTML = '<div style="color:var(--red);">Enter a numeric entry id (got "' + escapeHtml(raw) + '").</div>';
+    return;
+  }
+  el.innerHTML = '<div style="color:var(--text-dim);">Tracing id=' + id + '…</div>';
+  try {
+    var r = await fetch(API + '/trace/' + id);
+    var d = await r.json();
+    if (r.status === 404 || d.found === false) {
+      el.innerHTML = '<div style="color:var(--red);">Entry id=' + id + ' not found.</div>';
+      return;
+    }
+    if (!r.ok) {
+      el.innerHTML = '<div style="color:var(--red);">Error ' + r.status + ': ' + escapeHtml(d.error || 'unknown') + '</div>';
+      return;
+    }
+    var ancestry = d.ancestry || [];
+    var children = d.children || [];
+    var renderRow = function(row, isTarget) {
+      var preview = (row.preview || '').replace(/\s+/g, ' ').trim().slice(0, 140);
+      var border = isTarget ? '2px solid var(--accent)' : '2px solid var(--bg-bar)';
+      var bg = isTarget ? 'rgba(88,166,255,0.07)' : 'transparent';
+      return '<div style="padding:4px 6px;border-left:' + border + ';background:' + bg + ';margin-bottom:3px;">' +
+        '<span style="font-family:monospace;font-size:11px;color:var(--text-dim);">#' + row.id + '</span> ' +
+        '<span class="' + badgeClass(row.type) + '">' + escapeHtml(row.type || '?') + '</span> ' +
+        (row.session ? '<span style="font-size:10px;color:var(--text-dim);font-family:monospace;" title="' + escapeHtml(row.session) + '">' + escapeHtml(row.session.slice(0, 8)) + '</span>' : '') +
+        (row.created_at ? ' <span style="font-size:10px;color:var(--text-muted);">' + escapeHtml(row.created_at) + '</span>' : '') +
+        (preview ? '<div style="font-size:11px;color:var(--text);margin-top:2px;">' + escapeHtml(preview) + '</div>' : '') +
+      '</div>';
+    };
+    var html = '';
+    html += '<div style="color:var(--text-muted);font-size:11px;margin-bottom:6px;">depth=' + d.depth + (d.truncated ? ' <span style="color:var(--yellow);">(truncated at 50)</span>' : '') + ' · ' + children.length + ' child' + (children.length === 1 ? '' : 'ren') + '</div>';
+    html += '<div style="color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;font-size:10px;margin-bottom:3px;">Ancestry (oldest → target)</div>';
+    if (ancestry.length === 0) {
+      html += '<div style="color:var(--text-dim);font-size:11px;margin-bottom:6px;">(no ancestors)</div>';
+    } else {
+      ancestry.forEach(function(row, i) {
+        html += renderRow(row, i === ancestry.length - 1);
+      });
+    }
+    html += '<div style="color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;font-size:10px;margin:8px 0 3px;">Descendants</div>';
+    if (children.length === 0) {
+      html += '<div style="color:var(--text-dim);font-size:11px;">(no direct children)</div>';
+    } else {
+      children.forEach(function(row) { html += renderRow(row, false); });
+    }
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = '<div style="color:var(--red);">Fetch error: ' + escapeHtml(String(e.message || e)) + '</div>';
+  }
+}
+
+// ── Pillar 5 — Export Substrate (GET /export) ────────────────────
+// Confirmation modal -> fetch NDJSON -> save via Blob anchor.
+// Never auto-called. Large response, so we stream-collect into a Blob
+// via response.blob() (browser handles memory — we don't hold a string).
+function confirmExport() {
+  var overlay = document.getElementById('export-confirm-modal');
+  if (overlay) return;
+  var includeSensitive = document.getElementById('export-include-sensitive').checked;
+  overlay = document.createElement('div');
+  overlay.id = 'export-confirm-modal';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9998;display:flex;align-items:center;justify-content:center;';
+  overlay.innerHTML =
+    '<div style="background:var(--bg);border:2px solid #b42c2c;border-radius:8px;padding:20px;max-width:500px;font-size:13px;">' +
+      '<div style="color:#b42c2c;font-size:16px;font-weight:bold;margin-bottom:8px;">📦 Export AIOS Data — 本当に?</div>' +
+      '<div style="color:var(--text);margin-bottom:10px;line-height:1.5;">' +
+        'これは <b>全エントリ</b> (id / type / content / tags / session …) を NDJSON でダウンロードします。' +
+        '<br>ファイルは数百MBになる可能性があり、secrets は maskSecrets() でマスクされますが、' +
+        '<b style="color:#b42c2c;">むやみに共有しないでください</b>。' +
+        (includeSensitive ? '<br><span style="color:var(--yellow);">⚠ include_sensitive=1 — api-key / credential も含まれます</span>' : '') +
+      '</div>' +
+      '<div style="display:flex;gap:8px;justify-content:flex-end;">' +
+        '<button class="btn" onclick="document.getElementById(\'export-confirm-modal\').remove()">Cancel</button>' +
+        '<button class="btn" style="background:#b42c2c;color:#fff;border-color:#b42c2c;" onclick="document.getElementById(\'export-confirm-modal\').remove();doExport(' + (includeSensitive ? 'true' : 'false') + ');">Export</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+}
+
+async function doExport(includeSensitive) {
+  var statusEl = document.getElementById('export-status');
+  statusEl.textContent = 'Exporting…';
+  statusEl.style.color = cssVar('yellow');
+  try {
+    var url = API + '/export' + (includeSensitive ? '?include_sensitive=1' : '');
+    var r = await fetch(url);
+    if (r.status === 403) {
+      statusEl.textContent = 'Export denied (owner role required).';
+      statusEl.style.color = cssVar('red');
+      return;
+    }
+    if (!r.ok) {
+      statusEl.textContent = 'Export failed: HTTP ' + r.status;
+      statusEl.style.color = cssVar('red');
+      return;
+    }
+    var blob = await r.blob();
+    var size = blob.size;
+    var sizeStr = size > 1048576 ? (size / 1048576).toFixed(1) + ' MB'
+                : size > 1024 ? (size / 1024).toFixed(1) + ' KB'
+                : size + ' B';
+    var today = new Date().toISOString().slice(0, 10);
+    var fname = 'aios-export-' + today + '.ndjson';
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function() {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+    }, 0);
+    statusEl.textContent = '✓ Saved ' + fname + ' (' + sizeStr + ')';
+    statusEl.style.color = cssVar('green');
+  } catch (e) {
+    statusEl.textContent = 'Export error: ' + e.message;
+    statusEl.style.color = cssVar('red');
+  }
+}
+
 function badgeClass(type) {
   var map = {
     'tool-use': 'observation', 'pre-tool': 'observation',
@@ -508,7 +680,7 @@ function openIdeaSource(url) {
 async function refresh() {
   // Parallel fetch all data at once
   const [alertData, health, tiers, ai, recent, sessionsSummary, metrics, pipeline, patches, weekly, skillEffect, walStatus, ideas,
-         ramdiskStats, kwSuggestions, evoDigests, articleDigests, taskQueue] = await Promise.all([
+         ramdiskStats, kwSuggestions, evoDigests, articleDigests, taskQueue, predictNext] = await Promise.all([
     fetchJson('/recent?n=1&type=anomaly-alert'),
     fetchJson('/health'),
     fetchJson('/tier/stats'),
@@ -531,6 +703,8 @@ async function refresh() {
     fetchJson('/recall?q=article-digest&type=article-digest&limit=5'),
     // AIOS Task Queue — Claude-Code-independent job queue snapshot
     fetchJson('/admin/task-queue'),
+    // Pillar 4 — Predictive Ambience: top-K "likely next" hints
+    fetchJson('/predict/next?limit=5'),
   ]);
 
   // Alerts
@@ -975,6 +1149,63 @@ async function refresh() {
     }
   }
 
+  // ── Predict Next card (Pillar 4) ──────────────────────────────
+  // /predict/next returns { generated_at, signals:{last_tool,
+  // active_gap_count, top_skills[]}, predictions:[{kind,label,score,reason,parent_id?}] }
+  // Kinds: 'tool' | 'skill' | 'gap' | 'suggestion'. Score is 0..1.
+  var predEl = document.getElementById('predict-content');
+  if (predEl) {
+    if (!predictNext) {
+      predEl.innerHTML = '<div style="color:var(--text-dim);">/predict/next unavailable.</div>';
+    } else {
+      var preds = predictNext.predictions || [];
+      var sig = predictNext.signals || {};
+      var phtml = '';
+      // Tiny signals line — shows what the prediction is reacting to.
+      var sigBits = [];
+      if (sig.last_tool) sigBits.push('last tool: <b>' + escapeHtml(sig.last_tool) + '</b>');
+      if (typeof sig.active_gap_count === 'number') sigBits.push(sig.active_gap_count + ' open gap' + (sig.active_gap_count === 1 ? '' : 's'));
+      if (sig.top_skills && sig.top_skills.length) sigBits.push('top skill: <b>' + escapeHtml(sig.top_skills[0].name) + '</b> (×' + sig.top_skills[0].count + ')');
+      if (sigBits.length) {
+        phtml += '<div style="color:var(--text-muted);font-size:11px;margin-bottom:6px;">' + sigBits.join(' · ') + '</div>';
+      }
+      if (preds.length === 0) {
+        phtml += '<div style="color:var(--text-dim);">No predictions yet.</div>';
+      } else {
+        var kindColor = { tool: 'var(--accent)', skill: 'var(--purple)', gap: 'var(--red)', suggestion: 'var(--green)' };
+        preds.slice(0, 5).forEach(function(p) {
+          var color = kindColor[p.kind] || 'var(--text)';
+          var score = Math.max(0, Math.min(1, Number(p.score) || 0));
+          var pct = Math.round(score * 100);
+          phtml += '<div style="padding:4px 0;border-bottom:1px solid var(--bg-bar);">';
+          phtml += '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:6px;">';
+          phtml += '<span><span style="color:' + color + ';font-size:10px;text-transform:uppercase;letter-spacing:1px;">' + escapeHtml(p.kind || '?') + '</span> ';
+          phtml += '<b style="font-size:12px;">' + escapeHtml(String(p.label || '').slice(0, 120)) + '</b></span>';
+          phtml += '<span style="font-family:monospace;font-size:11px;color:var(--text-dim);">' + pct + '%</span>';
+          phtml += '</div>';
+          phtml += '<div class="bar" style="margin:3px 0 2px;"><div class="bar-fill" style="width:' + pct + '%;background:' + color + ';"></div></div>';
+          if (p.reason) {
+            phtml += '<div style="color:var(--text-dim);font-size:11px;">' + escapeHtml(p.reason) + '</div>';
+          }
+          if (p.parent_id) {
+            phtml += '<div style="font-size:10px;color:var(--text-muted);font-family:monospace;">parent_id=' + p.parent_id + ' · <a href="#" onclick="event.preventDefault();document.getElementById(\'trace-input\').value=' + p.parent_id + ';doTrace();" style="color:var(--accent);">trace</a></div>';
+          }
+          phtml += '</div>';
+        });
+      }
+      if (predictNext.generated_at) {
+        // predictNext.generated_at is an ISO "...Z" string; toJST expects
+        // "YYYY-MM-DD HH:MM:SS" (no Z), so format directly instead.
+        try {
+          var gd = new Date(predictNext.generated_at);
+          var gstr = gd.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          phtml += '<div style="margin-top:6px;color:var(--text-dim);font-size:10px;">generated ' + gstr + ' JST</div>';
+        } catch {}
+      }
+      predEl.innerHTML = phtml;
+    }
+  }
+
   // Recent
   if (recent && recent.results) {
     document.getElementById('recent-content').innerHTML = recent.results.map(function(r) {
@@ -1252,7 +1483,7 @@ function connectWs() {
       refresh();
     };
     // WS event coalescing — without throttle, 30+ new_entry events/min would
-    // each trigger 18-endpoint refresh() = 540 API calls/min just for viewing.
+    // each trigger 19-endpoint refresh() = 570 API calls/min just for viewing.
     // Leading-edge then 10s-blocked window: first event refreshes immediately,
     // bursts within the window are swallowed (badge still updates live).
     var _wsRefreshBlockedUntil = 0;
