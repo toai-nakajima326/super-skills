@@ -90,17 +90,6 @@
 </header>
 <div id="alerts-bar" style="max-width:1400px;margin:0 auto 12px;display:none;"></div>
 <div class="grid">
-  <!-- Search -->
-  <div class="card wide">
-    <h2>Search Context</h2>
-    <div style="display:flex;gap:8px;align-items:center;">
-      <input id="search-input" type="text" placeholder="Search past context..." style="flex:1;padding:6px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px;" onkeydown="if(event.key==='Enter')doSearch()">
-      <button class="btn" onclick="doSearch()">FTS</button>
-      <button class="btn" onclick="doSearch('semantic')">Semantic</button>
-    </div>
-    <div id="search-results" style="margin-top:8px;font-size:12px;max-height:300px;overflow-y:auto;"></div>
-  </div>
-
   <!-- API Metrics + Health (top row) -->
   <div class="card">
     <h2>Metrics</h2>
@@ -197,6 +186,19 @@
   <div class="card wide">
     <h2>Recent Entries</h2>
     <div id="recent-content" style="max-height:300px;overflow-y:auto;">Loading...</div>
+  </div>
+
+  <!-- Search Context — moved to bottom per user preference (2026-04-18):
+       search is an on-demand action, not ambient info, so it shouldn't hog
+       prime top-of-fold real estate. Still kept as `wide` full-width card. -->
+  <div class="card wide">
+    <h2>Search Context</h2>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <input id="search-input" type="text" placeholder="Search past context..." style="flex:1;padding:6px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px;" onkeydown="if(event.key==='Enter')doSearch()">
+      <button class="btn" onclick="doSearch()">FTS</button>
+      <button class="btn" onclick="doSearch('semantic')">Semantic</button>
+    </div>
+    <div id="search-results" style="margin-top:8px;font-size:12px;max-height:300px;overflow-y:auto;"></div>
   </div>
 </div>
 
