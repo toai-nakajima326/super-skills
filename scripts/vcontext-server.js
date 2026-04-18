@@ -865,6 +865,7 @@ function insertIndex(entryId, type, session, content, tokenEst, hasEmbedding) {
 const _TASK_KIND_WHITELIST = new Set([
   'search', 'recent', 'session-recall', 'handoff', 'working-state',
   'rules', 'skill-lookup', 'resolve', 'consult', 'summary',
+  'chunk-summary', // L1 10-min hierarchical summary (PHOTON-inspired)
 ]);
 function sanitizeTaskKind(raw) {
   if (typeof raw !== 'string') return null;
@@ -2988,6 +2989,8 @@ const _loopHeartbeat = {
   embed_iter: 0,
   discovery: 0,
   discovery_iter: 0,
+  chunk_summary: 0,
+  chunk_summary_iter: 0,
 };
 
 async function startEmbedLoop() {
@@ -3390,6 +3393,116 @@ async function startDiscoveryLoop() {
     await new Promise(r => setTimeout(r, DISCOVERY_INTERVAL_MS));
   }
   discoveryLoopRunning = false;
+}
+
+// ── L1 chunk summary loop (PHOTON-inspired hierarchical memory) ──
+// Every 10 minutes we LLM-summarize the previous completed 10-min window
+// into a 1-2 sentence chunk-summary entry. Purpose:
+//  - /sessions/summary and future drill-down can start coarse (L1 chunks)
+//    instead of scanning 200+ raw entries
+//  - Long-term session recall becomes O(log N) instead of O(N)
+//  - Models the "multi-rate latent streams" idea from arXiv:2512.20687
+//    (PHOTON) as a memory-tier pattern, adapted for a DB-backed AIOS.
+// Cost: ~29k MLX-generate tokens/day (free, local) + ~60KB/day storage.
+let chunkSummaryLoopRunning = false;
+const CHUNK_SUMMARY_WINDOW_MS = 10 * 60 * 1000;  // 10-min chunks
+const CHUNK_SUMMARY_INTERVAL_MS = 5 * 60 * 1000; // check every 5 min
+const CHUNK_SUMMARY_MIN_ENTRIES = 3;             // skip sparse windows
+const CHUNK_SUMMARY_MAX_ENTRIES = 100;           // cap prompt size
+
+function chunkIdFor(ts) {
+  // Round down to 10-minute boundary, ISO string without seconds.
+  // e.g. 2026-04-18T09:37:12Z → "2026-04-18T09:30"
+  const d = new Date(ts);
+  d.setUTCSeconds(0, 0);
+  d.setUTCMinutes(Math.floor(d.getUTCMinutes() / 10) * 10);
+  return d.toISOString().slice(0, 16); // "YYYY-MM-DDTHH:MM"
+}
+
+async function startChunkSummaryLoop() {
+  if (chunkSummaryLoopRunning) return;
+  chunkSummaryLoopRunning = true;
+  while (chunkSummaryLoopRunning) {
+    _loopHeartbeat.chunk_summary = Date.now();
+    _loopHeartbeat.chunk_summary_iter++;
+    try {
+      if (mlxGenerateAvailable && !existsSync('/tmp/vcontext-embed-pause')) {
+        await runOneChunkSummary();
+      }
+    } catch (e) {
+      console.error('[chunk-summary] loop error:', (e.message || e).toString().slice(0, 200));
+    }
+    await new Promise(r => setTimeout(r, CHUNK_SUMMARY_INTERVAL_MS));
+  }
+}
+
+async function runOneChunkSummary() {
+  // Target = the previous completed window. Current time's window may
+  // still be accumulating entries, so we summarize `now - 10min`.
+  const now = Date.now();
+  const windowStart = now - 2 * CHUNK_SUMMARY_WINDOW_MS;
+  const windowEnd = now - CHUNK_SUMMARY_WINDOW_MS;
+  const chunkId = chunkIdFor(windowEnd);
+
+  // Already summarized?
+  const existing = dbQuery(`SELECT id FROM entries WHERE type='chunk-summary' AND tags LIKE '%chunk:${chunkId}%' LIMIT 1;`);
+  if (existing.length > 0) return;
+
+  // Fetch raw entries in this window, skipping our own summary infra
+  // and predictive/discovery noise (those are already meta-events).
+  const startIso = new Date(windowStart).toISOString().replace('T', ' ').slice(0, 19);
+  const endIso = new Date(windowEnd).toISOString().replace('T', ' ').slice(0, 19);
+  const rows = dbQuery(`
+    SELECT id, type, session, substr(content, 1, 400) as content FROM entries
+    WHERE created_at >= ${esc(startIso)} AND created_at < ${esc(endIso)}
+      AND type NOT IN ('chunk-summary','skill-discovery','predictive-search',
+                        'embed-error','skill-usage','api-metric')
+    ORDER BY id ASC LIMIT ${CHUNK_SUMMARY_MAX_ENTRIES};
+  `);
+
+  if (rows.length < CHUNK_SUMMARY_MIN_ENTRIES) {
+    console.log(`[chunk-summary] ${chunkId}: skipped (only ${rows.length} entries, min ${CHUNK_SUMMARY_MIN_ENTRIES})`);
+    return;
+  }
+
+  // Build a compressed prompt. Per-entry format: [type] sess:xxxx  body
+  const lines = rows.map(r => {
+    const sid = (r.session || '?').slice(0, 8);
+    const body = String(r.content || '').replace(/\s+/g, ' ').slice(0, 180);
+    return `[${r.type}] ${sid} ${body}`;
+  });
+  const prompt = `Summarize the following AI-OS activity window (10 minutes) into 1-2 short sentences capturing the key topics, tools used, and any decisions or errors. No preamble, no markdown.
+
+Entries (N=${rows.length}):
+${lines.join('\n').slice(0, 6000)}
+
+Output (1-2 sentences):`;
+
+  let summary;
+  try {
+    summary = await mlxGenerate(prompt, { maxTokens: 300, noThink: true });
+  } catch (e) {
+    console.error(`[chunk-summary] ${chunkId}: generate failed:`, (e.message || e).toString().slice(0, 120));
+    return;
+  }
+  if (!summary || !summary.trim()) return;
+
+  // Store as a first-class entry so FTS/recall/index all work for free.
+  const sessionIds = [...new Set(rows.map(r => r.session).filter(Boolean))];
+  const typeCounts = rows.reduce((m, r) => { m[r.type] = (m[r.type] || 0) + 1; return m; }, {});
+  const payload = {
+    level: 1,
+    chunk_id: chunkId,
+    period_start: startIso + 'Z',
+    period_end: endIso + 'Z',
+    source_count: rows.length,
+    session_count: sessionIds.length,
+    type_breakdown: typeCounts,
+    summary: summary.trim(),
+  };
+  const tags = JSON.stringify(['chunk-summary', 'level:1', `chunk:${chunkId}`]);
+  dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate) VALUES (${esc('chunk-summary')}, ${esc(JSON.stringify(payload))}, ${esc(tags)}, 'system', ${estimateTokens(summary)});`);
+  console.log(`[chunk-summary] ${chunkId}: ${rows.length} entries → "${summary.trim().slice(0, 80)}..."`);
 }
 
 async function runOneDiscovery() {
@@ -5989,6 +6102,16 @@ const server = createServer(async (req, res) => {
             : _loopHeartbeat.discovery && (Date.now() - _loopHeartbeat.discovery) < 3600_000 ? 'yellow'
             : 'red',
         },
+        chunk_summary: {
+          running: chunkSummaryLoopRunning,
+          last_tick_ms_ago: _loopHeartbeat.chunk_summary ? Date.now() - _loopHeartbeat.chunk_summary : null,
+          iterations: _loopHeartbeat.chunk_summary_iter,
+          // 5-min cadence → 600s yellow / 1800s red matches loop pacing.
+          status: !chunkSummaryLoopRunning ? 'stopped'
+            : _loopHeartbeat.chunk_summary && (Date.now() - _loopHeartbeat.chunk_summary) < 600_000 ? 'green'
+            : _loopHeartbeat.chunk_summary && (Date.now() - _loopHeartbeat.chunk_summary) < 1800_000 ? 'yellow'
+            : 'red',
+        },
       };
       sendJson(res, 200, { summary, features: features_out, loops });
     } else if (method === 'POST' && path === '/admin/run-all') {
@@ -6207,6 +6330,34 @@ const server = createServer(async (req, res) => {
       sendJson(res, 200, { deleted, failed });
     } else if (method === 'POST' && path === '/tier/migrate') {
       handleTierMigrate(req, res);
+    } else if (method === 'GET' && path === '/summaries') {
+      // L1 hierarchical chunk summaries (PHOTON-inspired memory tier).
+      // Returns the 10-min chunk summaries over a rolling window.
+      // Use this BEFORE drilling into raw entries for long-term recall.
+      try {
+        const params = parseQuery(req.url);
+        const level = parseInt(params.level) || 1;
+        const hours = Math.min(parseInt(params.hours) || 24, 24 * 30);
+        const since = esc(new Date(Date.now() - hours * 3600000).toISOString().replace('T', ' ').slice(0, 19));
+        const rows = dbQuery(`
+          SELECT id, content, created_at FROM entries
+          WHERE type='chunk-summary' AND tags LIKE ${esc('%level:' + level + '%')}
+            AND created_at >= ${since}
+          ORDER BY created_at DESC LIMIT 500;
+        `);
+        const summaries = rows.map(r => {
+          try { return { id: r.id, created_at: r.created_at, ...JSON.parse(r.content) }; }
+          catch { return { id: r.id, created_at: r.created_at, raw: r.content }; }
+        });
+        // Expected-chunks vs actual-chunks = coverage ratio
+        const expected = Math.floor(hours * 60 / 10);
+        sendJson(res, 200, {
+          level, period_hours: hours, count: summaries.length,
+          expected_chunks: expected,
+          coverage: expected > 0 ? Math.min(1, summaries.length / expected) : 0,
+          summaries,
+        });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'GET' && path === '/sessions/summary') {
       // Compact session aggregate for the dashboard's Sessions card.
       // Replaces the old pattern of `/recent?n=200&short=1` (200KB payload)
@@ -6467,6 +6618,8 @@ checkMlxGenerate().then(() => {
   if (mlxGenerateAvailable) {
     startDiscoveryLoop().catch(() => {});
     console.log('[discovery] Loop started (MLX generate available)');
+    startChunkSummaryLoop().catch(() => {});
+    console.log('[chunk-summary] Loop started (MLX generate available)');
   }
 }).catch(() => {});
 
