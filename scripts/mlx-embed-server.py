@@ -301,80 +301,100 @@ class ModelManager:
         return h
     
     async def generate_embeddings(
-        self, 
-        texts: List[str], 
+        self,
+        texts: List[str],
         model_name: Optional[str] = None,
         normalize: bool = True
     ) -> Tuple[np.ndarray, str, int]:
         """
         Generate embeddings for a list of texts.
-        
+
         Args:
             texts: List of input texts
             model_name: Model to use (name or alias)
             normalize: Whether to L2-normalize embeddings
-            
+
         Returns:
             Tuple of (embeddings, model_name, embedding_dim)
         """
         # Resolve and load model if needed
         model_name = await self.load_model(model_name)
-        
+
         if self.model_status.get(model_name) != ModelStatus.READY:
             raise RuntimeError(f"Model {model_name} not ready (status: {self.model_status.get(model_name)})")
-        
+
         if not texts:
             embedding_dim = AVAILABLE_MODELS[model_name]["embedding_dim"]
             return np.array([]), model_name, embedding_dim
-        
+
         model, tokenizer = self.models[model_name]
         embedding_dim = AVAILABLE_MODELS[model_name]["embedding_dim"]
-        
-        embeddings = []
-        
-        for text in texts:
-            # Check cache if enabled
+
+        # ── Cache lookup pre-pass ──
+        # Collect cache hits and identify texts that still need encoding.
+        cached: Dict[int, np.ndarray] = {}
+        to_encode_idx: List[int] = []
+        to_encode_text: List[str] = []
+        cache_keys: List[str] = []
+        for i, text in enumerate(texts):
             cache_key = f"{model_name}:{text}:{normalize}"
+            cache_keys.append(cache_key)
             if cache_key in self._embedding_cache:
-                embeddings.append(self._embedding_cache[cache_key])
-                continue
-            
-            # Tokenize text
-            tokens = tokenizer.encode(text)
-            
-            # Truncate if necessary
-            if len(tokens) > self.config.max_text_length:
-                logger.warning(f"Truncating text from {len(tokens)} to {self.config.max_text_length} tokens")
-                tokens = tokens[:self.config.max_text_length]
-            
-            # Convert to MLX array with batch dimension
-            input_ids = mx.array([tokens])
-            
-            # Get hidden states
-            hidden_states = self._get_hidden_states(input_ids, model)
-            
-            # Mean pooling across sequence dimension
-            pooled = mx.mean(hidden_states, axis=1)  # [1, hidden_dim]
-            
-            # Normalize if requested
+                cached[i] = self._embedding_cache[cache_key]
+            else:
+                to_encode_idx.append(i)
+                to_encode_text.append(text)
+
+        computed: Dict[int, np.ndarray] = {}
+        if to_encode_text:
+            # ── True batch tokenization (single call) ──
+            # Use HF tokenizer directly with padding so the model gets one
+            # [B, L] tensor and one forward pass, instead of B separate calls.
+            hf_tok = getattr(tokenizer, "_tokenizer", tokenizer)
+            enc = hf_tok(
+                to_encode_text,
+                padding=True,
+                truncation=True,
+                max_length=self.config.max_text_length,
+                return_tensors=None,
+            )
+            input_ids_py = enc["input_ids"]
+            attn_mask_py = enc["attention_mask"]
+
+            input_ids = mx.array(input_ids_py)            # [B, L]
+            attn_mask = mx.array(attn_mask_py)            # [B, L], 0/1
+
+            # ── Single batched forward pass ──
+            hidden_states = self._get_hidden_states(input_ids, model)  # [B, L, H]
+
+            # Masked mean pooling: sum(h * mask) / sum(mask)
+            mask_f = attn_mask.astype(hidden_states.dtype)             # [B, L]
+            mask_exp = mx.expand_dims(mask_f, axis=-1)                 # [B, L, 1]
+            summed = mx.sum(hidden_states * mask_exp, axis=1)          # [B, H]
+            counts = mx.maximum(mx.sum(mask_f, axis=1, keepdims=True), 1e-9)  # [B, 1]
+            pooled = summed / counts                                   # [B, H]
+
             if normalize:
                 norm = mx.linalg.norm(pooled, axis=1, keepdims=True)
                 pooled = pooled / mx.maximum(norm, 1e-9)
-            
-            # Force evaluation and convert to numpy
+
+            # Force evaluation ONCE for the whole batch
             mx.eval(pooled)
-            embedding = np.array(pooled.tolist()[0], dtype=np.float32)
+            pooled_np = np.array(pooled.tolist(), dtype=np.float32)   # [B, H]
 
             # Free intermediate MLX tensors to prevent GPU memory growth
-            del hidden_states, pooled, input_ids
+            del hidden_states, pooled, input_ids, attn_mask, mask_f, mask_exp, summed, counts
 
-            # Cache the result (with size limit)
-            if len(self._embedding_cache) < 500:  # Reduced cache to limit memory
-                self._embedding_cache[cache_key] = embedding
+            for j, i in enumerate(to_encode_idx):
+                emb = pooled_np[j]
+                computed[i] = emb
+                if len(self._embedding_cache) < 500:
+                    self._embedding_cache[cache_keys[i]] = emb
 
-            embeddings.append(embedding)
-        
-        # GPU memory cleanup EVERY call (batch 2 = 2 items per call)
+        # Assemble output in original order
+        embeddings = [cached[i] if i in cached else computed[i] for i in range(len(texts))]
+
+        # GPU memory cleanup after every batch
         if hasattr(mx, 'metal') and hasattr(mx.metal, 'clear_cache'):
             mx.metal.clear_cache()
         gc.collect()
