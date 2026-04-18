@@ -1,6 +1,41 @@
 # Autonomous Commit Gate — Policy
 
-Status: **Draft** · Owner: user · Created: 2026-04-18 · Related: `docs/analysis/2026-04-18-phase-integrated-review.md` §3
+Status: **v1.1** · Owner: user · Created: 2026-04-18 · Updated: 2026-04-18 midnight with exclusion-category directive · Related: `docs/analysis/2026-04-18-phase-integrated-review.md` §3
+
+## 0. Exclusion categories — NEVER auto-approve (2026-04-18 directive)
+
+Per user directive 2026-04-18 midnight:
+> 理想機はOK、自動承認でOK
+> ただし、セキュリティと、破壊をもたらすもの、悪意あるもの、情報漏洩するもの、犯罪になるものは、自動承認しないで
+> Dashboardに理由とともに表示
+
+Regardless of path tier (§5) or `[auto]` tag (§6), if an action falls under
+ANY of these categories, the autonomous pipeline MUST NOT apply it and
+MUST surface it on the dashboard with a human-readable reason:
+
+| Category | Examples | Detection signal |
+|----------|----------|------------------|
+| **Security-affecting** | auth/permissions/hooks/gate changes, new endpoints exposing data, sanitizer removal, HTTPS/TLS config | touches `scripts/vcontext-hooks.js`, `.githooks/`, `scripts/auto-commit-gate.sh`, `scripts/aios-*-lock.*`, auth-related endpoints |
+| **Destructive** | DB deletion, force push, `reset --hard`, `rm -rf`, schema drop, mass `DELETE` SQL | keywords in diff or commit msg |
+| **Malicious** | backdoors, network exfiltration, obfuscated code, cryptomining | heuristic: unfamiliar outbound URLs, base64-encoded large blobs, eval of remote content |
+| **Info-leaking** | secrets in code, PII in logs, API keys in history, file paths containing `~/Library` or `~/.ssh` exposed to remote | regex scan of diff |
+| **Criminal** | GDPR/privacy-law violation, unauthorized scraping, unlicensed model redistribution, content that hurts third parties | requires human call |
+
+**Implementation obligation** (to be built, queue as M13):
+1. Pre-commit gate (`scripts/auto-commit-gate.sh`) runs classifier on staged
+   diff + commit message.
+2. If any category matches, commit is blocked with a message written to
+   `type=auto-commit-blocked` entry in vcontext, including the category
+   and evidence snippet.
+3. Dashboard "🔧 Self-Improve Proposals" card surfaces these entries with
+   a "Why blocked?" expander.
+4. User approval from dashboard issues a signed token that unblocks a
+   single subsequent commit.
+
+Until the classifier exists, the pre-commit gate's default is "conservative
+block" on any HIGH-stakes path (already live per §5 Option C), and
+dashboard surfacing is approximated by the `pending-patch` card (already
+live).
 
 ## 1. Motivation
 
