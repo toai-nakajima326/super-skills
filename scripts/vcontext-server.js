@@ -564,6 +564,16 @@ function migrateRamSchema() {
       dbExec("ALTER TABLE entries ADD COLUMN embedding TEXT;");
       console.log('[vcontext] Added embedding column to RAM DB');
     }
+    // Pillar 3 — Causal Observability: parent_id links an entry to the
+    // event that caused it (e.g. a tool-call's output points back to the
+    // prompt that triggered it; a skill-version points to the skill-gap
+    // that prompted its creation). Null means root / uncaused.
+    // Indexed for fast ancestry walks in /trace/:id.
+    if (!colNames.includes('parent_id')) {
+      dbExec("ALTER TABLE entries ADD COLUMN parent_id INTEGER;");
+      console.log('[vcontext] Added parent_id column to RAM DB');
+    }
+    try { dbExec("CREATE INDEX IF NOT EXISTS idx_entries_parent ON entries(parent_id);"); } catch {}
 
     // Back-fill last_accessed (small batch to avoid ENOBUFS)
     try { dbExec("UPDATE entries SET last_accessed = created_at WHERE last_accessed IS NULL LIMIT 100;"); } catch {}
@@ -651,8 +661,10 @@ CREATE TABLE IF NOT EXISTS entries (
   supersedes INTEGER,
   confidence TEXT DEFAULT 'medium',
   status TEXT DEFAULT 'active',
-  embedding TEXT
+  embedding TEXT,
+  parent_id INTEGER
 );
+CREATE INDEX IF NOT EXISTS idx_entries_parent ON entries(parent_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
   content,
   tags,
@@ -710,6 +722,11 @@ END;
       if (!colNames.includes('embedding')) {
         dbExec("ALTER TABLE entries ADD COLUMN embedding TEXT;", SSD_DB_PATH);
       }
+      // Pillar 3 — causal parent link (mirrors RAM DB)
+      if (!colNames.includes('parent_id')) {
+        dbExec("ALTER TABLE entries ADD COLUMN parent_id INTEGER;", SSD_DB_PATH);
+      }
+      try { dbExec("CREATE INDEX IF NOT EXISTS idx_entries_parent ON entries(parent_id);", SSD_DB_PATH); } catch {}
     } catch (e) {
       console.error('[vcontext] SSD schema migration failed:', e.message);
     }
@@ -1218,6 +1235,10 @@ async function handleStore(req, res) {
   const supersedes = (body.supersedes != null && Number.isFinite(Number(body.supersedes))) ? Number(body.supersedes) : null;
   const confidence = ['high', 'medium', 'low'].includes(body.confidence) ? body.confidence : 'medium';
   const status = ['active', 'deprecated', 'temporary', 'experimental'].includes(body.status) ? body.status : 'active';
+  // Pillar 3 — Causal link. Optional. Points to the entry that caused this
+  // one (e.g. prompt -> tool-call -> tool-error). Used by GET /trace/:id
+  // to walk the causal ancestry. Invalid/non-numeric values become null.
+  const parentId = (body.parent_id != null && Number.isFinite(Number(body.parent_id))) ? Number(body.parent_id) : null;
 
   if (!type || !content) {
     return sendJson(res, 400, { error: 'Missing required fields: type, content' });
@@ -1274,7 +1295,8 @@ async function handleStore(req, res) {
   // atomically reject duplicates at the DB level (race-free). Includes
   // content_hash column populated above when dedup is active.
   const hashSql = contentHash ? esc(contentHash) : 'NULL';
-  const sql = `INSERT OR IGNORE INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status, content_hash) VALUES (${esc(type)}, ${esc(content)}, ${esc(tagsJson)}, ${esc(session || null)}, ${tokenEst}, datetime('now'), 0, 'ram', ${esc(reasoning)}, ${esc(conditions)}, ${supersedes === null ? 'NULL' : supersedes}, ${esc(confidence)}, ${esc(status)}, ${hashSql});`;
+  const parentSql = parentId === null ? 'NULL' : parentId;
+  const sql = `INSERT OR IGNORE INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status, content_hash, parent_id) VALUES (${esc(type)}, ${esc(content)}, ${esc(tagsJson)}, ${esc(session || null)}, ${tokenEst}, datetime('now'), 0, 'ram', ${esc(reasoning)}, ${esc(conditions)}, ${supersedes === null ? 'NULL' : supersedes}, ${esc(confidence)}, ${esc(status)}, ${hashSql}, ${parentSql});`;
   dbExec(sql);
 
   // Get the inserted row
@@ -1292,7 +1314,7 @@ async function handleStore(req, res) {
   setImmediate(() => {
     // (a) SSD DB write-through, preserving id for alignment with RAM
     try {
-      const ssdSql = `INSERT OR IGNORE INTO entries (id, type, content, tags, session, created_at, token_estimate, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status, content_hash) VALUES (${entry.id}, ${esc(type)}, ${esc(content)}, ${esc(tagsJson)}, ${esc(session || null)}, ${esc(entry.created_at || now)}, ${tokenEst}, ${esc(entry.created_at || now)}, 0, 'ssd', ${esc(reasoning)}, ${esc(conditions)}, ${supersedes === null ? 'NULL' : supersedes}, ${esc(confidence)}, ${esc(status)}, ${hashSql});`;
+      const ssdSql = `INSERT OR IGNORE INTO entries (id, type, content, tags, session, created_at, token_estimate, last_accessed, access_count, tier, reasoning, conditions, supersedes, confidence, status, content_hash, parent_id) VALUES (${entry.id}, ${esc(type)}, ${esc(content)}, ${esc(tagsJson)}, ${esc(session || null)}, ${esc(entry.created_at || now)}, ${tokenEst}, ${esc(entry.created_at || now)}, 0, 'ssd', ${esc(reasoning)}, ${esc(conditions)}, ${supersedes === null ? 'NULL' : supersedes}, ${esc(confidence)}, ${esc(status)}, ${hashSql}, ${parentSql});`;
       dbExec(ssdSql, SSD_DB_PATH);
     } catch (e) {
       console.error('[write-through] SSD sync failed:', e.message?.slice(0, 80));
@@ -1308,7 +1330,8 @@ async function handleStore(req, res) {
       const line = JSON.stringify({
         id: entry.id, type, content, tags: tagList, session: session || null,
         created_at: entry.created_at || now, content_hash: contentHash,
-        reasoning, conditions, supersedes, confidence, status
+        reasoning, conditions, supersedes, confidence, status,
+        parent_id: parentId
       }) + '\n';
       appendToWalQueue(line);
     } catch {}
@@ -2018,6 +2041,69 @@ function handleHealth(req, res) {
       mlx_embed: mlxAvailable,
       usage_analytics: true,
     },
+  });
+}
+
+/**
+ * GET /trace/:id — Pillar 3 (Causal Observability).
+ *
+ * Walk the causal ancestry of an entry by following parent_id pointers.
+ * Returns the chain from root -> ... -> target, plus immediate children,
+ * so a caller can answer "why did this happen?" in one HTTP hop instead
+ * of grepping logs across /tmp/vcontext-*.log.
+ *
+ * Cycle-safe: bounded to 50 hops and tracks visited ids.
+ * Shape:
+ *   { id, found, ancestry: [{id,type,session,parent_id,created_at,preview}],
+ *     children: [...], depth, truncated }
+ */
+function handleTrace(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+  const m = (req.url || '').match(/^\/trace\/(\d+)/);
+  if (!m) return sendJson(res, 400, { error: 'Usage: GET /trace/:id (numeric id)' });
+  const targetId = Number(m[1]);
+  if (!Number.isFinite(targetId) || targetId <= 0) {
+    return sendJson(res, 400, { error: 'Invalid id' });
+  }
+
+  // Fast bail: does the entry exist?
+  const root = dbQuery(`SELECT id, type, session, parent_id, created_at, substr(content,1,200) AS preview FROM entries WHERE id = ${targetId} LIMIT 1;`);
+  if (root.length === 0) {
+    return sendJson(res, 404, { id: targetId, found: false });
+  }
+
+  // Walk upward: target -> parent -> grandparent ...
+  const MAX_DEPTH = 50;
+  const seen = new Set();
+  const chain = [];
+  let cur = root[0];
+  let truncated = false;
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    chain.push({
+      id: cur.id, type: cur.type, session: cur.session,
+      parent_id: cur.parent_id, created_at: cur.created_at,
+      preview: cur.preview,
+    });
+    if (!cur.parent_id) break;
+    if (chain.length >= MAX_DEPTH) { truncated = true; break; }
+    const next = dbQuery(`SELECT id, type, session, parent_id, created_at, substr(content,1,200) AS preview FROM entries WHERE id = ${Number(cur.parent_id)} LIMIT 1;`);
+    cur = next[0];
+  }
+  // Reverse so the result reads root-first (ancestry[0] is the oldest cause)
+  const ancestry = chain.reverse();
+
+  // Immediate children (what did this entry cause?)
+  const children = dbQuery(`SELECT id, type, session, created_at, substr(content,1,200) AS preview FROM entries WHERE parent_id = ${targetId} ORDER BY id ASC LIMIT 50;`);
+
+  sendJson(res, 200, {
+    id: targetId,
+    found: true,
+    depth: ancestry.length,
+    truncated,
+    ancestry,
+    children,
   });
 }
 
@@ -3040,7 +3126,12 @@ async function startEmbedLoop() {
       // and bloat the queue (working-state: 3k+ ephemeral snapshots,
       // anomaly-alert: duplicative alerts, pre-tool: covered by tool-use).
       // Fresh first — user's recent context is most likely searched.
-      const BATCH = 3;
+      // BATCH=16: empirical measurement (2026-04-18) showed throughput
+      // scales from 0.73 emb/s @ batch=3 → 8.07 emb/s @ batch=16 (11x).
+      // Knee of the curve is ~16; batch=32 only marginally better (8.67).
+      // MLX max_batch_size=1024; memory impact negligible. Loop was the
+      // bottleneck — entry creation ~1.2/s but loop only 0.37/s at batch=3.
+      const BATCH = 16;
       const rows = dbQuery(`
         SELECT id, content FROM entries
         WHERE embedding IS NULL
@@ -5701,7 +5792,8 @@ function handleMetricsReport(req, res) {
 
 // ── Request router ─────────────────────────────────────────────
 const ENDPOINTS_LIST = [
-  'POST   /store             — store context entry (body: {type,content,tags?,session?,namespace?,group?,reasoning?,conditions?,supersedes?,confidence?,status?})',
+  'POST   /store             — store context entry (body: {type,content,tags?,session?,namespace?,group?,reasoning?,conditions?,supersedes?,confidence?,status?,parent_id?})',
+  'GET    /trace/:id         — Pillar 3: causal ancestry walk via parent_id (root -> target + children)',
   'GET    /recall?q=         — full-text search (cascading tiers, &namespace=project-name)',
   'GET    /recent?n=         — recent entries (cascading tiers, &namespace=project-name)',
   'GET    /session/:id       — session entries',
@@ -5814,6 +5906,10 @@ const server = createServer(async (req, res) => {
       handlePrune(req, res);
     } else if (method === 'GET' && path === '/health') {
       handleHealth(req, res);
+    } else if (method === 'GET' && /^\/trace\/\d+$/.test(path)) {
+      // Pillar 3 — Causal ancestry walk. Returns root-to-target chain
+      // via parent_id pointers plus immediate children.
+      handleTrace(req, res);
     } else if (method === 'GET' && path === '/otel/status') {
       // Pillar 3 diagnostic: is tracing live, what Langfuse host, what service.
       sendJson(res, 200, otelStatus());
