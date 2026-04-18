@@ -195,3 +195,52 @@ Pass 8–10: environment fully restored.
 Every claim maps to one of: live probe at handoff (curl, launchctl,
 `ls`, `git status`), commit hash (inline), or doc path (inline). If
 tomorrow a claim can't be verified via these, treat as stale.
+
+---
+
+## Monday (2026-04-20) North Star — 2 themes
+
+Per user (2026-04-18 midnight): 「安定稼働と、安定したLLM生成ですね」
+
+### Theme A — 安定稼働 (zero-downtime architecture)
+
+**Priority: HIGHEST**. "Search failure stops everything" — from user
+insight, the reliability of the CRITICAL path (/recall, /recent,
+/health) gates everything else. Work items:
+
+- **M1** — MLX lock D1+D2 (SIGKILL orphan fix) — 3h
+- **M9** — zero-downtime architecture audit + search path isolation — 3-4h
+- **M8** — RAM-disk-era dead code Phase 2 (remove USE_RAMDISK flag) — 1h
+- **M3** — 2-DB merge (spec prepared) — 30min
+
+AC: `/health` returns within 2s under any load (even MLX wedge /
+backfill / tier migration).
+
+### Theme B — 安定したLLM生成 (reliable LLM output)
+
+**Priority: HIGH** (auto-recovers once Theme A is solid).
+
+- **M2** — LoCoMo full 1986Q re-run (after M1 lands) — 30-60min
+- **LLM judge re-enable** (fix `llm_j=0.0`)
+- **MLX generate queue/retry/timeout policy** review
+- **multi-prompt batch (P7)** — defer unless bottleneck shows
+
+AC: MLX generate failures self-heal via task-queue; autonomous loops
+retry and eventually succeed without user intervention.
+
+### Why Theme A beats Theme B
+
+User quote 2026-04-18 evening:
+
+> ローカルLLMは生成が落ちても溜めておけるから、後で再生成すればいいけど
+> 検索系が落ちると全てが動かなくなる
+
+Search must be bulletproof first; generation is non-critical and
+queues safely.
+
+### Monday's first 30 min
+
+1. Run smoke-test (§6 of this doc).
+2. Read Phase 3 review `docs/analysis/2026-04-18-phase-3-integrated-review.md`.
+3. `git stash list` — review the M1 partial work still parked.
+4. Start M1 agent (Theme A foundation).
