@@ -16,7 +16,7 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 
 const SKILLS_ROOT = path.join(process.env.HOME, 'skills', 'skills');
 const VCONTEXT_URL = 'http://127.0.0.1:3150';
@@ -58,6 +58,22 @@ function vcGet(path_) {
       r.on('end', () => { try { res(JSON.parse(d)); } catch { res({ results: [] }); } });
     }).on('error', rej);
   });
+}
+
+// ── クエリ生成トリガー ────────────────────────────
+function triggerQueryGenerator() {
+  const script = path.join(process.env.HOME, 'skills', 'scripts', 'skill-query-generator.js');
+  if (!fs.existsSync(script)) return;
+  const nodePath = fs.existsSync(path.join(process.env.HOME, '.nvm/versions/node/v25.9.0/bin/node'))
+    ? path.join(process.env.HOME, '.nvm/versions/node/v25.9.0/bin/node')
+    : 'node';
+  const child = spawn(nodePath, [script], {
+    cwd: path.join(process.env.HOME, 'skills'),
+    detached: true,
+    stdio: 'ignore'
+  });
+  child.unref();
+  log('triggered skill-query-generator.js (background)');
 }
 
 // ── メイン処理 ──────────────────────────────────
@@ -139,6 +155,9 @@ async function runBridge() {
     tags: ['aios-learning-run', 'aios-autonomous-learning'],
     session: 'system'
   });
+
+  // スキルギャップの蓄積に基づいてクエリを動的生成
+  triggerQueryGenerator();
 }
 
 async function applyPatch(skillName, content, patchId) {
