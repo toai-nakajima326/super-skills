@@ -51,3 +51,6 @@ data/vcontext-backup.sqlite.bak-wal
 data/vcontext-backup.sqlite.bak-shm
 # Recovered corrupt RAM DB snapshots (post-incident forensics, multi-GB)
 data/vcontext-ram-corrupt-*.db
+
+# Langfuse API keys (populated after first login — contains secrets)
+data/langfuse-config.json

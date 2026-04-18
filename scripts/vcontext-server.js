@@ -40,6 +40,9 @@ import { createRequire } from 'node:module';
 // Pure utilities extracted 2026-04-17 as a refactor proof — same impl,
 // just in a module so it's easier to test and reuse. See lib/vcontext-utils.js.
 import { esc, ftsQuery, estimateTokens, parseTags } from './lib/vcontext-utils.js';
+// Pillar 3 observability. No-op when LANGFUSE_HOST is unset — safe to import
+// unconditionally. See docs/analysis/2026-04-18-pillar3-observability-design.md
+import { initOtel, getTracer, otelStatus } from './lib/otel.js';
 const require = createRequire(import.meta.url);
 
 // ── Configuration ──────────────────────────────────────────────
@@ -3000,6 +3003,10 @@ const _loopHeartbeat = {
   discovery_iter: 0,
   chunk_summary: 0,
   chunk_summary_iter: 0,
+  chunk_summary_l2: 0,
+  chunk_summary_l2_iter: 0,
+  chunk_summary_l3: 0,
+  chunk_summary_l3_iter: 0,
 };
 
 async function startEmbedLoop() {
@@ -3428,6 +3435,27 @@ function chunkIdFor(ts) {
   return d.toISOString().slice(0, 16); // "YYYY-MM-DDTHH:MM"
 }
 
+function dayIdFor(ts) {
+  // UTC date: YYYY-MM-DD.  L2 summaries are keyed on this.
+  return new Date(ts).toISOString().slice(0, 10);
+}
+
+function weekIdFor(ts) {
+  // ISO week (Mon-Sun): YYYY-Www, e.g. 2026-W16.  L3 summaries are keyed on this.
+  // ISO 8601: week 1 is the week containing the first Thursday of the year.
+  const d = new Date(Date.UTC(
+    new Date(ts).getUTCFullYear(),
+    new Date(ts).getUTCMonth(),
+    new Date(ts).getUTCDate()
+  ));
+  // Shift to nearest Thursday (ISO week anchor)
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const weekNum = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(weekNum).padStart(2, '0')}`;
+}
+
 async function startChunkSummaryLoop() {
   if (chunkSummaryLoopRunning) return;
   chunkSummaryLoopRunning = true;
@@ -3512,6 +3540,238 @@ Output (1-2 sentences):`;
   const tags = JSON.stringify(['chunk-summary', 'level:1', `chunk:${chunkId}`]);
   dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate) VALUES (${esc('chunk-summary')}, ${esc(JSON.stringify(payload))}, ${esc(tags)}, 'system', ${estimateTokens(summary)});`);
   console.log(`[chunk-summary] ${chunkId}: ${rows.length} entries → "${summary.trim().slice(0, 80)}..."`);
+}
+
+// ── L2: daily summary (bundles L1 chunks for one UTC day) ──────────────
+let chunkSummaryL2LoopRunning = false;
+const CHUNK_SUMMARY_L2_INTERVAL_MS = 30 * 60 * 1000; // check every 30 min
+
+async function startChunkSummaryL2Loop() {
+  if (chunkSummaryL2LoopRunning) return;
+  chunkSummaryL2LoopRunning = true;
+  while (chunkSummaryL2LoopRunning) {
+    _loopHeartbeat.chunk_summary_l2 = Date.now();
+    _loopHeartbeat.chunk_summary_l2_iter++;
+    try {
+      if (mlxGenerateAvailable && !existsSync('/tmp/vcontext-embed-pause')) {
+        // Target = yesterday (UTC).  Today's day is still accumulating L1s.
+        const yesterday = dayIdFor(Date.now() - 24 * 3600 * 1000);
+        await runOneChunkSummaryL2(yesterday);
+      }
+    } catch (e) {
+      console.error('[chunk-summary-l2] loop error:', (e.message || e).toString().slice(0, 200));
+    }
+    await new Promise(r => setTimeout(r, CHUNK_SUMMARY_L2_INTERVAL_MS));
+  }
+}
+
+async function runOneChunkSummaryL2(dayId) {
+  // dayId: "YYYY-MM-DD"
+  // Already summarized?
+  const existing = dbQuery(`SELECT id FROM entries WHERE type='chunk-summary' AND tags LIKE '%level:2%' AND tags LIKE ${esc('%chunk:' + dayId + '%')} LIMIT 1;`);
+  if (existing.length > 0) return { skipped: 'already-summarized', chunk_id: dayId };
+
+  const dayStart = `${dayId} 00:00:00`;
+  const dayEnd = `${dayId} 23:59:59`;
+
+  // Fetch the day's L1 summaries.
+  const l1Rows = dbQuery(`
+    SELECT id, content FROM entries
+    WHERE type='chunk-summary' AND tags LIKE '%level:1%'
+      AND created_at >= ${esc(dayStart)} AND created_at <= ${esc(dayEnd)}
+    ORDER BY id ASC LIMIT 200;
+  `);
+  if (l1Rows.length === 0) {
+    console.log(`[chunk-summary-l2] ${dayId}: skipped (no L1 summaries)`);
+    return { skipped: 'no-l1', chunk_id: dayId };
+  }
+
+  const l1Summaries = [];
+  let sourceRawCount = 0;
+  const allSessions = new Set();
+  for (const r of l1Rows) {
+    try {
+      const d = JSON.parse(r.content);
+      if (d.summary) l1Summaries.push(d.summary);
+      sourceRawCount += d.source_count || 0;
+      if (Array.isArray(d.sessions)) d.sessions.forEach(s => allSessions.add(s));
+    } catch {}
+  }
+
+  // Pain signals + triggered-change: scan the day's raw entries once.
+  const painRows = dbQuery(`
+    SELECT type, COUNT(*) as cnt FROM entries
+    WHERE created_at >= ${esc(dayStart)} AND created_at <= ${esc(dayEnd)}
+      AND type IN ('tool-error','anomaly-alert')
+    GROUP BY type;
+  `);
+  const painSignals = {};
+  for (const r of painRows) painSignals[r.type] = r.cnt;
+
+  const approveRows = dbQuery(`
+    SELECT id, content FROM entries
+    WHERE type='approve-patch' AND created_at >= ${esc(dayStart)} AND created_at <= ${esc(dayEnd)}
+    ORDER BY id DESC LIMIT 5;
+  `);
+  let triggeredChange = null;
+  if (approveRows.length > 0) {
+    // Heuristic: inspect the first approved patch payload for category hints.
+    triggeredChange = 'arch';
+    try {
+      const d = JSON.parse(approveRows[0].content || '{}');
+      const blob = JSON.stringify(d).toLowerCase();
+      if (blob.includes('test')) triggeredChange = 'test';
+      else if (blob.includes('readme') || blob.includes('.md') || blob.includes('doc')) triggeredChange = 'doc';
+    } catch {}
+  }
+
+  const prompt = `Summarize this day's activity from the per-window summaries below into 3-5 short sentences. Capture main themes, tools used, and any decisions or recurring issues. No preamble, no markdown.
+
+Day: ${dayId}
+Window summaries (N=${l1Summaries.length}):
+${l1Summaries.join('\n').slice(0, 12000)}
+
+Output (3-5 sentences):`;
+
+  let summary;
+  try {
+    summary = await mlxGenerate(prompt, { maxTokens: 600, noThink: true });
+  } catch (e) {
+    console.error(`[chunk-summary-l2] ${dayId}: generate failed:`, (e.message || e).toString().slice(0, 120));
+    return { error: e.message, chunk_id: dayId };
+  }
+  if (!summary || !summary.trim()) return { error: 'empty-summary', chunk_id: dayId };
+
+  const payload = {
+    level: 2,
+    chunk_id: dayId,
+    period_start: dayStart + 'Z',
+    period_end: dayEnd + 'Z',
+    source_l1_count: l1Summaries.length,
+    source_raw_count: sourceRawCount,
+    session_count: allSessions.size,
+    pain_signals: painSignals,
+    triggered_change: triggeredChange,
+    summary: summary.trim(),
+  };
+  const tags = JSON.stringify(['chunk-summary', 'level:2', `chunk:${dayId}`]);
+  dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate) VALUES (${esc('chunk-summary')}, ${esc(JSON.stringify(payload))}, ${esc(tags)}, 'system', ${estimateTokens(summary)});`);
+  console.log(`[chunk-summary-l2] ${dayId}: ${l1Summaries.length} L1 → "${summary.trim().slice(0, 80)}..."`);
+  return { ok: true, chunk_id: dayId, source_l1_count: l1Summaries.length };
+}
+
+// ── L3: weekly summary (bundles L2 days for one ISO week) ──────────────
+let chunkSummaryL3LoopRunning = false;
+const CHUNK_SUMMARY_L3_INTERVAL_MS = 60 * 60 * 1000; // check every 60 min
+
+async function startChunkSummaryL3Loop() {
+  if (chunkSummaryL3LoopRunning) return;
+  chunkSummaryL3LoopRunning = true;
+  while (chunkSummaryL3LoopRunning) {
+    _loopHeartbeat.chunk_summary_l3 = Date.now();
+    _loopHeartbeat.chunk_summary_l3_iter++;
+    try {
+      if (mlxGenerateAvailable && !existsSync('/tmp/vcontext-embed-pause')) {
+        // Target = last week.  Current week is still accumulating days.
+        const lastWeek = weekIdFor(Date.now() - 7 * 24 * 3600 * 1000);
+        await runOneChunkSummaryL3(lastWeek);
+      }
+    } catch (e) {
+      console.error('[chunk-summary-l3] loop error:', (e.message || e).toString().slice(0, 200));
+    }
+    await new Promise(r => setTimeout(r, CHUNK_SUMMARY_L3_INTERVAL_MS));
+  }
+}
+
+async function runOneChunkSummaryL3(weekId) {
+  // weekId: "YYYY-Www"
+  const existing = dbQuery(`SELECT id FROM entries WHERE type='chunk-summary' AND tags LIKE '%level:3%' AND tags LIKE ${esc('%chunk:' + weekId + '%')} LIMIT 1;`);
+  if (existing.length > 0) return { skipped: 'already-summarized', chunk_id: weekId };
+
+  // Resolve ISO week → Mon 00:00 UTC .. Sun 23:59 UTC.
+  const [yearStr, wStr] = weekId.split('-W');
+  const year = parseInt(yearStr, 10);
+  const week = parseInt(wStr, 10);
+  if (!year || !week) return { error: 'bad-week-id', chunk_id: weekId };
+  // Jan 4 is always in week 1 (ISO 8601 rule).
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const jan4Dow = jan4.getUTCDay() || 7;
+  const week1Mon = new Date(jan4.getTime() - (jan4Dow - 1) * 86400000);
+  const weekStart = new Date(week1Mon.getTime() + (week - 1) * 7 * 86400000);
+  const weekEnd = new Date(weekStart.getTime() + 7 * 86400000 - 1000);
+  const startIso = weekStart.toISOString().replace('T', ' ').slice(0, 19);
+  const endIso = weekEnd.toISOString().replace('T', ' ').slice(0, 19);
+
+  // Fetch the week's L2 summaries.
+  const l2Rows = dbQuery(`
+    SELECT id, content FROM entries
+    WHERE type='chunk-summary' AND tags LIKE '%level:2%'
+      AND created_at >= ${esc(startIso)} AND created_at <= ${esc(endIso)}
+    ORDER BY id ASC LIMIT 14;
+  `);
+  if (l2Rows.length === 0) {
+    console.log(`[chunk-summary-l3] ${weekId}: skipped (no L2 summaries)`);
+    return { skipped: 'no-l2', chunk_id: weekId };
+  }
+
+  const l2Summaries = [];
+  for (const r of l2Rows) {
+    try {
+      const d = JSON.parse(r.content);
+      if (d.summary) l2Summaries.push(`[${d.chunk_id}] ${d.summary}`);
+    } catch {}
+  }
+
+  // Decisions made that week.
+  const decisionRows = dbQuery(`
+    SELECT COUNT(*) as cnt FROM entries
+    WHERE type='decision' AND created_at >= ${esc(startIso)} AND created_at <= ${esc(endIso)};
+  `);
+  const decisionsMade = decisionRows[0]?.cnt || 0;
+
+  const prompt = `Summarize this week's activity from the daily summaries below into 4-6 short sentences, then list 3-5 major themes as a comma-separated list. Capture overall arcs, recurring topics, and notable shifts. No preamble, no markdown.
+
+Week: ${weekId}
+Daily summaries (N=${l2Summaries.length}):
+${l2Summaries.join('\n').slice(0, 14000)}
+
+Output format:
+SUMMARY: <4-6 sentences>
+THEMES: <theme1>, <theme2>, <theme3>`;
+
+  let raw;
+  try {
+    raw = await mlxGenerate(prompt, { maxTokens: 800, noThink: true });
+  } catch (e) {
+    console.error(`[chunk-summary-l3] ${weekId}: generate failed:`, (e.message || e).toString().slice(0, 120));
+    return { error: e.message, chunk_id: weekId };
+  }
+  if (!raw || !raw.trim()) return { error: 'empty-summary', chunk_id: weekId };
+
+  // Parse the structured output.  Graceful fallback if model drifts.
+  let summary = raw.trim();
+  let themes = [];
+  const summaryMatch = raw.match(/SUMMARY:\s*([\s\S]*?)(?:\n\s*THEMES:|$)/i);
+  const themesMatch = raw.match(/THEMES:\s*([\s\S]*?)$/i);
+  if (summaryMatch) summary = summaryMatch[1].trim();
+  if (themesMatch) {
+    themes = themesMatch[1].split(/[,\n]/).map(s => s.trim()).filter(Boolean).slice(0, 5);
+  }
+
+  const payload = {
+    level: 3,
+    chunk_id: weekId,
+    period_start: startIso + 'Z',
+    period_end: endIso + 'Z',
+    source_l2_count: l2Summaries.length,
+    themes,
+    decisions_made: decisionsMade,
+    summary,
+  };
+  const tags = JSON.stringify(['chunk-summary', 'level:3', `chunk:${weekId}`]);
+  dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate) VALUES (${esc('chunk-summary')}, ${esc(JSON.stringify(payload))}, ${esc(tags)}, 'system', ${estimateTokens(summary)});`);
+  console.log(`[chunk-summary-l3] ${weekId}: ${l2Summaries.length} L2 → "${summary.slice(0, 80)}..."`);
+  return { ok: true, chunk_id: weekId, source_l2_count: l2Summaries.length };
 }
 
 async function runOneDiscovery() {
@@ -5474,6 +5734,9 @@ const ENDPOINTS_LIST = [
   'WS     /ws                — WebSocket real-time push notifications (upgrade)',
   'WS     /ws?key=<apikey>   — WebSocket with API key auth',
   'GET    /dashboard         — browser dashboard UI',
+  'GET    /summaries?level=  — hierarchical chunk summaries (level=1 ?hours=N, level=2 ?days=N, level=3 ?weeks=N)',
+  'POST   /admin/trigger-l2-summary — force-generate L2 daily summary {date?: "YYYY-MM-DD"}',
+  'POST   /admin/trigger-l3-summary — force-generate L3 weekly summary {week?: "YYYY-Www"}',
 ];
 
 const server = createServer(async (req, res) => {
@@ -5503,11 +5766,42 @@ const server = createServer(async (req, res) => {
     }
     // Route
     if (method === 'POST' && path === '/store') {
-      await handleStore(req, res);
+      // Pillar 3: trace store/recall/recent as the hot-path entry points.
+      // Observability is bonus — if the tracer is noop, this is a zero-cost
+      // function-call wrapper. Any error inside the handler is re-raised
+      // so the outer try-catch (line ~5830) still sends a 500.
+      await getTracer('vcontext').startActiveSpan('vcontext.store', async (span) => {
+        try {
+          span.setAttribute('vcontext.op', 'store');
+          span.setAttribute('http.request.method', 'POST');
+          span.setAttribute('http.route', '/store');
+          await handleStore(req, res);
+          span.setAttribute('http.response.status_code', res.statusCode || 0);
+        } catch (e) { span.recordException(e); span.setStatus({ code: 2 }); throw e; }
+        finally { span.end(); }
+      });
     } else if (method === 'GET' && path === '/recall') {
-      await handleRecall(req, res);
+      await getTracer('vcontext').startActiveSpan('vcontext.recall', async (span) => {
+        try {
+          span.setAttribute('vcontext.op', 'recall');
+          span.setAttribute('http.request.method', 'GET');
+          span.setAttribute('http.route', '/recall');
+          await handleRecall(req, res);
+          span.setAttribute('http.response.status_code', res.statusCode || 0);
+        } catch (e) { span.recordException(e); span.setStatus({ code: 2 }); throw e; }
+        finally { span.end(); }
+      });
     } else if (method === 'GET' && path === '/recent') {
-      handleRecent(req, res);
+      getTracer('vcontext').startActiveSpan('vcontext.recent', (span) => {
+        try {
+          span.setAttribute('vcontext.op', 'recent');
+          span.setAttribute('http.request.method', 'GET');
+          span.setAttribute('http.route', '/recent');
+          handleRecent(req, res);
+          span.setAttribute('http.response.status_code', res.statusCode || 0);
+        } catch (e) { span.recordException(e); span.setStatus({ code: 2 }); throw e; }
+        finally { span.end(); }
+      });
     } else if (method === 'GET' && path.startsWith('/session/')) {
       handleSession(req, res);
     } else if (method === 'POST' && path === '/summarize') {
@@ -5518,6 +5812,9 @@ const server = createServer(async (req, res) => {
       handlePrune(req, res);
     } else if (method === 'GET' && path === '/health') {
       handleHealth(req, res);
+    } else if (method === 'GET' && path === '/otel/status') {
+      // Pillar 3 diagnostic: is tracing live, what Langfuse host, what service.
+      sendJson(res, 200, otelStatus());
     } else if (method === 'GET' && path === '/feed') {
       handleFeed(req, res);
     } else if (method === 'POST' && path === '/federation/route') {
@@ -5801,6 +6098,48 @@ const server = createServer(async (req, res) => {
         const data = JSON.parse(rows[0].content);
         dbExec(`UPDATE entries SET content = ${esc(JSON.stringify({...data, status: 'rejected', rejected_at: new Date().toISOString()}))} WHERE id = ${patchId};`);
         sendJson(res, 200, { rejected: true, patchId });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'POST' && path === '/admin/adopt-idea') {
+      // Idea adoption (from article-scanner's pending-idea entries):
+      // Mark source pending-idea as status='adopted' and mirror the idea
+      // into a new `adopted-idea` entry so dashboards can track what was
+      // accepted without losing the original evaluation context.
+      // Does NOT apply code changes — adoption just records intent;
+      // humans still schedule the actual implementation.
+      if (req.headers['x-vcontext-admin'] !== 'yes') {
+        return sendJson(res, 403, { error: 'X-Vcontext-Admin: yes header required' });
+      }
+      const body = await readBody(req);
+      const ideaId = parseInt(body.id);
+      if (!ideaId) return sendJson(res, 400, { error: 'id required' });
+      try {
+        const rows = dbQuery(`SELECT content, tags FROM entries WHERE id=${ideaId} AND type='pending-idea';`);
+        if (rows.length === 0) return sendJson(res, 404, { error: 'pending-idea not found' });
+        const data = JSON.parse(rows[0].content);
+        const adoptedAt = new Date().toISOString();
+        // Mark source as adopted (preserves original payload + history).
+        dbExec(`UPDATE entries SET content = ${esc(JSON.stringify({...data, status: 'adopted', adopted_at: adoptedAt}))} WHERE id = ${ideaId};`);
+        // Create a mirror adopted-idea entry for dashboard / analytics reach.
+        const mirror = { original_idea_id: ideaId, adopted_at: adoptedAt, ...data };
+        const tags = JSON.stringify(['adopted-idea', `source:${data.source || 'unknown'}`, `effort:${data.effort || 'M'}`]);
+        dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate) VALUES ('adopted-idea', ${esc(JSON.stringify(mirror))}, ${esc(tags)}, 'system', 0);`);
+        sendJson(res, 200, { adopted: true, ideaId });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'POST' && path === '/admin/reject-idea') {
+      // Symmetric to /admin/reject-patch but for pending-idea entries.
+      // Dashboard "Today's Ideas" Dismiss button calls this.
+      if (req.headers['x-vcontext-admin'] !== 'yes') {
+        return sendJson(res, 403, { error: 'X-Vcontext-Admin: yes header required' });
+      }
+      const body = await readBody(req);
+      const ideaId = parseInt(body.id);
+      if (!ideaId) return sendJson(res, 400, { error: 'id required' });
+      try {
+        const rows = dbQuery(`SELECT content FROM entries WHERE id=${ideaId} AND type='pending-idea';`);
+        if (rows.length === 0) return sendJson(res, 404, { error: 'pending-idea not found' });
+        const data = JSON.parse(rows[0].content);
+        dbExec(`UPDATE entries SET content = ${esc(JSON.stringify({...data, status: 'rejected', rejected_at: new Date().toISOString()}))} WHERE id = ${ideaId};`);
+        sendJson(res, 200, { rejected: true, ideaId });
       } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'POST' && path === '/admin/replay-wal') {
       // Replay entries-wal.jsonl back into entries table (INSERT OR IGNORE).
@@ -6121,8 +6460,63 @@ const server = createServer(async (req, res) => {
             : _loopHeartbeat.chunk_summary && (Date.now() - _loopHeartbeat.chunk_summary) < 1800_000 ? 'yellow'
             : 'red',
         },
+        chunk_summary_l2: {
+          running: chunkSummaryL2LoopRunning,
+          last_tick_ms_ago: _loopHeartbeat.chunk_summary_l2 ? Date.now() - _loopHeartbeat.chunk_summary_l2 : null,
+          iterations: _loopHeartbeat.chunk_summary_l2_iter,
+          // 30-min cadence → 3600s yellow / 10800s red.
+          status: !chunkSummaryL2LoopRunning ? 'stopped'
+            : _loopHeartbeat.chunk_summary_l2 && (Date.now() - _loopHeartbeat.chunk_summary_l2) < 3600_000 ? 'green'
+            : _loopHeartbeat.chunk_summary_l2 && (Date.now() - _loopHeartbeat.chunk_summary_l2) < 10800_000 ? 'yellow'
+            : 'red',
+        },
+        chunk_summary_l3: {
+          running: chunkSummaryL3LoopRunning,
+          last_tick_ms_ago: _loopHeartbeat.chunk_summary_l3 ? Date.now() - _loopHeartbeat.chunk_summary_l3 : null,
+          iterations: _loopHeartbeat.chunk_summary_l3_iter,
+          // 60-min cadence → 7200s yellow / 21600s red.
+          status: !chunkSummaryL3LoopRunning ? 'stopped'
+            : _loopHeartbeat.chunk_summary_l3 && (Date.now() - _loopHeartbeat.chunk_summary_l3) < 7200_000 ? 'green'
+            : _loopHeartbeat.chunk_summary_l3 && (Date.now() - _loopHeartbeat.chunk_summary_l3) < 21600_000 ? 'yellow'
+            : 'red',
+        },
       };
       sendJson(res, 200, { summary, features: features_out, loops });
+    } else if (method === 'POST' && path === '/admin/trigger-l2-summary') {
+      // Manually generate an L2 (daily) summary for a given UTC date.
+      // Body: {date: "YYYY-MM-DD"}.  Omit date → default to yesterday.
+      // Fire-and-forget so a slow MLX gen can't stall the HTTP loop.
+      try {
+        const body = await readBody(req);
+        const dayId = body.date || dayIdFor(Date.now() - 24 * 3600 * 1000);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(dayId)) {
+          return sendJson(res, 400, { error: 'date must be YYYY-MM-DD' });
+        }
+        if (!mlxGenerateAvailable) return sendJson(res, 503, { error: 'MLX generate unavailable' });
+        sendJson(res, 202, { status: 'triggered', chunk_id: dayId, level: 2 });
+        setImmediate(async () => {
+          try { const r = await runOneChunkSummaryL2(dayId);
+            console.log(`[admin:trigger-l2] ${dayId}: ${JSON.stringify(r)}`);
+          } catch (e) { console.error(`[admin:trigger-l2] ${dayId}: ${e.message}`); }
+        });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
+    } else if (method === 'POST' && path === '/admin/trigger-l3-summary') {
+      // Manually generate an L3 (weekly) summary for a given ISO week.
+      // Body: {week: "YYYY-Www"}.  Omit → default to last week.
+      try {
+        const body = await readBody(req);
+        const weekId = body.week || weekIdFor(Date.now() - 7 * 24 * 3600 * 1000);
+        if (!/^\d{4}-W\d{2}$/.test(weekId)) {
+          return sendJson(res, 400, { error: 'week must be YYYY-Www (e.g. 2026-W16)' });
+        }
+        if (!mlxGenerateAvailable) return sendJson(res, 503, { error: 'MLX generate unavailable' });
+        sendJson(res, 202, { status: 'triggered', chunk_id: weekId, level: 3 });
+        setImmediate(async () => {
+          try { const r = await runOneChunkSummaryL3(weekId);
+            console.log(`[admin:trigger-l3] ${weekId}: ${JSON.stringify(r)}`);
+          } catch (e) { console.error(`[admin:trigger-l3] ${weekId}: ${e.message}`); }
+        });
+      } catch (e) { sendJson(res, 500, { error: e.message }); }
     } else if (method === 'POST' && path === '/admin/run-all') {
       // Manually fire the AI-driven loops whose scheduler has gone quiet.
       // MLX uses a single serialized lock — run tasks SEQUENTIALLY so
@@ -6340,14 +6734,32 @@ const server = createServer(async (req, res) => {
     } else if (method === 'POST' && path === '/tier/migrate') {
       handleTierMigrate(req, res);
     } else if (method === 'GET' && path === '/summaries') {
-      // L1 hierarchical chunk summaries (PHOTON-inspired memory tier).
-      // Returns the 10-min chunk summaries over a rolling window.
+      // Hierarchical chunk summaries (PHOTON-inspired memory tier).
+      //   level=1 (default)  → 10-min chunks, ?hours=N window (max 30d)
+      //   level=2            → daily chunks,   ?days=N  window (max 365d)
+      //   level=3            → weekly chunks,  ?weeks=N window (max 104w)
       // Use this BEFORE drilling into raw entries for long-term recall.
       try {
         const params = parseQuery(req.url);
         const level = parseInt(params.level) || 1;
-        const hours = Math.min(parseInt(params.hours) || 24, 24 * 30);
-        const since = esc(new Date(Date.now() - hours * 3600000).toISOString().replace('T', ' ').slice(0, 19));
+        let periodLabel, periodValue, sinceMs, expected;
+        if (level === 2) {
+          const days = Math.min(parseInt(params.days) || 30, 365);
+          sinceMs = days * 24 * 3600000;
+          periodLabel = 'period_days'; periodValue = days;
+          expected = days;
+        } else if (level === 3) {
+          const weeks = Math.min(parseInt(params.weeks) || 12, 104);
+          sinceMs = weeks * 7 * 24 * 3600000;
+          periodLabel = 'period_weeks'; periodValue = weeks;
+          expected = weeks;
+        } else {
+          const hours = Math.min(parseInt(params.hours) || 24, 24 * 30);
+          sinceMs = hours * 3600000;
+          periodLabel = 'period_hours'; periodValue = hours;
+          expected = Math.floor(hours * 60 / 10);
+        }
+        const since = esc(new Date(Date.now() - sinceMs).toISOString().replace('T', ' ').slice(0, 19));
         const rows = dbQuery(`
           SELECT id, content, created_at FROM entries
           WHERE type='chunk-summary' AND tags LIKE ${esc('%level:' + level + '%')}
@@ -6358,10 +6770,8 @@ const server = createServer(async (req, res) => {
           try { return { id: r.id, created_at: r.created_at, ...JSON.parse(r.content) }; }
           catch { return { id: r.id, created_at: r.created_at, raw: r.content }; }
         });
-        // Expected-chunks vs actual-chunks = coverage ratio
-        const expected = Math.floor(hours * 60 / 10);
         sendJson(res, 200, {
-          level, period_hours: hours, count: summaries.length,
+          level, [periodLabel]: periodValue, count: summaries.length,
           expected_chunks: expected,
           coverage: expected > 0 ? Math.min(1, summaries.length / expected) : 0,
           summaries,
@@ -6629,11 +7039,24 @@ checkMlxGenerate().then(() => {
     console.log('[discovery] Loop started (MLX generate available)');
     startChunkSummaryLoop().catch(() => {});
     console.log('[chunk-summary] Loop started (MLX generate available)');
+    startChunkSummaryL2Loop().catch(() => {});
+    console.log('[chunk-summary-l2] Loop started (30-min cadence, daily summaries)');
+    startChunkSummaryL3Loop().catch(() => {});
+    console.log('[chunk-summary-l3] Loop started (60-min cadence, weekly summaries)');
   }
 }).catch(() => {});
 
 // Start — default 127.0.0.1 for safety, set VCONTEXT_BIND=0.0.0.0 for LAN.
 const BIND_HOST = process.env.VCONTEXT_BIND || '127.0.0.1';
+
+// Pillar 3: kick off OTEL SDK. initOtel() is idempotent and noop-safe when
+// LANGFUSE_HOST is unset; we await it here so the first request already
+// sees the active exporter (not strictly required — getTracer() returns
+// noop until _ready flips — but cleaner log ordering).
+initOtel().then(enabled => {
+  if (enabled) console.log('[vcontext] OTEL tracing -> Langfuse (Pillar 3)');
+}).catch(() => {});
+
 server.listen(PORT, BIND_HOST, () => {
   console.log(`[vcontext] Virtual Context server running at http://${BIND_HOST}:${PORT}`);
   console.log(`[vcontext] Tier 1 (RAM):   ${DB_PATH}`);
