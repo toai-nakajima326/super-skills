@@ -211,7 +211,7 @@ let _analyticsCache = {};
 //
 // A Worker thread runs in the same process but a separate event loop.
 // Even when the main thread is fully blocked, the worker's timers
-// still fire. We ping main every 5s; if main doesn't pong within 30s,
+// still fire. We ping main every 5s; if main doesn't pong within 90s,
 // the worker sends SIGKILL to its own PID — this is the ONLY reliable
 // way to interrupt a busy-waiting main thread. Testing showed
 // `process.exit(137)` from a worker does NOT interrupt a synchronous
@@ -220,6 +220,15 @@ let _analyticsCache = {};
 // terminates the process regardless of user-space state. Exit code
 // is then 137 (128+9); wrapper treats anything ≠0,2 as a normal
 // restart.
+//
+// Threshold history:
+//   30s (2026-04-17): original; too aggressive after RAM DB grew past
+//                      ~47k entries. Fired during legitimate startup
+//                      (SSD restore + sqlite-vec load + backfillIndex)
+//                      causing a restart loop.
+//   90s (2026-04-18): current. Gives startup ample breathing room
+//                      while still catching truly-wedged MLX calls
+//                      (those hang for minutes, not just tens of sec).
 (function startEventLoopWatchdog() {
   if (process.env.VCONTEXT_DISABLE_WATCHDOG === '1') return;
   try {
@@ -230,7 +239,7 @@ let _analyticsCache = {};
       parentPort.on('message', (m) => { if (m === 'pong') lastPong = Date.now(); });
       setInterval(() => {
         const gap = Date.now() - lastPong;
-        if (gap > 30000) {
+        if (gap > 90000) {
           console.error('[watchdog] main event loop unresponsive for ' + gap + 'ms — SIGKILL pid=' + process.pid);
           // SIGKILL to own pid: kernel terminates the whole process,
           // bypassing any user-space block. process.exit() would queue

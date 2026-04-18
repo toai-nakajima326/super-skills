@@ -78,13 +78,15 @@ wait_port_free() {
 }
 
 wait_server_bound() {
-  # Fix B — after spawning a server, wait up to 45s for it to actually
+  # Fix B — after spawning a server, wait up to 120s for it to actually
   # bind port 3150. Catches the "alive but hung" case (state=U, stuck
   # in .recover, blocked on a startup query, etc.) that `wait $PID`
-  # never detects. 45s accommodates legitimate slow starts (SSD DB
-  # restore, sqlite-vec load, MLX probe) but kills true zombies.
+  # never detects. Bumped from 45s → 120s on 2026-04-18 after the RAM
+  # DB grew past ~47k entries and legitimate startup (SSD restore +
+  # backfill + sqlite-vec load + MLX probes) started crossing 45s,
+  # triggering false-positive zombie kills in a loop.
   local pid="$1"
-  for i in $(seq 1 45); do
+  for i in $(seq 1 120); do
     # Process must still be alive
     kill -0 "$pid" 2>/dev/null || { echo "[wrapper] server PID $pid exited during startup"; return 1; }
     # And must own port 3150
