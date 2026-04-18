@@ -24,6 +24,13 @@ import numpy as np
 import mlx
 import mlx.core as mx
 from mlx_lm import load
+from concurrent.futures import ThreadPoolExecutor
+
+# Dedicated single-thread executor for MLX inference.
+# MLX/Metal state is process-global and not safely re-entrant across threads,
+# so max_workers=1 guarantees only one MLX forward pass runs at a time while
+# freeing the asyncio event loop to serve /health and other light endpoints.
+_mlx_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-infer")
 
 # Limit Metal GPU cache to 5GB — stability priority
 mx.metal.set_cache_limit(5 * 1024 * 1024 * 1024)
@@ -300,6 +307,65 @@ class ModelManager:
         
         return h
     
+    def _run_batch_sync(
+        self,
+        to_encode_text: List[str],
+        model: Any,
+        tokenizer: Any,
+        normalize: bool,
+    ) -> np.ndarray:
+        """
+        Synchronous MLX forward pass for a batch of texts.
+
+        Runs on the dedicated single-thread executor (_mlx_executor). This
+        is where the event loop yields — everything inside here can block
+        for seconds without stalling /health or other light endpoints.
+
+        Returns [B, H] numpy array of pooled embeddings.
+        """
+        # ── True batch tokenization (single call) ──
+        hf_tok = getattr(tokenizer, "_tokenizer", tokenizer)
+        enc = hf_tok(
+            to_encode_text,
+            padding=True,
+            truncation=True,
+            max_length=self.config.max_text_length,
+            return_tensors=None,
+        )
+        input_ids_py = enc["input_ids"]
+        attn_mask_py = enc["attention_mask"]
+
+        input_ids = mx.array(input_ids_py)            # [B, L]
+        attn_mask = mx.array(attn_mask_py)            # [B, L], 0/1
+
+        # ── Single batched forward pass ──
+        hidden_states = self._get_hidden_states(input_ids, model)  # [B, L, H]
+
+        # Masked mean pooling: sum(h * mask) / sum(mask)
+        mask_f = attn_mask.astype(hidden_states.dtype)             # [B, L]
+        mask_exp = mx.expand_dims(mask_f, axis=-1)                 # [B, L, 1]
+        summed = mx.sum(hidden_states * mask_exp, axis=1)          # [B, H]
+        counts = mx.maximum(mx.sum(mask_f, axis=1, keepdims=True), 1e-9)  # [B, 1]
+        pooled = summed / counts                                   # [B, H]
+
+        if normalize:
+            norm = mx.linalg.norm(pooled, axis=1, keepdims=True)
+            pooled = pooled / mx.maximum(norm, 1e-9)
+
+        # Force evaluation ONCE for the whole batch
+        mx.eval(pooled)
+        pooled_np = np.array(pooled.tolist(), dtype=np.float32)   # [B, H]
+
+        # Free intermediate MLX tensors to prevent GPU memory growth
+        del hidden_states, pooled, input_ids, attn_mask, mask_f, mask_exp, summed, counts
+
+        # GPU memory cleanup after every batch
+        if hasattr(mx, 'metal') and hasattr(mx.metal, 'clear_cache'):
+            mx.metal.clear_cache()
+        gc.collect()
+
+        return pooled_np
+
     async def generate_embeddings(
         self,
         texts: List[str],
@@ -308,6 +374,11 @@ class ModelManager:
     ) -> Tuple[np.ndarray, str, int]:
         """
         Generate embeddings for a list of texts.
+
+        The async outer does cache lookup and result assembly on the event
+        loop (cheap). The MLX forward pass is dispatched to a dedicated
+        single-thread executor so the event loop stays responsive for
+        /health and other concurrent requests.
 
         Args:
             texts: List of input texts
@@ -347,43 +418,19 @@ class ModelManager:
 
         computed: Dict[int, np.ndarray] = {}
         if to_encode_text:
-            # ── True batch tokenization (single call) ──
-            # Use HF tokenizer directly with padding so the model gets one
-            # [B, L] tensor and one forward pass, instead of B separate calls.
-            hf_tok = getattr(tokenizer, "_tokenizer", tokenizer)
-            enc = hf_tok(
+            # ── Dispatch blocking MLX work to single-thread executor ──
+            # The event loop yields here while the forward pass runs on
+            # the dedicated MLX worker thread. /health and other light
+            # handlers can run concurrently.
+            loop = asyncio.get_running_loop()
+            pooled_np = await loop.run_in_executor(
+                _mlx_executor,
+                self._run_batch_sync,
                 to_encode_text,
-                padding=True,
-                truncation=True,
-                max_length=self.config.max_text_length,
-                return_tensors=None,
+                model,
+                tokenizer,
+                normalize,
             )
-            input_ids_py = enc["input_ids"]
-            attn_mask_py = enc["attention_mask"]
-
-            input_ids = mx.array(input_ids_py)            # [B, L]
-            attn_mask = mx.array(attn_mask_py)            # [B, L], 0/1
-
-            # ── Single batched forward pass ──
-            hidden_states = self._get_hidden_states(input_ids, model)  # [B, L, H]
-
-            # Masked mean pooling: sum(h * mask) / sum(mask)
-            mask_f = attn_mask.astype(hidden_states.dtype)             # [B, L]
-            mask_exp = mx.expand_dims(mask_f, axis=-1)                 # [B, L, 1]
-            summed = mx.sum(hidden_states * mask_exp, axis=1)          # [B, H]
-            counts = mx.maximum(mx.sum(mask_f, axis=1, keepdims=True), 1e-9)  # [B, 1]
-            pooled = summed / counts                                   # [B, H]
-
-            if normalize:
-                norm = mx.linalg.norm(pooled, axis=1, keepdims=True)
-                pooled = pooled / mx.maximum(norm, 1e-9)
-
-            # Force evaluation ONCE for the whole batch
-            mx.eval(pooled)
-            pooled_np = np.array(pooled.tolist(), dtype=np.float32)   # [B, H]
-
-            # Free intermediate MLX tensors to prevent GPU memory growth
-            del hidden_states, pooled, input_ids, attn_mask, mask_f, mask_exp, summed, counts
 
             for j, i in enumerate(to_encode_idx):
                 emb = pooled_np[j]
@@ -393,11 +440,6 @@ class ModelManager:
 
         # Assemble output in original order
         embeddings = [cached[i] if i in cached else computed[i] for i in range(len(texts))]
-
-        # GPU memory cleanup after every batch
-        if hasattr(mx, 'metal') and hasattr(mx.metal, 'clear_cache'):
-            mx.metal.clear_cache()
-        gc.collect()
 
         return np.array(embeddings, dtype=np.float32), model_name, embedding_dim
     
