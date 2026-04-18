@@ -20,8 +20,14 @@ from typing import Optional, List, Dict, Any
 import mlx.core as mx
 from mlx_lm import load, generate
 
+# Cache API compat — MLX moved mx.metal.{clear_cache,set_cache_limit} to top-level
+# mx.* in 0.x. Prefer new API when present, fall back to legacy for rollback safety.
+_clear_cache = getattr(mx, 'clear_cache', None) or getattr(getattr(mx, 'metal', None), 'clear_cache', None)
+_set_cache_limit = getattr(mx, 'set_cache_limit', None) or getattr(getattr(mx, 'metal', None), 'set_cache_limit', None)
+
 # Limit Metal GPU cache to 1GB (model weights are separate, cache is for intermediate tensors)
-mx.metal.set_cache_limit(1 * 1024 * 1024 * 1024)
+if _set_cache_limit is not None:
+    _set_cache_limit(1 * 1024 * 1024 * 1024)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -66,8 +72,8 @@ def do_generate(messages: List[Dict], max_tokens: int = 500, temperature: float 
     # Count and clear cache periodically
     call_count += 1
     if call_count % args.cache_clear_interval == 0:
-        if hasattr(mx, 'metal') and hasattr(mx.metal, 'clear_cache'):
-            mx.metal.clear_cache()
+        if _clear_cache is not None:
+            _clear_cache()
         gc.collect()
         logger.info(f"[memory] Cleared cache after {call_count} calls")
 

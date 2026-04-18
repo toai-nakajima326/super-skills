@@ -32,8 +32,14 @@ from concurrent.futures import ThreadPoolExecutor
 # freeing the asyncio event loop to serve /health and other light endpoints.
 _mlx_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-infer")
 
+# Cache API compat — MLX moved mx.metal.{clear_cache,set_cache_limit} to top-level
+# mx.* in 0.x. Prefer new API when present, fall back to legacy for rollback safety.
+_clear_cache = getattr(mx, 'clear_cache', None) or getattr(getattr(mx, 'metal', None), 'clear_cache', None)
+_set_cache_limit = getattr(mx, 'set_cache_limit', None) or getattr(getattr(mx, 'metal', None), 'set_cache_limit', None)
+
 # Limit Metal GPU cache to 5GB — stability priority
-mx.metal.set_cache_limit(5 * 1024 * 1024 * 1024)
+if _set_cache_limit is not None:
+    _set_cache_limit(5 * 1024 * 1024 * 1024)
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -360,8 +366,8 @@ class ModelManager:
         del hidden_states, pooled, input_ids, attn_mask, mask_f, mask_exp, summed, counts
 
         # GPU memory cleanup after every batch
-        if hasattr(mx, 'metal') and hasattr(mx.metal, 'clear_cache'):
-            mx.metal.clear_cache()
+        if _clear_cache is not None:
+            _clear_cache()
         gc.collect()
 
         return pooled_np
@@ -892,8 +898,8 @@ async def openai_compat_embeddings(request: OpenAIEmbedRequest):
 @app.post("/clear_cache", tags=["Maintenance"])
 async def clear_cache_endpoint():
     """Force clear MLX Metal GPU cache. Call after batch operations."""
-    if hasattr(mx, 'metal') and hasattr(mx.metal, 'clear_cache'):
-        mx.metal.clear_cache()
+    if _clear_cache is not None:
+        _clear_cache()
     gc.collect()
     return {"cleared": True}
 
