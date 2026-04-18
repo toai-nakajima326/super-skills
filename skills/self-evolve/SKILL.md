@@ -41,6 +41,20 @@ Collect candidates from five input streams. Every candidate carries
    the dashboard.
 5. **discovery-loop `skill-suggestion`** — `GET /recall?type=skill-suggestion&after=<last_run>`
    (source = `skill_discovery`).
+6. **dynamic LLM-generated queries** — `GET /recall?type=discovery-query&tag=cycle:<YYYY-WW>&limit=20`
+   (source = `skill_query_generator`). See Stream 6 detail below.
+
+### Stream 6: Dynamic LLM-Generated Queries (skill-query-generator)
+```javascript
+// vcontext に保存されている discovery-query を取得して検索に追加
+const cycleId = getCurrentCycleId(); // YYYY-WW format
+const dynamicQueries = await vcRecall(`type=discovery-query&tag=cycle:${cycleId}&limit=20`);
+// dynamicQueries は MLX/Claude が分析した「今不足している分野」のクエリ
+// skill-usage, skill-gap, skill-suggestion を分析して自動生成済み
+```
+- **生成元**: `scripts/skill-query-generator.js` (MLX Qwen3-8B → Claude Haiku fallback)
+- **クエリ数**: 最大10件 (日本語5 + 英語5)
+- **更新頻度**: self-evolveサイクル前に `node scripts/skill-query-generator.js` を実行
 
 ### Phase (b) — Score
 
@@ -142,6 +156,9 @@ Design reference: `docs/analysis/2026-04-18-self-evolve-redesign.md` section 4.
 1. Read `~/skills/docs/evolution-log.md` to find the most recent run date
 2. Set search window: "after:{last_run_date}" — only look at content published since then
 3. If first run or no date found, use "after:{30_days_ago}"
+
+### Step 0 (pre-step): Generate dynamic queries
+Run `node scripts/skill-query-generator.js` to generate this cycle's dynamic queries, then include `discovery-query` results from vcontext in the search queue.
 
 ### Step 1: Broad search (cast a wide net)
 Search across ALL of these categories. Do not skip any.
