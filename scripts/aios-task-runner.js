@@ -27,6 +27,12 @@ import { existsSync, statSync, readFileSync, writeFileSync } from 'node:fs';
 import { exec as _exec, execFile as _execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import crypto from 'node:crypto';
+import {
+  tryMlxLock,
+  releaseMlxLock,
+  mlxLockStatus as _sharedMlxLockStatus,
+  MLX_LOCK_ENV_VAR,
+} from './aios-mlx-lock.js';
 
 const exec = promisify(_exec);
 const execFile = promisify(_execFile);
@@ -177,15 +183,22 @@ async function storeResult(request_id, task_type, status, resultFields) {
   });
 }
 
-async function runLocomoEval(payload) {
+async function runLocomoEval(payload, mlxHolderId) {
   // payload: { args?: string[] }  — cli args to pass to locomo-eval.py
+  // D2 2026-04-18: inject AIOS_MLX_LOCK_HOLDER so the child's MlxLock
+  // context manager becomes a re-entrant no-op instead of blocking on
+  // the parent-held lock file.
   const args = Array.isArray(payload.args) ? payload.args.slice(0, 20).map(String) : [];
   const cmd = 'python3';
   const full = ['scripts/locomo-eval.py', ...args];
+  const spawnEnv = mlxHolderId
+    ? { ...process.env, [MLX_LOCK_ENV_VAR]: mlxHolderId }
+    : process.env;
   const { stdout, stderr } = await execFile(cmd, full, {
     cwd: '/Users/mitsuru_nakajima/skills',
     timeout: LOCOMO_EVAL_TIMEOUT_MS,
     maxBuffer: 10 * 1024 * 1024,
+    env: spawnEnv,
   });
   return { stdout: (stdout || '').slice(-16000), stderr: (stderr || '').slice(-4000) };
 }
@@ -228,14 +241,18 @@ function tailOutput(stdout, stderr) {
   };
 }
 
-async function runSkillDiscoveryAdhoc(payload) {
+async function runSkillDiscoveryAdhoc(payload, mlxHolderId) {
   // payload: {}  — no arguments required; skill-discovery.sh is self-contained.
   // Idempotence: if a scheduled LaunchAgent run or prior adhoc task is still
   // running, skip and return a "skipped_already_running" status instead of
   // stacking concurrent invocations that would race on OUT_DIR + vcontext POSTs.
+  // D2 2026-04-18: inject AIOS_MLX_LOCK_HOLDER so any MLX-using child call
+  // (skill-summarizer, etc.) re-enters rather than deadlocks.
   if (await isScriptAlreadyRunning('scripts/skill-discovery.sh')) {
     return { skipped: 'already_running', stdout: '', stderr: '' };
   }
+  const env = { ...process.env, TASK_RUNNER: '1' };
+  if (mlxHolderId) env[MLX_LOCK_ENV_VAR] = mlxHolderId;
   const { stdout, stderr } = await execFile(
     '/bin/bash',
     ['scripts/skill-discovery.sh'],
@@ -243,16 +260,17 @@ async function runSkillDiscoveryAdhoc(payload) {
       cwd: REPO_ROOT,
       timeout: SKILL_DISCOVERY_TIMEOUT_MS,
       maxBuffer: 10 * 1024 * 1024,
-      env: { ...process.env, TASK_RUNNER: '1' },
+      env,
     }
   );
   return tailOutput(stdout, stderr);
 }
 
-async function runArticleScanAdhoc(payload) {
+async function runArticleScanAdhoc(payload, mlxHolderId) {
   // payload: { max?: number, dry_run?: boolean, verbose?: boolean, all?: boolean }
   // Whitelist flags we pass through so a malicious payload cannot inject
   // arbitrary argv.  --max is the only flag that takes a value.
+  // D2 2026-04-18: inject AIOS_MLX_LOCK_HOLDER for re-entrancy.
   if (await isScriptAlreadyRunning('scripts/article-scanner.js')) {
     return { skipped: 'already_running', stdout: '', stderr: '' };
   }
@@ -264,25 +282,28 @@ async function runArticleScanAdhoc(payload) {
     const maxN = Math.max(1, Math.min(100, Math.floor(+payload.max)));
     cliArgs.push('--max', String(maxN));
   }
+  const env = {
+    ...process.env,
+    TASK_RUNNER: '1',
+    VCONTEXT_URL: process.env.VCONTEXT_URL || 'http://127.0.0.1:3150',
+  };
+  if (mlxHolderId) env[MLX_LOCK_ENV_VAR] = mlxHolderId;
   const { stdout, stderr } = await execFile(NODE_BIN, cliArgs, {
     cwd: REPO_ROOT,
     timeout: ARTICLE_SCAN_TIMEOUT_MS,
     maxBuffer: 10 * 1024 * 1024,
-    env: {
-      ...process.env,
-      TASK_RUNNER: '1',
-      VCONTEXT_URL: process.env.VCONTEXT_URL || 'http://127.0.0.1:3150',
-    },
+    env,
   });
   return tailOutput(stdout, stderr);
 }
 
-async function runSelfEvolveDryrun(payload) {
+async function runSelfEvolveDryrun(payload, mlxHolderId) {
   // payload: { verbose?: boolean, dry_run_only?: boolean }
   // Always pass --observation (this dispatch path is defined as dryrun/observation
   // mode; Phase c-e mutations are skipped by the script in this mode).
   // If payload.dry_run_only is true, also pass --dry-run so even Phase a-b
   // writes are suppressed (pure gather+score+log).
+  // D2 2026-04-18: inject AIOS_MLX_LOCK_HOLDER for re-entrancy.
   if (await isScriptAlreadyRunning('self-evolve/scripts/self-evolve.js')) {
     return { skipped: 'already_running', stdout: '', stderr: '' };
   }
@@ -292,16 +313,18 @@ async function runSelfEvolveDryrun(payload) {
   ];
   if (payload && payload.dry_run_only === true) cliArgs.push('--dry-run');
   if (payload && payload.verbose === true) cliArgs.push('--verbose');
+  const env = {
+    ...process.env,
+    TASK_RUNNER: '1',
+    VCONTEXT_URL: process.env.VCONTEXT_URL || 'http://127.0.0.1:3150',
+    MLX_GENERATE_URL: process.env.MLX_GENERATE_URL || 'http://127.0.0.1:3162',
+  };
+  if (mlxHolderId) env[MLX_LOCK_ENV_VAR] = mlxHolderId;
   const { stdout, stderr } = await execFile(NODE_BIN, cliArgs, {
     cwd: REPO_ROOT,
     timeout: SELF_EVOLVE_TIMEOUT_MS,
     maxBuffer: 10 * 1024 * 1024,
-    env: {
-      ...process.env,
-      TASK_RUNNER: '1',
-      VCONTEXT_URL: process.env.VCONTEXT_URL || 'http://127.0.0.1:3150',
-      MLX_GENERATE_URL: process.env.MLX_GENERATE_URL || 'http://127.0.0.1:3162',
-    },
+    env,
   });
   return tailOutput(stdout, stderr);
 }
@@ -321,7 +344,7 @@ async function runShellCommand(payload) {
   return { stdout: (stdout || '').slice(-16000), stderr: (stderr || '').slice(-4000) };
 }
 
-async function dispatch(task) {
+async function dispatch(task, mlxHolderId = null) {
   const { request_id, task_type } = task;
   const payload = task.payload || {};
   const started = Date.now();
@@ -338,15 +361,15 @@ async function dispatch(task) {
   let errorMsg = null;
   try {
     if (task_type === 'locomo-eval') {
-      result = await runLocomoEval(payload);
+      result = await runLocomoEval(payload, mlxHolderId);
     } else if (task_type === 'shell-command') {
       result = await runShellCommand(payload);
     } else if (task_type === 'skill-discovery-adhoc') {
-      result = await runSkillDiscoveryAdhoc(payload);
+      result = await runSkillDiscoveryAdhoc(payload, mlxHolderId);
     } else if (task_type === 'article-scan-adhoc') {
-      result = await runArticleScanAdhoc(payload);
+      result = await runArticleScanAdhoc(payload, mlxHolderId);
     } else if (task_type === 'self-evolve-dryrun') {
-      result = await runSelfEvolveDryrun(payload);
+      result = await runSelfEvolveDryrun(payload, mlxHolderId);
     } else {
       errorMsg = `unknown task_type '${task_type}'`;
     }
@@ -413,48 +436,22 @@ async function recoverOrphans() {
 // uninterruptible-sleep (U state) wedge. Server OOM-cascade followed.
 // Serial queue dispatch alone was insufficient because agents bypass
 // the queue entirely.
+//
+// 2026-04-18 D2 refactor (M1): inline {mlxLockStatus, mlxLockAcquire,
+// mlxLockRelease} helpers replaced with imports from aios-mlx-lock.js.
+// The shared helper uses O_CREAT|O_EXCL (atomic, race-safe) instead of
+// the old non-atomic writeFileSync, adds PID-liveness stale detection
+// (D1), and — critically — AIOS_MLX_LOCK_HOLDER is now injected into
+// spawned children's env so their MlxLock re-enters as a no-op rather
+// than deadlocking on the parent-held file.
 const MLX_HEAVY_TYPES = new Set([
   'locomo-eval',
   'self-evolve-dryrun',
   'article-scan-adhoc',
   'skill-discovery-adhoc',
 ]);
-const MLX_LOCK_FILE = '/tmp/aios-mlx-lock';
-const MLX_LOCK_STALE_MS = 25 * 60 * 1000;  // lock older than 25min = stale
 
 function isMlxHeavy(task_type) { return MLX_HEAVY_TYPES.has(task_type); }
-
-// Check whether someone else (agent, adhoc script) is holding the MLX
-// generate lock. Returns { held: bool, holder: string|null, age_ms: number }.
-function mlxLockStatus() {
-  try {
-    const fs = require('fs');
-    if (!fs.existsSync(MLX_LOCK_FILE)) return { held: false, holder: null, age_ms: 0 };
-    const st = fs.statSync(MLX_LOCK_FILE);
-    const age = Date.now() - st.mtimeMs;
-    if (age > MLX_LOCK_STALE_MS) {
-      try { fs.unlinkSync(MLX_LOCK_FILE); } catch {}
-      return { held: false, holder: 'stale-cleared', age_ms: age };
-    }
-    const holder = fs.readFileSync(MLX_LOCK_FILE, 'utf-8').trim();
-    return { held: true, holder, age_ms: age };
-  } catch { return { held: false, holder: null, age_ms: 0 }; }
-}
-function mlxLockAcquire(holderId) {
-  try {
-    const fs = require('fs');
-    fs.writeFileSync(MLX_LOCK_FILE, holderId + '\n');
-  } catch {}
-}
-function mlxLockRelease(holderId) {
-  try {
-    const fs = require('fs');
-    if (fs.existsSync(MLX_LOCK_FILE)) {
-      const who = fs.readFileSync(MLX_LOCK_FILE, 'utf-8').trim();
-      if (who === holderId) fs.unlinkSync(MLX_LOCK_FILE);
-    }
-  } catch {}
-}
 
 async function pollOnce() {
   maybeRotateLog();
@@ -480,27 +477,30 @@ async function pollOnce() {
     errlog('skipping malformed queue entry:', JSON.stringify(next).slice(0, 200));
     return;
   }
-  // MLX concurrency guard: if the next task is MLX-heavy, check whether
-  // an agent/other process is already holding the MLX lock. If so, skip
-  // this poll cycle (log once every 5 min to avoid noise). Non-MLX tasks
-  // (shell-command) always proceed.
+  // MLX concurrency guard: if the next task is MLX-heavy, try to acquire
+  // the shared lock with a tiny waitMs (0) so we don't block the poll
+  // loop; if someone else holds it we'll retry on the next poll tick.
+  // Non-MLX tasks (shell-command) always proceed.
+  let mlxHolderId = null;
   if (isMlxHeavy(next.task_type)) {
-    const lock = mlxLockStatus();
-    if (lock.held) {
-      const ageMin = Math.round(lock.age_ms / 60000);
+    mlxHolderId = `task-runner:${next.request_id}`;
+    // Non-blocking try: waitMs=0 means "acquire-or-fail immediately".
+    const got = await tryMlxLock(mlxHolderId, { waitMs: 0 });
+    if (!got) {
+      const peek = _sharedMlxLockStatus();
+      const ageMin = Math.round((peek.ageMs || 0) / 60000);
       if (!pollOnce._lastLockLogAt || Date.now() - pollOnce._lastLockLogAt > 5 * 60 * 1000) {
-        log(`MLX busy — ${next.task_type} (${next.request_id.slice(0,8)}) waiting (holder=${lock.holder}, age=${ageMin}min)`);
+        log(`MLX busy — ${next.task_type} (${next.request_id.slice(0,8)}) waiting (holder=${peek.holder}, age=${ageMin}min)`);
         pollOnce._lastLockLogAt = Date.now();
       }
       return;
     }
-    mlxLockAcquire(`task-runner:${next.request_id}`);
   }
   try {
-    await dispatch(next);
+    await dispatch(next, mlxHolderId);
   } finally {
-    if (isMlxHeavy(next.task_type)) {
-      mlxLockRelease(`task-runner:${next.request_id}`);
+    if (mlxHolderId) {
+      releaseMlxLock(mlxHolderId);
     }
   }
 }
