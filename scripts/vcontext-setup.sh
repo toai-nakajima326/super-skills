@@ -11,7 +11,7 @@ MOUNT_POINT="/Volumes/VContext"
 DB_PATH="${MOUNT_POINT}/vcontext.db"
 BACKUP_DIR="${HOME}/skills/data"
 BACKUP_PATH="${BACKUP_DIR}/vcontext-backup.sqlite"
-RAM_BLOCKS=25165824  # 12GB in 512-byte blocks (4GB → 6GB 2026-04-17 → 12GB 2026-04-18 after corrupted-backup copy filled 5.8GB disk)
+RAM_BLOCKS=37748736  # 18GB in 512-byte blocks (4 → 6 → 12 → 18 — 18GB (50% of 36GB system RAM) keeps vcontext/vec/WAL + corrupted-copy headroom comfortable; "他はスワップで良し" per owner 2026-04-18)
 PLIST_LABEL="com.vcontext.ramdisk"
 PLIST_PATH="${HOME}/Library/LaunchAgents/${PLIST_LABEL}.plist"
 
@@ -154,7 +154,7 @@ cmd_start() {
     fi
   fi
 
-  log "Creating 12GB RAM disk (${RAM_BLOCKS} x 512-byte blocks)"
+  log "Creating 18GB RAM disk (${RAM_BLOCKS} x 512-byte blocks)"
   DISK_DEV=$(hdiutil attach -nomount ram://${RAM_BLOCKS})
   DISK_DEV=$(echo "${DISK_DEV}" | xargs)  # trim whitespace
 
@@ -193,7 +193,7 @@ cmd_start() {
   log "  Mount:    ${MOUNT_POINT}"
   log "  Database: ${DB_PATH}"
   log "  Backup:   ${BACKUP_PATH}"
-  log "  Size:     12 GB RAM"
+  log "  Size:     18 GB RAM"
   echo ""
   log "Start the server: node scripts/vcontext-server.js"
 }
