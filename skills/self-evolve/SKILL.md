@@ -12,10 +12,11 @@ origin: unified
 4. **Transparency**: Every change must be logged with what changed, why, and source.
 5. **No silent failures**: If update fails, log the failure and notify user on next session.
 6. **Thoroughness over speed**: Take as much time as needed. Deep investigation is preferred over quick scans.
-7. **Freshness tracking**: Always check `docs/evolution-log.md` for the last run date. All searches must use date filters to find content published AFTER the last run. Never re-evaluate already-seen sources.
-8. **Fitness-driven selection**: Score every candidate via the function in section "Fitness Function" (weights in `data/evolution-config.json`). Only top-K (default 3) candidates per cycle emit `pending-patch` entries. No bulk edits.
-9. **Approval gate untouched**: All mutations land as `pending-patch` entries in vcontext. Dashboard approve/reject remains the only path to actually modifying a SKILL.md file. Do not bypass this gate.
-10. **Cycle idempotency**: Each weekly run produces exactly one `evolution-digest` entry keyed on `cycle_id = YYYY-WW`. Re-running the same week dedupes.
+7. **No search limit**: There is no cap on the number of sources, links followed, or time spent searching. Search until you are confident no major pattern has been missed.
+8. **Freshness tracking**: Always check `docs/evolution-log.md` for the last run date. All searches must use date filters to find content published AFTER the last run. Never re-evaluate already-seen sources.
+9. **Fitness-driven selection**: Score every candidate via the function in section "Fitness Function" (weights in `data/evolution-config.json`). Only top-K (default 3) candidates per cycle emit `pending-patch` entries. No bulk edits.
+10. **Approval gate untouched**: All mutations land as `pending-patch` entries in vcontext. Dashboard approve/reject remains the only path to actually modifying a SKILL.md file. Do not bypass this gate.
+11. **Cycle idempotency**: Each weekly run produces exactly one `evolution-digest` entry keyed on `cycle_id = YYYY-WW`. Re-running the same week dedupes.
 
 ## Workflow — Evolution Cycle (weekly Sun 07:00 JST)
 
@@ -203,14 +204,49 @@ Search across ALL of these categories. Do not skip any.
 - paperswithcode.com "agent skill" {year}
 - "agentic AI coding assistant" site:semanticscholar.org {year}
 
+**コミュニティ・フォーラム（毎回検索）:**
+- site:news.ycombinator.com AI agent skills workflow {year}
+- site:reddit.com/r/LocalLLaMA new tools {year}
+- site:reddit.com/r/MachineLearning agent workflow {year}
+- site:reddit.com/r/ClaudeAI skills patterns {year}
+- site:reddit.com/r/programming AI coding agent {year}
+- site:lobste.rs AI agent {year}
+- site:dev.to AI agent workflow {year}
+- site:medium.com AI agent patterns {year}
+
+**パッケージ・ライブラリ動向:**
+- site:npmjs.com "claude" OR "anthropic" (新規パッケージを直接確認)
+- site:pypi.org "agent" OR "llm" (最新ライブラリを直接確認)
+- github.com/trending?l=python&since=weekly
+- github.com/trending?l=typescript&since=weekly
+- github.com/trending (全言語 weekly)
+
+**製品・サービス変更:**
+- site:anthropic.com/news {year}
+- site:openai.com/blog {year}
+- site:discord.com/channels (公開サーバー記録)
+- Product Hunt "AI agent" {year}
+- site:changelog.com AI {year}
+
+**動画・ポッドキャスト要約サイト:**
+- site:youtube.com "Claude Code tutorial" {year} (タイトルのみ)
+- site:latent.space podcast AI agent {year}
+
+**追加論文ソース:**
+- site:arxiv.org "agentic RAG" OR "tool-augmented LLM" after:{last_run_date}
+- site:arxiv.org "code agent" OR "software agent benchmark" after:{last_run_date}
+- site:huggingface.co papers "agent" after:{last_run_date}
+- site:paperswithcode.com "LLM agent" after:{last_run_date}
+
 ### Step 2: Deep dive on promising results + 参照先リンクの再帰チェック
 For each promising result found in Step 1:
 1. Fetch the full page content with WebFetch — don't rely on search snippets
 2. If it's a GitHub repo, explore the directory structure and key files
 3. If it's a blog/article, read the complete content for implementation details
-4. **参照先リンクを1段階深掘り** — 記事中の「参考文献」「関連リンク」から最大3リンクをWebFetchで確認
-5. Cross-reference: search for the same pattern/concept in other sources
-6. Check for criticism or known issues with the pattern
+4. **参照先リンクを無制限に深掘り** — 記事中の「参考文献」「関連リンク」「See also」を全件WebFetchで確認。リンク数・深さに制限なし。関連性が高い限りいくつでも追いかける。孫リンクも必要なら辿る。
+5. **GitHubリポジトリの場合**: README, CONTRIBUTING, docs/ ディレクトリ, 関連issueを全て確認
+6. Cross-reference: search for the same pattern/concept in other sources
+7. Check for criticism or known issues with the pattern
 
 ### Step 3: Evaluate against existing skills
 For each candidate pattern:
