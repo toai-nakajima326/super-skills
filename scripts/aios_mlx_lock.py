@@ -65,6 +65,62 @@ def _is_stale() -> bool:
         return False
 
 
+# PID extraction for D1 (2026-04-18). Holder-id formats we support:
+#   "self-evolve:pid-12345:cycle-abc"   -> explicit :pid-<digits> marker
+#   "locomo-eval:pid-82515"             -> explicit :pid-<digits> marker
+#   "vcontext-server:45755:1776497618489"-> second colon-token all-digits
+# Returns the PID integer, or None if no PID can be parsed
+# (e.g. task-runner's `task-runner:<uuid>` → mtime-based stale only).
+_PID_TAG_RE = re.compile(r":pid-(\d+)\b")
+
+
+def _parse_holder_pid(holder: str | None) -> int | None:
+    if not isinstance(holder, str) or not holder:
+        return None
+    m = _PID_TAG_RE.search(holder)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+    parts = holder.split(":")
+    if len(parts) >= 3 and parts[1].isdigit():
+        try:
+            return int(parts[1])
+        except ValueError:
+            return None
+    return None
+
+
+def _is_pid_dead(holder: str | None) -> bool:
+    """PID-liveness stale check (D1 2026-04-18).
+
+    ``os.kill(pid, 0)`` is a permission-free POSIX liveness probe — returns
+    None if the process exists, raises ProcessLookupError if the PID is dead.
+    Used to detect orphan locks left behind when a holder was killed
+    (SIGKILL, OOM, execFile timeout) before its ``__exit__``/``finally``
+    could run.
+
+    Returns True iff the holder's PID is provably dead. False if:
+    - holder has no parseable PID
+    - PID is alive
+    - PermissionError (process exists in another uid — treat as alive)
+    - any other unexpected error (conservative: treat as alive)
+    """
+    pid = _parse_holder_pid(holder)
+    if pid is None or pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+        return False  # alive
+    except ProcessLookupError:
+        return True   # ESRCH → dead
+    except PermissionError:
+        return False  # EPERM — process exists under another uid
+    except OSError:
+        return False  # unknown error — stay conservative
+
+
 def _parent_holds() -> bool:
     """Is the lock held by an ancestor process (via env var)?
 
@@ -80,9 +136,16 @@ def _parent_holds() -> bool:
 
 
 def _try_acquire_atomic(holder_id: str) -> bool:
-    """Atomic O_CREAT|O_EXCL|O_WRONLY acquire. True on success."""
+    """Atomic O_CREAT|O_EXCL|O_WRONLY acquire. True on success.
+
+    Stale = mtime >25 min OR holder PID is provably dead
+    (``os.kill(pid, 0)`` → ProcessLookupError). D1 (2026-04-18) added
+    the PID-liveness branch to avoid waiting the full 25-min mtime
+    window when the previous acquirer was SIGKILL'd or OOM-killed.
+    """
     if os.path.exists(MLX_LOCK_FILE):
-        if _is_stale():
+        holder = _read_holder()
+        if _is_stale() or _is_pid_dead(holder):
             try:
                 os.unlink(MLX_LOCK_FILE)
             except OSError:
@@ -149,18 +212,34 @@ def release_mlx_lock(holder_id: str) -> None:
 
 
 def mlx_lock_status() -> dict:
-    """Read-only peek. Does NOT acquire."""
+    """Read-only peek. Does NOT acquire.
+
+    D1 2026-04-18: stale = mtime >25 min OR holder PID provably dead.
+    If we detect a dead-PID holder we reclaim the lock file here so
+    observers don't have to wait for the mtime timer — the holder is
+    already gone, so there's nothing to race against.
+    """
     try:
         st = os.stat(MLX_LOCK_FILE)
     except FileNotFoundError:
-        return {"held": False, "holder": None, "age_s": 0.0, "stale": False}
+        return {"held": False, "holder": None, "age_s": 0.0,
+                "stale": False, "pid_dead": False}
     age_s = time.time() - st.st_mtime
-    stale = age_s > MLX_LOCK_STALE_S
+    mtime_stale = age_s > MLX_LOCK_STALE_S
+    holder = _read_holder()
+    pid_dead = _is_pid_dead(holder)
+    stale = mtime_stale or pid_dead
+    if pid_dead and not mtime_stale:
+        try:
+            os.unlink(MLX_LOCK_FILE)
+        except OSError:
+            pass
     return {
         "held": not stale,
-        "holder": _read_holder(),
+        "holder": holder,
         "age_s": age_s,
         "stale": stale,
+        "pid_dead": pid_dead,
     }
 
 
