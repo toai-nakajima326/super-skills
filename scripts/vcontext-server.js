@@ -2108,6 +2108,125 @@ function handleTrace(req, res) {
 }
 
 /**
+ * GET /export — Pillar 5 (Open Substrate).
+ *
+ * Portable NDJSON dump of the entry stream so users can fork / archive /
+ * migrate their AIOS to another instance (including postgres/pgvector/
+ * DuckDB backends once those drivers exist).
+ *
+ * Output shape:  one header line + one entry line per row.
+ *   Line 1: JSON meta ({aios_export_version, generated_at, schema: [cols],
+ *                       source_host, entry_count_estimate, notes})
+ *   Lines 2..N: JSON entries (id, type, content, tags, session,
+ *                             created_at, parent_id, supersedes, ...)
+ *
+ * Safety:
+ *   - Owner role only (full DB contents exposed).
+ *   - Secrets masked at output via existing maskSecrets() (also applied
+ *     to /recall, /recent) — covers sk-*, JWTs, AWS keys, etc.
+ *   - High-sensitivity types (api_keys, credentials) excluded by default;
+ *     override with ?include_sensitive=1 (logged).
+ *   - Paginated: ?since=<id>&limit=<n per page>&max_entries=<hard cap>
+ *
+ * NDJSON chosen over a single JSON blob because real DBs run to hundreds
+ * of thousands of entries — building one string OOMs on large dumps and
+ * the caller can stream parse.
+ */
+function handleExport(req, res) {
+  const auth = validateApiKey(req);
+  if (!auth.valid) return sendJson(res, 401, { error: 'Invalid API key' });
+  // Owner-only: the full corpus includes decisions, private notes,
+  // unredacted reasoning. Admin is not sufficient.
+  if (!hasRole(auth, 'owner')) {
+    return sendJson(res, 403, { error: 'Export requires owner role.' });
+  }
+
+  const url = new URL(req.url, 'http://x');
+  const sinceId = parseInt(url.searchParams.get('since') || '0', 10) || 0;
+  let pageLimit = parseInt(url.searchParams.get('limit') || '500', 10);
+  if (!Number.isFinite(pageLimit) || pageLimit < 1) pageLimit = 500;
+  if (pageLimit > 2000) pageLimit = 2000;
+  let maxEntries = parseInt(url.searchParams.get('max_entries') || '50000', 10);
+  if (!Number.isFinite(maxEntries) || maxEntries < 1) maxEntries = 50000;
+  if (maxEntries > 500000) maxEntries = 500000;
+  const includeSensitive = url.searchParams.get('include_sensitive') === '1';
+
+  // Exclude high-volume/ephemeral types by default — they bloat the dump
+  // and have no value across AIOS instances (session-scoped telemetry).
+  const EXCLUDE_TYPES = new Set([
+    'test', 'session-recall', 'working-state',
+    'anomaly-alert', 'skill-trigger',
+  ]);
+  // Hard-exclude credentials unless operator explicitly opts in.
+  if (!includeSensitive) {
+    EXCLUDE_TYPES.add('api-key');
+    EXCLUDE_TYPES.add('credential');
+  }
+
+  // Stream NDJSON. Set headers first so downstream consumers see the MIME
+  // type and the stream begins immediately for large exports.
+  res.writeHead(200, {
+    'Content-Type': 'application/x-ndjson; charset=utf-8',
+    'Cache-Control': 'no-store',
+    // Content-Disposition makes browsers offer a save-as with a sane name.
+    'Content-Disposition': `attachment; filename="aios-export-${new Date().toISOString().slice(0, 10)}.ndjson"`,
+    'X-AIOS-Export-Version': '1',
+  });
+
+  // Header line with schema + provenance
+  const schemaCols = ['id','type','content','tags','session','token_estimate','created_at','last_accessed','access_count','tier','reasoning','conditions','supersedes','confidence','status','content_hash','parent_id'];
+  const header = {
+    aios_export_version: 1,
+    generated_at: new Date().toISOString(),
+    source_host: hostname(),
+    exported_by: auth.userId || 'unknown',
+    schema: schemaCols,
+    excluded_types: Array.from(EXCLUDE_TYPES),
+    since_id: sinceId,
+    page_limit: pageLimit,
+    max_entries: maxEntries,
+    include_sensitive: includeSensitive,
+    notes: 'NDJSON. Line 1 is this header, remaining lines are entries. Secrets masked via maskSecrets() (sk-*, JWTs, AWS keys). Import by POSTing entries back via /store.',
+  };
+  res.write(JSON.stringify(header) + '\n');
+
+  let lastId = sinceId;
+  let written = 0;
+  let batches = 0;
+  // Bound to ~1000 batches as a runaway-guard (pageLimit * 1000 >= maxEntries)
+  while (written < maxEntries && batches < 1000) {
+    batches++;
+    let rows = [];
+    try {
+      rows = dbQuery(`SELECT ${schemaCols.join(', ')} FROM entries WHERE id > ${lastId} ORDER BY id ASC LIMIT ${pageLimit};`);
+    } catch (e) {
+      res.write(JSON.stringify({ __error: e.message }) + '\n');
+      break;
+    }
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      if (EXCLUDE_TYPES.has(row.type)) {
+        lastId = row.id;
+        continue;
+      }
+      try {
+        // maskSecrets walks arrays/objects recursively and scrubs known
+        // secret patterns from string fields (same helper /recall uses).
+        const masked = maskSecrets(row);
+        res.write(JSON.stringify(masked) + '\n');
+        written++;
+        lastId = row.id;
+        if (written >= maxEntries) break;
+      } catch {}
+    }
+  }
+
+  // Trailer line with totals (still valid NDJSON — each line is independent)
+  res.write(JSON.stringify({ __trailer: true, written, last_id: lastId, batches }) + '\n');
+  res.end();
+}
+
+/**
  * POST /tier/migrate — Manually trigger tier migration.
  */
 function handleTierMigrate(req, res) {
@@ -5948,6 +6067,7 @@ const ENDPOINTS_LIST = [
   'POST   /store             — store context entry (body: {type,content,tags?,session?,namespace?,group?,reasoning?,conditions?,supersedes?,confidence?,status?,parent_id?})',
   'GET    /trace/:id         — Pillar 3: causal ancestry walk via parent_id (root -> target + children)',
   'GET    /predict/next      — Pillar 4: ranked next-likely tools/skills/gaps (?session=&limit=)',
+  'GET    /export            — Pillar 5: portable NDJSON dump of entries (owner only, ?since=&limit=&max_entries=&include_sensitive=)',
   'GET    /recall?q=         — full-text search (cascading tiers, &namespace=project-name)',
   'GET    /recent?n=         — recent entries (cascading tiers, &namespace=project-name)',
   'GET    /session/:id       — session entries',
@@ -6064,6 +6184,10 @@ const server = createServer(async (req, res) => {
       // Pillar 3 — Causal ancestry walk. Returns root-to-target chain
       // via parent_id pointers plus immediate children.
       handleTrace(req, res);
+    } else if (method === 'GET' && path === '/export') {
+      // Pillar 5 — Portable NDJSON dump (owner-only). Caller can save,
+      // replay, or fork to another AIOS instance.
+      handleExport(req, res);
     } else if (method === 'GET' && path === '/otel/status') {
       // Pillar 3 diagnostic: is tracing live, what Langfuse host, what service.
       sendJson(res, 200, otelStatus());
