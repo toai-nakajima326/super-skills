@@ -18,6 +18,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { extractJson, sanitizeSkillName, assertSkillPathSafe } = require(path.join(__dirname, 'lib', 'llm-parse.cjs'));
 
 const VCONTEXT = 'http://127.0.0.1:3150';
 const SKILLS_ROOT = path.join(process.env.HOME, 'skills', 'skills');
@@ -221,15 +222,23 @@ ${existingSkills.slice(0, 80).join(', ')}
 }`;
 
   const raw = await callLLM(prompt);
-  const match = raw.match(/\{[\s\S]*\}/);
-  if (!match) return [];
-  try {
-    const parsed = JSON.parse(match[0]);
-    // confidence >= 0.5 && frequency >= 2 を採用
-    return (parsed.candidates || []).filter(c =>
-      (c.confidence || 0) >= 0.5 && (c.frequency_in_logs || 0) >= 2
-    );
-  } catch { return []; }
+  const parsed = extractJson(raw);
+  if (!parsed) return [];
+  // confidence >= 0.5 && frequency >= 2 を採用
+  const filtered = (parsed.candidates || []).filter(c =>
+    c && (c.confidence || 0) >= 0.5 && (c.frequency_in_logs || 0) >= 2
+  );
+  // Sanitize every name before it can flow into target_path / tags.
+  const safe = [];
+  for (const c of filtered) {
+    const clean = sanitizeSkillName(c.name);
+    if (!clean) {
+      console.warn(`[miner] rejected unsafe skill name: ${JSON.stringify(c.name)}`);
+      continue;
+    }
+    safe.push({ ...c, name: clean });
+  }
+  return safe;
 }
 
 // ── SKILL.md 生成 ────────────────────────────────
@@ -314,6 +323,15 @@ async function main() {
     console.log(`\n[miner] ${cand.name} (${cand.category}) conf=${cand.confidence} freq=${cand.frequency_in_logs}`);
 
     try {
+      // Defense-in-depth: even though sanitizeSkillName accepts only
+      // [a-z0-9-], assert the resolved path stays inside SKILLS_ROOT before
+      // letting this entry into the pending-patch queue.
+      try { assertSkillPathSafe(SKILLS_ROOT, cand.name); }
+      catch (e) {
+        console.error(`[miner] path escape guard triggered: ${e.message}`);
+        continue;
+      }
+
       const skillMd = await generateSkillMd(cand);
 
       if (DRY_RUN) {
