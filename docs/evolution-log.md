@@ -4,6 +4,56 @@ Auto-maintained by the `self-evolve` skill. Records all upstream syncs, web disc
 
 ---
 
+## 2026-04-18 — web-discovery + upstream-sync
+
+**Search window**: 2026-04-16 → 2026-04-18
+**Queries executed**: 8
+**New sources checked**: 14（WebFetch deep dives: 7ページ）
+**Candidates found**: 5 | **Adopted (pending-patch)**: 3 | **Skipped**: 2
+
+### Upstream Sync: 変更なし
+- **Reasoning**: `git fetch upstream` + `git log upstream/main ^HEAD --since=2026-04-16` で新規コミットなし。upstream に採用対象の変更なし。
+
+### vcontext ソース確認
+- `pending-idea`: 0件
+- `pending-patch`: 0件
+- `skill-suggestion`: 0件
+
+### Fitness スコア（weights デフォルト: novelty 0.25, proven 0.25, safe 0.20, actionable 0.20, freshness 0.10）
+
+| Candidate | novelty | proven | safe | actionable | freshness | fitness |
+|-----------|---------|--------|------|-----------|-----------|---------|
+| ultraplan | 0.95 | 0.95 | 1.00 | 0.95 | 0.85 | **0.93** |
+| autofix-pr | 0.90 | 0.90 | 0.90 | 0.90 | 0.85 | **0.89** |
+| generator-verifier | 0.75 | 0.90 | 1.00 | 0.85 | 0.70 | **0.84** |
+| message-bus-agents | 0.80 | 0.85 | 1.00 | 0.75 | 0.70 | **0.82** |
+
+### Action: pending-patch 登録 — ultraplan (fitness=0.93)
+- **Source**: 公式 Claude Code Docs, Week 15 (April 6-10, 2026) — code.claude.com/docs/en/ultraplan
+- **Reasoning**: `/ultraplan` コマンドによるクラウドプラン生成ワークフロー。既存の `plan-architecture` スキルはローカル設計プロセスをカバーするが、ultraplan はクラウドでのバックグラウンド生成・ブラウザでのセクション別インラインコメント・web/terminal の実行先選択という完全に異なるワークフロー。公式ドキュメントで実証済み、具体的コマンド付き。
+- **vcontext id**: 129030
+- **Risk assessment**: low — 新スキル、既存スキルへの変更なし
+
+### Action: pending-patch 登録 — autofix-pr (fitness=0.89)
+- **Source**: 公式 Claude Code Docs, Week 15 (April 6-10, 2026) — code.claude.com/docs/en/claude-code-on-the-web#auto-fix-pull-requests
+- **Reasoning**: `/autofix-pr` コマンドによる自律的PRクローズループ。クラウドエージェントが CI 失敗とレビューコメントを監視し続け、修正コミットを自動プッシュする。既存45スキルに不在。マージ前の手動 CI 修正サイクルを自動化する実用的なワークフロー。
+- **vcontext id**: 129033
+- **Risk assessment**: low — 新スキル、ブランチへのコミットは自動だが review 前にユーザーが確認可能
+
+### Action: pending-patch 登録 — generator-verifier (fitness=0.84)
+- **Source**: Anthropic 公式ブログ "Multi-agent coordination patterns" (claude.com/blog/multi-agent-coordination-patterns) + Beam AI "9 Agentic Workflow Patterns 2026"
+- **Reasoning**: 生成→検証→フィードバックループの品質保証パターン。`adversarial-review` との差別化: adversarial-review は既存コードへの悪意ある検証、generator-verifier は新規出力の基準適合ループ。2つ以上の独立ソースで確認済み。コード生成・コンプライアンスコンテンツ・API レスポンス等に応用可能。
+- **vcontext id**: 129036
+- **Risk assessment**: low — 新スキル、既存スキルへの変更なし
+
+### Skipped: message-bus-agents (fitness=0.82)
+- **Reasoning**: Anthropic 公式ブログで5パターンの一つとして確認。ただし、具体的な実装ステップが `supervisor-worker` パターンとの差別化に不十分。イベントバス/パブサブ基盤の実装詳細を含む独立したワークフローとして成立させるにはさらなる情報源が必要。次サイクルで再評価。
+
+### Skipped: ultrareview (fitness計測外)
+- **Reasoning**: 4/16 以前に Week 14 でリリース済み (v2.1.86)。フレッシュネス条件（2026-04-16以降）を満たさないため対象外。
+
+---
+
 ## 2026-04-17 (PM) — self-improvement: stability + performance + naming
 
 **Type**: self-improvement (interactive session, 34 commits)
