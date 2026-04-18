@@ -983,6 +983,13 @@ function migrateRamToSsd() {
   // supersedes had weird values). Batches in a transaction for speed.
   try {
     if (!ramDb || !ssdDb) return 0;
+    // Post 2-DB merge this function becomes a pure no-op: primary and
+    // archive point at the same file so moving rows between them is
+    // both unnecessary and dangerous (self-delete). Guard added
+    // 2026-04-18 as a forward-compat safety net — the merge spec
+    // (docs/analysis/2026-04-18-db-merge-spec.md) depends on this
+    // behaviour being in place BEFORE paths are unified.
+    if (DB_PATH === SSD_DB_PATH) return 0;
     const staleRows = ramDb.prepare(
       `SELECT id, type, content, tags, session, token_estimate, created_at, last_accessed, access_count, reasoning, conditions, supersedes, confidence, status, content_hash FROM entries WHERE last_accessed < datetime('now', ?) ORDER BY last_accessed ASC LIMIT 500;`
     ).all(`-${RAM_TO_SSD_DAYS} days`);
