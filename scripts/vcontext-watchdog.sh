@@ -159,8 +159,14 @@ while true; do
   if [[ -n "$RAM_USED_PCT" ]]; then
     if [[ "$RAM_USED_PCT" -ge $RAM_CRIT_PCT ]]; then
       log "RAM DISK CRITICAL: ${RAM_USED_PCT}% used — emergency cleanup"
-      # Remove any corrupt DB backups
+      # Remove any corrupt DB backups. Two patterns are possible:
+      #   * vcontext-corrupt-*.db             (original checkAndRecoverDb format)
+      #   * vcontext.db.corrupted-YYYYMMDD-HHMM (format observed 2026-04-18 —
+      #     a 2.6GB leftover filled 98% of the 6GB RAM disk, cascading into
+      #     WAL-write failures → DB corruption → new corrupted copy → loop)
       rm -f /Volumes/VContext/vcontext-corrupt-*.db 2>/dev/null
+      rm -f /Volumes/VContext/vcontext.db.corrupted-* 2>/dev/null
+      rm -f /Volumes/VContext/vcontext*corrupt*.db 2>/dev/null
       # Force WAL checkpoint to flush and shrink
       sqlite3 /Volumes/VContext/vcontext.db "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null
       osascript -e "display notification \"RAM disk ${RAM_USED_PCT}% — emergency cleanup\" with title \"🚨 vcontext CRITICAL\"" 2>/dev/null

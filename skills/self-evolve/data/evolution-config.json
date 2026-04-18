@@ -1,0 +1,38 @@
+{
+  "_comment": "Self-evolve fitness weights and cycle toggles. Edit in place; changes pick up on next cycle. Each cycle logs the exact weight vector it used in docs/evolution-log.md for reversibility.",
+  "version": 1,
+  "last_updated": "2026-04-18",
+  "weights": {
+    "w1_adoption_rate": 0.25,
+    "w2_triggered_change_rate": 0.25,
+    "w3_reduced_error_rate": 0.20,
+    "w4_user_approval_rate": 0.20,
+    "w5_freshness": 0.10,
+    "_sum_should_equal_1": 1.0
+  },
+  "bias_source": {
+    "upstream_sync": 0.05,
+    "article_scanner_high_confidence": 0.03,
+    "skill_discovery": 0.02,
+    "self_improve": 0.02,
+    "web_search": 0.0
+  },
+  "cycle": {
+    "schedule_weekday": 0,
+    "schedule_hour": 7,
+    "schedule_minute": 0,
+    "top_k_mutations_per_cycle": 3,
+    "freshness_halflife_days": 90,
+    "approval_prior_when_no_history": 0.5
+  },
+  "gates": {
+    "locomo_gate_enabled": false,
+    "locomo_max_regression_pct": 2.0,
+    "validate_before_pending_patch": true,
+    "safety_skills_protected": ["guard", "freeze", "careful", "checkpoint"]
+  },
+  "observation_mode": {
+    "_comment": "When true, cycle runs Gather+Score+Log but skips Mutate/Validate/Apply. Useful for dry-run tuning.",
+    "enabled": false
+  }
+}

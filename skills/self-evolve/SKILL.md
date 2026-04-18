@@ -1,18 +1,128 @@
 ---
 name: self-evolve
-description: "Use when scheduled or manually triggered to auto-update skills from upstream, discover new patterns via web search, and autonomously evolve the skill framework."
+description: "Use when scheduled (weekly Sun 07:00) or manually triggered to evolve the skill framework: gather candidates from 5 input streams (upstream sync, web discovery, pending-idea, pending-patch, skill-suggestion), score by fitness function, emit top-K ranked pending-patches for human approval. Pillar 2 core loop."
 origin: unified
 ---
 
 ## Rules
 
 1. **Autonomy with accountability**: Make adoption decisions independently, but always log reasoning.
-2. **Safety first**: Never auto-adopt skills that weaken safety (guard, freeze, careful) or override quality gates.
+2. **Safety first**: Never auto-adopt skills that weaken safety (guard, freeze, careful, checkpoint) or override quality gates.
 3. **Non-destructive**: Always create a checkpoint before applying changes. Rollback if build/validate fails.
 4. **Transparency**: Every change must be logged with what changed, why, and source.
 5. **No silent failures**: If update fails, log the failure and notify user on next session.
 6. **Thoroughness over speed**: Take as much time as needed. Deep investigation is preferred over quick scans.
 7. **Freshness tracking**: Always check `docs/evolution-log.md` for the last run date. All searches must use date filters to find content published AFTER the last run. Never re-evaluate already-seen sources.
+8. **Fitness-driven selection**: Score every candidate via the function in section "Fitness Function" (weights in `data/evolution-config.json`). Only top-K (default 3) candidates per cycle emit `pending-patch` entries. No bulk edits.
+9. **Approval gate untouched**: All mutations land as `pending-patch` entries in vcontext. Dashboard approve/reject remains the only path to actually modifying a SKILL.md file. Do not bypass this gate.
+10. **Cycle idempotency**: Each weekly run produces exactly one `evolution-digest` entry keyed on `cycle_id = YYYY-WW`. Re-running the same week dedupes.
+
+## Workflow — Evolution Cycle (weekly Sun 07:00 JST)
+
+This is the new top-level workflow introduced for Pillar 2. It sequences the
+three legacy sub-workflows (Upstream Sync, Web Discovery, Self-Improvement)
+under a unified scoring pass. Run by `com.vcontext.self-evolve` LaunchAgent
+or manually via `node skills/self-evolve/scripts/self-evolve.js`.
+
+### Phase (a) — Gather
+
+Collect candidates from five input streams. Every candidate carries
+`{source, target_skill, proposed_content, created_at, confidence}`.
+
+1. **Upstream sync** — `git log --since=<last_run>` from the upstream repo; each
+   changed SKILL.md becomes a candidate (source = `upstream_sync`).
+2. **Web discovery** — the existing Web Discovery sub-workflow produces 0..N
+   candidates (source = `web_search`).
+3. **article-scanner `pending-idea`** — `GET /recall?type=pending-idea&after=<last_run>`.
+   Each row where `score >= 7` becomes a candidate (source = `article_scanner_high_confidence`).
+4. **self-improve `pending-patch`** — `GET /admin/pending-patches`. Un-acted
+   entries become candidates (source = `self_improve`). Note: these are already
+   in the approval queue; here they pick up a fitness score for ranking within
+   the dashboard.
+5. **discovery-loop `skill-suggestion`** — `GET /recall?type=skill-suggestion&after=<last_run>`
+   (source = `skill_discovery`).
+
+### Phase (b) — Score
+
+For each candidate compute `fitness(candidate)` per section "Fitness Function".
+Weights come from `data/evolution-config.json`. Log the full component
+breakdown per candidate to `evolution-log.md`.
+
+### Phase (c) — Mutate
+
+Take top-K candidates (default `top_k_mutations_per_cycle = 3`). For each,
+generate the proposed new SKILL.md text via `skill-creator` (do not edit files
+yet). If `observation_mode.enabled = true`, skip to Phase (f).
+
+### Phase (d) — Validate
+
+Run `npm run validate` and `npm run build` against the proposed text in a
+temp worktree. Additionally:
+- Verify no rule removed from any skill in `gates.safety_skills_protected`.
+- If `gates.locomo_gate_enabled = true`, run LoCoMo eval and reject candidates
+  regressing by more than `locomo_max_regression_pct`.
+
+Drop any candidate that fails; continue with survivors.
+
+### Phase (e) — Apply
+
+For each surviving candidate, `POST /store` a `pending-patch` entry:
+
+```json
+{
+  "type": "pending-patch",
+  "tags": ["pending-patch", "source:<source>", "target:<skill>"],
+  "content": {
+    "target_path": "skills/<name>/SKILL.md",
+    "proposed_content": "...",
+    "fitness": <score>,
+    "components": { "w1": ..., "w2": ..., ... },
+    "cycle_id": "<YYYY-WW>",
+    "reasoning": "..."
+  }
+}
+```
+
+The dashboard approve/reject surface handles the actual file write. Self-evolve
+**does not** modify any SKILL.md directly.
+
+### Phase (f) — Log
+
+Append a block to `docs/evolution-log.md` covering: cycle_id, weights used,
+candidate counts per source, top-K fitness scores, decisions. Also write a
+single `evolution-digest` entry to vcontext (keyed on `cycle_id`, dedupes if
+re-run).
+
+---
+
+## Fitness Function
+
+```
+fitness(candidate) = w1 * adoption_rate
+                   + w2 * triggered_change_rate    # tokium pain->structure
+                   + w3 * reduced_error_rate
+                   + w4 * user_approval_rate
+                   + w5 * freshness                # exp(-age_days / halflife)
+                   + bias_source(candidate.source)
+```
+
+All components clamped to `[0, 1]`. Weights live in
+`data/evolution-config.json` (default: `0.25, 0.25, 0.20, 0.20, 0.10`).
+
+Measurement (concrete vcontext queries):
+
+| Component | How computed |
+|---|---|
+| `adoption_rate` | `count(skill-usage, skill=X, 30d) / count(eligible-sessions, skill=X, 30d)` |
+| `triggered_change_rate` | For each skill-usage event in 30d, look forward 24h for any `skill-diff` / `pending-patch` / `chunk-summary` on the same target. Fraction positive. |
+| `reduced_error_rate` | `(err(30d..60d) - err(0..30d)) / max(1, err(30d..60d))`, clamped |
+| `user_approval_rate` | `approve(X) / (approve(X) + reject(X))`; prior 0.5 when zero history |
+| `freshness` | `exp(-age_days / freshness_halflife_days)` from `created_at` or last SKILL.md edit |
+| `bias_source` | Small additive per `bias_source` table in config |
+
+Design reference: `docs/analysis/2026-04-18-self-evolve-redesign.md` section 4.
+
+---
 
 ## Workflow — Upstream Sync
 
