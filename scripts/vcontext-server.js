@@ -844,6 +844,35 @@ function checkDbSize() {
 }
 
 // ── Backup ─────────────────────────────────────────────────────
+// Verify a freshly-written SQLite file before promoting it through the
+// rename chain. Guards against the bug observed 2026-04-18 where a
+// truncated .sqlite was silently rotated into the .bak safety slot,
+// destroying the last known-good copy. See docs/spec/2026-04-18-
+// dobackup-integrity-check.md.
+function verifyBackupFile(path) {
+  try {
+    if (!existsSync(path)) return false;
+    const rows = dbQuery('PRAGMA integrity_check;', path);
+    return !!(rows && rows[0] && rows[0].integrity_check === 'ok');
+  } catch {
+    return false;
+  }
+}
+
+function emitBackupIntegrityAlert(file, reason) {
+  try {
+    const content = JSON.stringify({
+      alerts: [{
+        kind: 'backup-integrity-fail',
+        file,
+        reason,
+        detected_at: new Date().toISOString(),
+      }],
+    });
+    dbExec(`INSERT INTO entries (type, content, tags, session, token_estimate, last_accessed, access_count, tier) VALUES ('anomaly-alert', ${esc(content)}, '["anomaly-alert","backup-integrity","auto"]', 'system', ${estimateTokens(content)}, datetime('now'), 0, 'ram');`);
+  } catch {}
+}
+
 function doBackup() {
   try {
     mkdirSync(BACKUP_DIR, { recursive: true });
@@ -859,9 +888,27 @@ function doBackup() {
         .then(() => {
           try {
             const fsMod = require('node:fs');
-            // Keep previous as .bak for one-shot manual recovery
+            // AC1: verify the tmp before letting it anywhere near .sqlite
+            if (!verifyBackupFile(tmpPath)) {
+              console.warn('[vcontext] integrity_check failed on', tmpPath, '- aborting rotation, keeping .sqlite/.bak intact');
+              emitBackupIntegrityAlert(tmpPath, 'integrity_check failed on freshly-written tmp');
+              try { fsMod.unlinkSync(tmpPath); } catch {}
+              return;
+            }
+            // AC2: verify the current .sqlite before promoting it to .bak.
+            // If it's corrupt we keep the existing .bak untouched (it's
+            // the last known-good safety copy) and just overwrite .sqlite
+            // with the fresh verified tmp.
             if (existsSync(BACKUP_PATH)) {
-              try { fsMod.renameSync(BACKUP_PATH, BACKUP_PATH + '.bak'); } catch {}
+              if (verifyBackupFile(BACKUP_PATH)) {
+                try { fsMod.renameSync(BACKUP_PATH, BACKUP_PATH + '.bak'); } catch {}
+              } else {
+                console.warn('[vcontext] current .sqlite is corrupt - skipping .bak rotation to preserve last-good copy');
+                emitBackupIntegrityAlert(BACKUP_PATH, 'integrity_check failed on current .sqlite; .bak rotation skipped');
+                // Drop the corrupt .sqlite; the fresh tmp is about to
+                // replace it. .bak stays put.
+                try { fsMod.unlinkSync(BACKUP_PATH); } catch {}
+              }
             }
             fsMod.renameSync(tmpPath, BACKUP_PATH);
             console.log(`[vcontext] Backup complete: ${BACKUP_PATH}`);
@@ -872,9 +919,17 @@ function doBackup() {
         .catch((err) => {
           console.error('[vcontext] Async backup failed:', err.message);
           try { require('node:fs').unlinkSync(tmpPath); } catch {}
-          // Direct file copy fallback — still use the tmp+rename pattern
+          // Direct file copy fallback — still use the tmp+rename pattern.
+          // Same integrity gate applies: file copy can also produce a
+          // truncated image if the source DB was being written mid-copy.
           try {
             copyFileSync(DB_PATH, tmpPath);
+            if (!verifyBackupFile(tmpPath)) {
+              console.warn('[vcontext] integrity_check failed on fallback copy', tmpPath, '- aborting rotation');
+              emitBackupIntegrityAlert(tmpPath, 'integrity_check failed on fallback file-copy tmp');
+              try { require('node:fs').unlinkSync(tmpPath); } catch {}
+              return;
+            }
             require('node:fs').renameSync(tmpPath, BACKUP_PATH);
             console.log('[vcontext] Backup (file copy fallback) complete');
           } catch (e2) {
