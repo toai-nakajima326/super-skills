@@ -1681,8 +1681,14 @@ async function handleUserPrompt() {
   const input = await readStdin();
   const sessionId = extractSessionId(input);
 
-  // 1. Record
-  await recordEvent('user-prompt');
+  // 1. Record. Pass pre-read input to recordEvent — otherwise it calls
+  // readStdin() a second time on the already-ended stdin stream, gets
+  // empty string, and bails at its `if (!input) return;` guard.
+  // That silent early-return was the root cause of skill-usage writes
+  // (embedded in recordEvent's user-prompt branch at L1397) never landing
+  // in the DB — pipeline-health skill-routing RED since 2026-04-16
+  // when handleUserPrompt was split from the subagent handler (78714cb).
+  await recordEvent('user-prompt', input);
 
   // 2. Parse prompt
   let prompt = '';
