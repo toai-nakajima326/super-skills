@@ -1,15 +1,24 @@
 #!/bin/bash
-# vcontext-setup.sh — RAM disk lifecycle for Virtual Context
+# vcontext-setup.sh — storage lifecycle for Virtual Context
 # Usage: ./scripts/vcontext-setup.sh {start|stop|status}
 #
-# Creates a 4GB APFS RAM disk at /Volumes/VContext with a SQLite + FTS5
-# database for Claude Code's virtual memory system.
+# 2026-04-18: primary DB moved from 18 GB APFS RAM disk to internal NVMe
+# SSD.  Per owner: "RAM diskは、SSDにしましょう、ただしSSD用のバッファー
+# でとして1GBならOKですよ、必要ならの話です" — default is now SSD-only.
+# Set VCONTEXT_USE_RAMDISK=1 to re-enable the 18 GB RAM-disk mount (e.g.
+# for revert).  VCONTEXT_DB_PATH overrides the DB file location.
 
 set -euo pipefail
 
+USE_RAMDISK="${VCONTEXT_USE_RAMDISK:-}"
 MOUNT_POINT="/Volumes/VContext"
-DB_PATH="${MOUNT_POINT}/vcontext.db"
 BACKUP_DIR="${HOME}/skills/data"
+if [[ "${USE_RAMDISK}" == "1" ]]; then
+  DEFAULT_DB_PATH="${MOUNT_POINT}/vcontext.db"
+else
+  DEFAULT_DB_PATH="${BACKUP_DIR}/vcontext-primary.sqlite"
+fi
+DB_PATH="${VCONTEXT_DB_PATH:-${DEFAULT_DB_PATH}}"
 BACKUP_PATH="${BACKUP_DIR}/vcontext-backup.sqlite"
 RAM_BLOCKS=37748736  # 18GB in 512-byte blocks (4 → 6 → 12 → 18 — 18GB (50% of 36GB system RAM) keeps vcontext/vec/WAL + corrupted-copy headroom comfortable; "他はスワップで良し" per owner 2026-04-18)
 PLIST_LABEL="com.vcontext.ramdisk"

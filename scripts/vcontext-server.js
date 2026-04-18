@@ -53,9 +53,26 @@ const require = createRequire(import.meta.url);
 
 // ── Configuration ──────────────────────────────────────────────
 const PORT = parseInt(process.env.VCONTEXT_PORT || '3150', 10);
+// 2026-04-18: primary DB migrated from 18 GB RAM disk to internal NVMe SSD.
+// Per owner: "RAM diskは、SSDにしましょう、ただしSSD用のバッファーでとして
+// 1GBならOKですよ、必要ならの話です" — ship SSD-only first, add 1 GB
+// write buffer later only if p95 write latency regresses.
+// MOUNT_POINT is retained for /Volumes/VContext compat paths (dashboard
+// ramdisk-stats endpoint, hooks.js path allowlist) but is no longer
+// required to exist. DB_PATH / VEC_DB_PATH honor env overrides so we
+// can revert to RAM-disk mode by setting VCONTEXT_USE_RAMDISK=1 +
+// VCONTEXT_DB_PATH=/Volumes/VContext/vcontext.db if needed.
+const USE_RAMDISK = process.env.VCONTEXT_USE_RAMDISK === '1';
 const MOUNT_POINT = '/Volumes/VContext';
-const DB_PATH = join(MOUNT_POINT, 'vcontext.db');
 const BACKUP_DIR = join(process.env.HOME, 'skills', 'data');
+const DEFAULT_DB_PATH = USE_RAMDISK
+  ? join(MOUNT_POINT, 'vcontext.db')
+  : join(BACKUP_DIR, 'vcontext-primary.sqlite');
+const DB_PATH = process.env.VCONTEXT_DB_PATH || DEFAULT_DB_PATH;
+const DEFAULT_VEC_DB_PATH = USE_RAMDISK
+  ? join(MOUNT_POINT, 'vcontext-vec.db')
+  : join(BACKUP_DIR, 'vcontext-vec.db');
+const VEC_DB_PATH = process.env.VCONTEXT_VEC_DB_PATH || DEFAULT_VEC_DB_PATH;
 const BACKUP_PATH = join(BACKUP_DIR, 'vcontext-backup.sqlite');
 const SSD_DB_PATH = join(BACKUP_DIR, 'vcontext-ssd.db');
 const ENTRIES_WAL_PATH = join(BACKUP_DIR, 'entries-wal.jsonl'); // SQLite-independent append-only log
@@ -481,14 +498,18 @@ function dbQuery(sql, dbPath = DB_PATH) {
 
 // esc() and ftsQuery() moved to ./lib/vcontext-utils.js (2026-04-17 refactor)
 
-// ── RAM disk check ─────────────────────────────────────────────
+// ── Storage readiness check (was: RAM disk check) ─────────────
+// 2026-04-18: primary DB is now on SSD by default; the RAM disk mount
+// is only required when VCONTEXT_USE_RAMDISK=1.  In SSD mode we only
+// need the DB file to exist (or be creatable via setup.sh's init_db).
 function ensureRamDisk() {
-  if (!existsSync(MOUNT_POINT)) {
+  if (USE_RAMDISK && !existsSync(MOUNT_POINT)) {
     console.log('[vcontext] RAM disk not mounted, attempting to create...');
     try {
       execSync(`bash "${join(process.env.HOME, 'skills', 'scripts', 'vcontext-setup.sh')}" start`, {
         timeout: 30000,
         stdio: 'inherit',
+        env: { ...process.env, VCONTEXT_USE_RAMDISK: '1' },
       });
     } catch (e) {
       console.error('[vcontext] Failed to create RAM disk:', e.message);
@@ -496,11 +517,13 @@ function ensureRamDisk() {
     }
   }
   if (!existsSync(DB_PATH)) {
-    console.log('[vcontext] Database not found, initializing...');
+    console.log('[vcontext] Database not found at', DB_PATH, '— initializing...');
     try {
+      // setup.sh reads VCONTEXT_DB_PATH / VCONTEXT_USE_RAMDISK env.
       execSync(`bash "${join(process.env.HOME, 'skills', 'scripts', 'vcontext-setup.sh')}" start`, {
         timeout: 30000,
         stdio: 'inherit',
+        env: { ...process.env, VCONTEXT_DB_PATH: DB_PATH, VCONTEXT_USE_RAMDISK: USE_RAMDISK ? '1' : '' },
       });
     } catch (e) {
       console.error('[vcontext] Failed to init database:', e.message);
@@ -3283,7 +3306,15 @@ async function startEmbedLoop() {
           // generate+embed concurrency is safe. If a future incident
           // shows embed+generate pairing ALSO OOMs, wrap this call in
           // aios-mlx-lock too (docs/analysis/2026-04-18-embed-backlog).
-          embeddings = await _mlxEmbedBatchRaw(rows.map(r => String(r.content).slice(0, 1000)));
+          //
+          // sanitizeEmbedText strips lone UTF-16 surrogates introduced
+          // when .slice(0, 1000) cuts between a surrogate pair. A single
+          // poisoned row would otherwise pin the loop forever: MLX
+          // (Python) rejects lone surrogates as 400, the whole batch
+          // fails, the loop retries the SAME DESC rows at 10 req/s
+          // (2026-04-18 incident — embed pace fell to 0 emb/s while
+          //  /store path at ~0.2 emb/s kept backlog growing).
+          embeddings = await _mlxEmbedBatchRaw(rows.map(r => sanitizeEmbedText(String(r.content).slice(0, 1000))));
         } catch (e) {
           console.log(`[embed-loop] batch failed (${rows.length} rows): ${e.message}`);
         }
@@ -4625,7 +4656,7 @@ function initVecDb() {
 
     const Database = require('better-sqlite3');
     const sqliteVec = require('sqlite-vec');
-    vecDb = new Database(join(MOUNT_POINT, 'vcontext-vec.db'));
+    vecDb = new Database(VEC_DB_PATH);
     sqliteVec.load(vecDb);
     vecDb.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS vec_entries USING vec0(embedding float[${EMBED_DIM}])`);
     console.log(`[sqlite-vec] Loaded — dim=${EMBED_DIM}, fast vector search enabled`);
@@ -4770,6 +4801,19 @@ async function checkMlx() {
  */
 const MLX_DEFAULT_MODEL = process.env.MLX_EMBED_MODEL || 'mlx-community/Qwen3-Embedding-8B-4bit-DWQ';
 
+// Strip lone UTF-16 surrogates. .slice(0, N) on a string containing emoji
+// or other astral-plane chars can split a surrogate pair at position N-1,
+// leaving a high-surrogate without its low pair. Node's http body
+// serializes via UTF-8, and Python's json (in MLX embed server) rejects
+// lone surrogates as "surrogates not allowed" → 400, which poisons the
+// whole batch (see 2026-04-18 embed-backlog incident).
+function sanitizeEmbedText(s) {
+  if (!s) return s;
+  // Drop any unpaired high (D800-DBFF) or low (DC00-DFFF) surrogate.
+  // Regex: \p{Surrogate} requires u flag; simpler: keep valid BMP + valid pairs.
+  return s.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
+}
+
 // Mutex for MLX embed — prevents GPU contention between embed loop and inline store
 let _mlxEmbedLock = Promise.resolve();
 function withMlxLock(fn) {
@@ -4781,7 +4825,7 @@ function withMlxLock(fn) {
 
 function _mlxEmbedRaw(text) {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ model: MLX_DEFAULT_MODEL, prompt: text });
+    const body = JSON.stringify({ model: MLX_DEFAULT_MODEL, prompt: sanitizeEmbedText(text) });
     const parsed = new URL(`${MLX_EMBED_URL}/api/embeddings`);
     const req = httpRequest(parsed, {
       method: 'POST',
@@ -4848,7 +4892,7 @@ async function mlxEmbedFast(text, timeoutMs = 2000) {
 // Batch embed via /embed_batch (10x throughput vs single calls)
 function _mlxEmbedBatchRaw(texts) {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ texts, model: MLX_DEFAULT_MODEL, normalize: true });
+    const body = JSON.stringify({ texts: texts.map(sanitizeEmbedText), model: MLX_DEFAULT_MODEL, normalize: true });
     const parsed = new URL(`${MLX_EMBED_URL}/embed_batch`);
     const req = httpRequest(parsed, {
       method: 'POST',
@@ -6678,8 +6722,20 @@ const server = createServer(async (req, res) => {
       // root cause (98% fill → WAL write fail → DB corruption loop) as a
       // proactive dashboard metric. Thresholds mirror vcontext-watchdog.sh:
       // 80% warn, 95% critical.
+      // 2026-04-18 (post RAM→SSD migration): when no RAM disk is mounted
+      // (SSD-only mode), return status='disabled' so the dashboard can
+      // render the card as "N/A" instead of a red error.
       try {
         const mountPoint = '/Volumes/VContext';
+        if (!existsSync(mountPoint)) {
+          sendJson(res, 200, {
+            mount: mountPoint,
+            enabled: false,
+            status: 'disabled',
+            reason: 'ramdisk not mounted (SSD-only mode)',
+          });
+          return;
+        }
         // `df -k` output: Filesystem 1K-blocks Used Avail Capacity ...
         const df = execFileSync('/bin/df', ['-k', mountPoint], { encoding: 'utf-8' });
         const lines = df.trim().split('\n');
