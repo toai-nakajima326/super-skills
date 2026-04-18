@@ -37,6 +37,12 @@ import { execSync, execFileSync } from 'node:child_process';
 import { existsSync, statSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+// Cross-process MLX coordination — shared /tmp/aios-mlx-lock also honored
+// by aios-task-runner.js, scripts/locomo-eval.py, skills/self-evolve/
+// scripts/self-evolve.js, and any agent-invoked adhoc script.
+import { tryMlxLock as _fileTryMlxLock,
+         releaseMlxLock as _fileReleaseMlxLock,
+         mlxLockStatus as _fileMlxLockStatus } from './aios-mlx-lock.js';
 // Pure utilities extracted 2026-04-17 as a refactor proof — same impl,
 // just in a module so it's easier to test and reuse. See lib/vcontext-utils.js.
 import { esc, ftsQuery, estimateTokens, parseTags } from './lib/vcontext-utils.js';
@@ -3269,6 +3275,14 @@ async function startEmbedLoop() {
           // chained on _mlxEmbedLock, which blocks this background
           // loop for minutes at a time. MLX embed HTTP server handles
           // its own queue. Same fix as mlxEmbedFast.
+          //
+          // Also bypasses the /tmp/aios-mlx-lock file lock: that lock
+          // serializes generate (port 3162, ~8GB Qwen3-8B-4bit) callers
+          // which was the 2026-04-18 OOM trigger. Embed runs on the
+          // independent :3161 server with a smaller 4-5GB model, so
+          // generate+embed concurrency is safe. If a future incident
+          // shows embed+generate pairing ALSO OOMs, wrap this call in
+          // aios-mlx-lock too (docs/analysis/2026-04-18-embed-backlog).
           embeddings = await _mlxEmbedBatchRaw(rows.map(r => String(r.content).slice(0, 1000)));
         } catch (e) {
           console.log(`[embed-loop] batch failed (${rows.length} rows): ${e.message}`);
@@ -4640,11 +4654,42 @@ function vecSearch(queryEmbedding, limit = 10) {
 function vecSync() {
   if (!vecDb) return;
   try {
-    // Find entries with embeddings not yet in vec_entries (handles gaps + new)
-    const vecIds = new Set(vecDb.prepare('SELECT rowid FROM vec_entries').pluck().all());
-    const rows = dbQuery(`SELECT id, embedding FROM entries WHERE embedding IS NOT NULL ORDER BY id;`)
-      .filter(r => !vecIds.has(r.id))
-      .slice(0, 1000);
+    // MEMORY FIX (2026-04-18): prior impl did
+    //   SELECT id, embedding FROM entries WHERE embedding IS NOT NULL ORDER BY id;
+    //   .filter(r => !vecIds.has(r.id))
+    //   .slice(0, 1000);
+    // — which loaded ALL ~37k embedding JSON strings (~2.6 GB of raw bytes,
+    // ~2.5 GB heap after V8 string materialization) on every invocation.
+    // vecSync() runs every 300s inside doBackupAndMigrate(), so the peak
+    // RSS spiked by ~1.5 GB every cycle and was the primary driver of the
+    // 21 GB wired-memory peak + repeated OOM-kills (exit 137) seen today.
+    //
+    // Empirical probe (2026-04-18, /tmp/vcontext-memprobe.js, same dataset):
+    //   rows=37294  rss 48→1520 MB  heap 3.7→2501 MB  query_ms=13880
+    //
+    // New strategy: do the set-difference in SQLite itself so we only
+    // fetch the IDs that actually need syncing, then fetch the embedding
+    // column in a small batch. ATTACH is not available here (vecDb is a
+    // separate better-sqlite3 handle), so we use a two-step: pull missing
+    // IDs (int list, tiny memory), then SELECT embeddings by id.
+    const BATCH = 1000;
+    // Step 1: collect rowids already in vec_entries as an int array.
+    // ~37k ints ≈ 300 KB in V8 Set vs 2.5 GB for the embedding strings.
+    const haveIds = vecDb.prepare('SELECT rowid FROM vec_entries').pluck().all();
+    const haveSet = new Set(haveIds);
+    // Step 2: find entry IDs (id-only, no content/embedding columns) that
+    // have an embedding but aren't yet in vec_entries. SQLite does the
+    // NOT-IN check; JS only keeps ~N ints.
+    const candidateIds = dbQuery(
+      `SELECT id FROM entries WHERE embedding IS NOT NULL ORDER BY id;`
+    ).map(r => r.id).filter(id => !haveSet.has(id)).slice(0, BATCH);
+    if (candidateIds.length === 0) return;
+    // Step 3: fetch embedding strings ONLY for the batch we'll actually
+    // insert. Worst case = 1000 × ~42 KB = ~42 MB, which is bounded.
+    const idList = candidateIds.join(',');
+    const rows = dbQuery(
+      `SELECT id, embedding FROM entries WHERE id IN (${idList});`
+    );
     let synced = 0;
     for (const row of rows) {
       try {
@@ -4657,7 +4702,9 @@ function vecSync() {
       } catch {}
     }
     if (synced > 0) console.log(`[sqlite-vec] Synced ${synced} vectors`);
-  } catch {}
+  } catch (e) {
+    console.error('[sqlite-vec] vecSync failed:', e.message?.slice(0, 120));
+  }
 }
 
 // ── MLX Embedding Server (Apple Silicon GPU-accelerated) ──────
@@ -4957,6 +5004,19 @@ const MLX_PRIORITY = { high: 0, normal: 1, low: 2 };
 const _mlxQueue = [];      // { resolve, reject, fn, priority }
 let _mlxRunning = false;
 
+// Per-item cross-process lock wait cap. Server-side generate is mostly
+// background loops (chunk-summary, predict, skill-suggestion) that can
+// afford to wait for a quick external caller; but if an agent's LoCoMo
+// run takes the full 20 min we'd rather skip this loop tick than hang
+// the queue forever. 5 min is the sweet spot — longer than any single
+// external call but short enough that /ai/summarize (user-facing) can
+// fail gracefully.
+const _MLX_FILE_LOCK_WAIT_MS = 5 * 60 * 1000;
+const _MLX_FILE_LOCK_HOLDER_PREFIX = `vcontext-server:${process.pid}`;
+let _mlxFileLockSkips = 0;
+let _mlxFileLockHoldMs = 0;
+let _lastMlxFileLockLogAt = 0;
+
 async function _mlxDrain() {
   if (_mlxRunning) return;
   _mlxRunning = true;
@@ -4964,11 +5024,42 @@ async function _mlxDrain() {
     // Sort by priority (stable: same-priority preserves insertion order)
     _mlxQueue.sort((a, b) => a.priority - b.priority);
     const item = _mlxQueue.shift();
+    // ── Cross-process MLX lock handshake ─────────────────────
+    // Before running the item, acquire /tmp/aios-mlx-lock. If an external
+    // actor (task-runner, agent, locomo-eval, self-evolve) holds it, wait
+    // up to _MLX_FILE_LOCK_WAIT_MS and then reject the item with a clear
+    // error. Rejecting lets the caller decide (background loops retry
+    // next tick; user-facing endpoints degrade gracefully).
+    const holderId = `${_MLX_FILE_LOCK_HOLDER_PREFIX}:${Date.now()}`;
+    const tAcq = Date.now();
+    let acquired = false;
+    try {
+      acquired = await _fileTryMlxLock(holderId, { waitMs: _MLX_FILE_LOCK_WAIT_MS });
+    } catch (e) {
+      // Filesystem errors shouldn't crash the queue; log and fall through
+      // as "not acquired" so the item gets a clean rejection.
+      console.error('[mlx-lock] acquire error (non-fatal):', (e && e.message) || e);
+    }
+    if (!acquired) {
+      _mlxFileLockSkips++;
+      // Throttled logging — once every 5 min to avoid log spam when an
+      // agent is holding the lock for the full window.
+      if (Date.now() - _lastMlxFileLockLogAt > 5 * 60 * 1000) {
+        const status = _fileMlxLockStatus();
+        console.log(`[mlx-lock] yielding to external holder=${status.holder || '?'} age=${Math.round(status.ageMs/1000)}s (skip #${_mlxFileLockSkips})`);
+        _lastMlxFileLockLogAt = Date.now();
+      }
+      item.reject(new Error('mlx-lock: external actor holding /tmp/aios-mlx-lock, skip this tick'));
+      continue;
+    }
     try {
       const result = await item.fn();
       item.resolve(result);
     } catch (e) {
       item.reject(e);
+    } finally {
+      _mlxFileLockHoldMs += Date.now() - tAcq;
+      _fileReleaseMlxLock(holderId);
     }
   }
   _mlxRunning = false;
@@ -6322,7 +6413,16 @@ const server = createServer(async (req, res) => {
     } else if (method === 'GET' && path === '/metrics/cost') {
       // MLX token usage since server start. Local model so no $ cost,
       // but useful for capacity planning and per-feature attribution.
-      sendJson(res, 200, _mlxUsage);
+      // Also expose /tmp/aios-mlx-lock coordination stats so operators
+      // can see how often the server yielded to an external holder.
+      sendJson(res, 200, {
+        ..._mlxUsage,
+        mlx_file_lock: {
+          skips: _mlxFileLockSkips,
+          hold_ms_total: _mlxFileLockHoldMs,
+          current_status: _fileMlxLockStatus(),
+        },
+      });
     } else if (method === 'POST' && path === '/admin/wipe-user') {
       // Compliance: delete all entries tagged user:<id>. Returns count.
       const body = await readBody(req);

@@ -42,6 +42,15 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
+# Cross-process MLX lock — shares /tmp/aios-mlx-lock with task-runner,
+# self-evolve, vcontext-server, and any agent-invoked script. Serializes
+# heavy MLX-generate work to prevent the 2026-04-18 OOM cascade.
+#
+# Re-entrant: if the parent (e.g. aios-task-runner.js) already acquired
+# the lock and exported AIOS_MLX_LOCK_HOLDER, MlxLock becomes a no-op.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from aios_mlx_lock import MlxLock, MLX_LOCK_ENV_VAR  # noqa: E402
+
 # ── Configuration ───────────────────────────────────────────────
 VCONTEXT_HOST = os.environ.get("VCONTEXT_HOST", "127.0.0.1")
 VCONTEXT_PORT = int(os.environ.get("VCONTEXT_PORT", "3150"))
@@ -667,11 +676,43 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
 
+    # Hold the cross-process MLX lock for the entire eval. Mock runs don't
+    # touch MLX so skip the lock there. Dry-run and --no-llm-judge still may
+    # call mlx_generate(generate_answer path), so acquire in those too —
+    # exception: --dry-run --no-llm-judge has zero MLX calls, but keeping
+    # the lock briefly costs nothing vs. the code-clarity win of a single
+    # acquire path.
+    holder_id = f"locomo-eval:pid-{os.getpid()}"
+    needs_lock = not args.mock
     try:
-        results = run_eval(
-            args.subset, dry_run=args.dry_run, mock=args.mock,
-            use_llm=not args.no_llm_judge, verbose=not args.quiet,
-        )
+        if needs_lock:
+            # 20min wait = long enough to queue behind a single LoCoMo-small
+            # (~2min MLX wallclock) or a self-evolve mutation pass; short
+            # enough that if MLX is truly wedged we bail rather than hang.
+            with MlxLock(holder_id, wait_s=20 * 60):
+                # Export env var so any subprocess (or inner helper that
+                # also acquires) sees the lock as "parent-held" and skips
+                # its own acquire/release. Preserves prior value if set.
+                prior = os.environ.get(MLX_LOCK_ENV_VAR)
+                os.environ[MLX_LOCK_ENV_VAR] = holder_id
+                try:
+                    results = run_eval(
+                        args.subset, dry_run=args.dry_run, mock=args.mock,
+                        use_llm=not args.no_llm_judge, verbose=not args.quiet,
+                    )
+                finally:
+                    if prior is None:
+                        os.environ.pop(MLX_LOCK_ENV_VAR, None)
+                    else:
+                        os.environ[MLX_LOCK_ENV_VAR] = prior
+        else:
+            results = run_eval(
+                args.subset, dry_run=args.dry_run, mock=args.mock,
+                use_llm=not args.no_llm_judge, verbose=not args.quiet,
+            )
+    except TimeoutError as e:
+        print(f"[fatal] {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"[fatal] {e}", file=sys.stderr)
         return 1

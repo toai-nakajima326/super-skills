@@ -29,6 +29,12 @@ import { readFileSync, appendFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+// Cross-process MLX lock — shares /tmp/aios-mlx-lock with task-runner,
+// locomo-eval, vcontext-server, agent-invoked scripts. Serializes heavy
+// MLX generate work to prevent the 2026-04-18 OOM cascade.
+// Re-entrant via AIOS_MLX_LOCK_HOLDER env var so task-runner's outer
+// acquire doesn't deadlock when it spawns this script.
+import { withMlxLock, MLX_LOCK_ENV_VAR } from '../../../scripts/aios-mlx-lock.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -759,17 +765,38 @@ async function main() {
   if (VERBOSE) topK.forEach((s, i) => log(`  top[${i}] src=${s.c.source} target=${s.fitness.target_skill || '∅'} fitness=${s.fitness.total.toFixed(3)} ${s.fitness.note}`));
 
   // Phase (c)-(e) — Mutate/Validate/Apply (skipped in observation mode)
+  // MLX-heavy: each candidate triggers one mlxGenerate() call via callMlx().
+  // Acquire the cross-process MLX lock for the duration so agent-invoked
+  // self-evolve runs don't stack with task-runner / locomo-eval / any
+  // vcontext-server background generate loop. Re-entrant: if the parent
+  // exported AIOS_MLX_LOCK_HOLDER, this is a no-op (parent still holds).
   let emitted = 0;
   let dropped_mutate = 0, dropped_validate = 0;
   if (!observationMode) {
-    for (const s of topK) {
-      const mut = await mutateCandidate(s.c, s.fitness);
-      if (!mut) { dropped_mutate++; vlog(`  drop ${s.c.id}: mutate returned null`); continue; }
-      const val = validateCandidate(mut, config);
-      if (!val.ok) { dropped_validate++; vlog(`  drop ${s.c.id}: ${val.reason}`); continue; }
-      const result = await emitPendingPatch(s.c, s.fitness, cycleId, mut);
-      if (result?.ok || result?.dryRun) emitted++;
-    }
+    const holderId = `self-evolve:pid-${process.pid}:${cycleId}`;
+    // 20min cap — self-evolve mutation passes ~30s-3min; anything longer
+    // means MLX is wedged and we should bail rather than hang.
+    await withMlxLock(holderId, async () => {
+      const prevEnv = process.env[MLX_LOCK_ENV_VAR];
+      process.env[MLX_LOCK_ENV_VAR] = holderId;
+      try {
+        for (const s of topK) {
+          const mut = await mutateCandidate(s.c, s.fitness);
+          if (!mut) { dropped_mutate++; vlog(`  drop ${s.c.id}: mutate returned null`); continue; }
+          const val = validateCandidate(mut, config);
+          if (!val.ok) { dropped_validate++; vlog(`  drop ${s.c.id}: ${val.reason}`); continue; }
+          const result = await emitPendingPatch(s.c, s.fitness, cycleId, mut);
+          if (result?.ok || result?.dryRun) emitted++;
+        }
+      } finally {
+        if (prevEnv === undefined) delete process.env[MLX_LOCK_ENV_VAR];
+        else process.env[MLX_LOCK_ENV_VAR] = prevEnv;
+      }
+    }, { waitMs: 20 * 60 * 1000 }).catch(e => {
+      log(`MLX lock timeout during mutate phase: ${e.message}`);
+      // Treat as if all mutations were dropped — the rest of the cycle
+      // (summary + evolution-log + digest) still runs with zero emits.
+    });
   } else {
     vlog('observation mode: skipping Phase (c)-(e) — no pending-patch emission');
   }
