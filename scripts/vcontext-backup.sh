@@ -114,7 +114,16 @@ if [[ -n "$TIMEOUT_CMD" ]]; then
     exit 1
   fi
 else
-  # Fallback: spawn + watchdog-kill after timeout
+  # Fallback: spawn + watchdog-kill after timeout.
+  # macOS has no `timeout` / `gtimeout` by default, so THIS is the live
+  # path in production. Review-agent 2026-04-20 caught a HIGH-severity
+  # bug: `wait $SQLITE_PID` under `set -e` exits the script on any
+  # non-zero exit (including when our watchdog kill sends SIGKILL to
+  # sqlite3), skipping the cleanup block below. Result: orphan
+  # .ext-tmp* files — i.e., the very regression (WAL bloat via
+  # orphans) this timeout code was supposed to prevent.
+  # Fix: `|| true` so wait's non-zero doesn't trip set -e, then
+  # capture the real exit via $?.
   sqlite3 "$PRIMARY" ".backup '$TMP'" 2>&1 &
   SQLITE_PID=$!
   (
@@ -125,7 +134,7 @@ else
     fi
   ) &
   WATCHDOG_PID=$!
-  wait $SQLITE_PID
+  wait $SQLITE_PID || true   # ← HIGH-bug fix: don't let set -e eat the error path
   RC=$?
   kill $WATCHDOG_PID 2>/dev/null || true
   if [[ $RC -ne 0 ]]; then

@@ -161,23 +161,38 @@ async function waitForMlxHealth(deadlineMs) {
 }
 
 async function startMlx() {
-  // Guard against double-start (I2): if already STARTING, await the same promise
-  if (state.value === 'STARTING' && state.starting_promise) {
-    return state.starting_promise;
-  }
+  // Fast path: already running.
   if (state.value === 'RUNNING') return;
 
-  const memCheck = await memoryGate();
-  if (!memCheck.ok) {
-    const err = new Error(`memory_tight: free=${memCheck.free} < min=${MIN_FREE_PAGES}`);
-    err.status = 503;
-    throw err;
+  // Coalesce concurrent callers onto the SAME starting_promise.
+  // 2026-04-20 review fix: previously we checked state+promise then did
+  // `await memoryGate()` BEFORE setting `state.value='STARTING'`. Two
+  // concurrent requests arriving during STOPPED both passed the first
+  // guard, both awaited the gate, both then set STARTING and both
+  // kicked off launchctl bootstrap. Result: fighting bootstrap calls +
+  // duplicate MLX spawns under load. Fix: claim the slot (set state +
+  // starting_promise) SYNCHRONOUSLY before any await, so any second
+  // caller sees the slot already taken and awaits our promise instead.
+  if (state.starting_promise) {
+    return state.starting_promise;
   }
 
+  // Atomic claim — no await between the two assignments.
   state.value = 'STARTING';
   const warmupStart = Date.now();
 
   const p = (async () => {
+    // Memory gate inside the promise — safe to await now that we hold
+    // the slot. Other callers waiting on starting_promise will fail-open
+    // as a group on memory-tight (they all throw from the awaited p).
+    const memCheck = await memoryGate();
+    if (!memCheck.ok) {
+      state.value = 'STOPPED'; // release slot for future retry
+      const err = new Error(`memory_tight: free=${memCheck.free} < min=${MIN_FREE_PAGES}`);
+      err.status = 503;
+      throw err;
+    }
+
     logLine('MLX starting: launchctl enable + bootstrap');
     await launchctlEnable();
     const bootstrapped = await launchctlBootstrap();
