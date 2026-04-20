@@ -1308,73 +1308,22 @@ function emitAiosBlock(toolName, reasonJa) {
   process.stdout.write(JSON.stringify(payload) + '\n');
 }
 
-// Main gate. Returns true if the tool should be BLOCKED (caller exits).
+// Main gate. 2026-04-20 Phase 1: migrated to TypeScript strict —
+// implementation now lives in ./hooks-gate.mts with discriminated-union
+// return types that make the morning's fail-open bug unrepresentable at
+// compile time. See docs/specs/2026-04-20-ts-strict-migration-plan.md.
+// The local helpers below (aiosCacheRead/Write, sessionHasSkillUsage,
+// aiosSessionStartedAt, emitAiosBlock) are now dead code — kept for
+// Phase 1 rollback; Phase 2 will remove them. The .mts module is
+// self-contained with private copies.
+//
+// Dynamic import (inside the function, not at module top) so the
+// TypeScript strip cost is paid lazily, only when a pre-tool event
+// fires. Keeps cold-start of other hook events (user-prompt, tool-use,
+// session-recall) identical to the pre-migration .js.
 async function handlePreToolGate() {
-  const input = await readStdin();
-  if (!input) return { blocked: false, input: '' };
-
-  // Escape hatch — highest priority.
-  if (process.env.INFINITE_SKILLS_OK === '1') return { blocked: false, input };
-
-  let data;
-  try { data = JSON.parse(input); } catch { return { blocked: false, input }; }
-
-  const toolName = data.tool_name || '';
-  const toolInput = data.tool_input || {};
-  const sessionId = extractSessionId(input);
-
-  // Only gate mutating tools. Read/Glob/Grep/Agent/etc always pass.
-  const writeTools = new Set(['Edit', 'Write', 'NotebookEdit', 'MultiEdit']);
-  const isWriteTool = writeTools.has(toolName);
-  const isBash = toolName === 'Bash';
-  if (!isWriteTool && !isBash) return { blocked: false, input };
-
-  // Does the target path / command touch AIOS?
-  let touchesAios = false;
-  if (isWriteTool) {
-    const target = toolInput.file_path || toolInput.notebook_path || '';
-    touchesAios = isAiosConnectedPath(target);
-  } else if (isBash) {
-    const cmd = toolInput.command || '';
-    touchesAios = bashCommandTouchesAios(cmd);
-  }
-  if (!touchesAios) return { blocked: false, input };
-
-  // Cold-start grace: the very first 30s of a session may not have
-  // routed yet (session-recall + user-prompt run in parallel with the
-  // first tool use). Record on first sighting.
-  const sessionStart = aiosSessionStartedAt(sessionId);
-  if (Date.now() - sessionStart < AIOS_COLD_START_GRACE_MS) {
-    return { blocked: false, input };
-  }
-
-  // Has infinite-skills routing fired in this session?
-  let hasRouted = false;
-  try {
-    hasRouted = await sessionHasSkillUsage(sessionId);
-  } catch (e) {
-    // Fail open on infra errors — soft-enforcement fallback.
-    errorLog('aios_gate_query_failed', String(e && e.message || e));
-    return { blocked: false, input };
-  }
-  if (hasRouted) return { blocked: false, input };
-
-  // BLOCK.
-  const reason = `AIOS-connected write detected. infinite-skills routing has not fired in this session. Consult routing or retry with INFINITE_SKILLS_OK=1.`;
-  emitAiosBlock(toolName, reason);
-  // Best-effort audit record so the gate is observable.
-  post('/store', {
-    type: 'aios-gate-block',
-    content: JSON.stringify({
-      session: sessionId,
-      tool: toolName,
-      target: toolInput.file_path || toolInput.command || '',
-      at: new Date().toISOString(),
-    }),
-    tags: ['aios-gate', 'block', `tool:${toolName}`],
-    session: sessionId,
-  }).catch(() => {});
-  return { blocked: true, input };
+  const mod = await import('./hooks-gate.mts');
+  return mod.handlePreToolGate();
 }
 
 // Dispatcher for pre-tool: gate first, then record.
