@@ -248,12 +248,27 @@ while true; do
       rm -f /Volumes/VContext/vcontext-corrupt-*.db 2>/dev/null
       rm -f /Volumes/VContext/vcontext.db.corrupted-* 2>/dev/null
       rm -f /Volumes/VContext/vcontext*corrupt*.db 2>/dev/null
-      # Force WAL checkpoint to flush and shrink
-      sqlite3 /Volumes/VContext/vcontext.db "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null
+      # 2026-04-20 Stage 4.5 #17: redirect to server's in-process
+      # checkpoint endpoint. Previously watchdog spawned external
+      # `sqlite3 /Volumes/VContext/vcontext.db "PRAGMA wal_checkpoint"`
+      # — dead path today (no /Volumes/VContext) but a booby trap that
+      # would re-animate on RAM-disk remount and hold a lock on primary.
+      # The HTTP endpoint uses ramDb's own connection (Stage 4, 884cc0b)
+      # with no external file lock.
+      curl -sS -m 10 -X POST \
+        -H 'X-Vcontext-Admin: yes' \
+        -H 'Content-Type: application/json' \
+        -d '{"mode":"TRUNCATE"}' \
+        http://127.0.0.1:3150/admin/wal-checkpoint >/dev/null 2>&1 || true
       osascript -e "display notification \"RAM disk ${RAM_USED_PCT}% — emergency cleanup\" with title \"🚨 vcontext CRITICAL\"" 2>/dev/null
     elif [[ "$RAM_USED_PCT" -ge $RAM_WARN_PCT ]]; then
       log "RAM DISK WARN: ${RAM_USED_PCT}% used"
-      sqlite3 /Volumes/VContext/vcontext.db "PRAGMA wal_checkpoint(PASSIVE);" 2>/dev/null
+      # Stage 4.5 #17 — same redirect, PASSIVE mode.
+      curl -sS -m 10 -X POST \
+        -H 'X-Vcontext-Admin: yes' \
+        -H 'Content-Type: application/json' \
+        -d '{"mode":"PASSIVE"}' \
+        http://127.0.0.1:3150/admin/wal-checkpoint >/dev/null 2>&1 || true
       osascript -e "display notification \"RAM disk ${RAM_USED_PCT}% — watch closely\" with title \"⚠️ vcontext\"" 2>/dev/null
     fi
   fi
@@ -263,7 +278,7 @@ while true; do
   # tracks CHECK_INTERVAL, not 5*CHECK_INTERVAL). Counter is retained
   # for any future sub-sampling without renaming.
   SEARXNG_CHECK_COUNTER=$((SEARXNG_CHECK_COUNTER + 1))
-  if [[ $((SEARXNG_CHECK_COUNTER % 1)) -eq 0 ]]; then
+  if true; then  # (was `$((COUNTER % 1)) -eq 0` — always true, simplified for clarity)
     check_searxng
   fi
 
@@ -283,7 +298,7 @@ while true; do
   #       not a leak.
   # State file tracks consecutive failures across watchdog iterations.
   EMBED_FAIL_FILE="/tmp/vcontext-watchdog-mlx-embed-fails"
-  if [[ $((SEARXNG_CHECK_COUNTER % 1)) -eq 0 ]]; then
+  if true; then  # (was `$((COUNTER % 1)) -eq 0` — always true, simplified for clarity)
     EMBED_PID=$(pgrep -f "mlx-embed-server" | head -1)
     if [[ -n "$EMBED_PID" ]]; then
       EMBED_HEALTH=$(curl -s --max-time 30 http://127.0.0.1:3161/health 2>/dev/null)
@@ -328,7 +343,7 @@ while true; do
   # runs after, so worst-case cycle is ~90+60=150s — still far below the
   # 5*CHECK_INTERVAL=300s the old sub-sampled design took, so every-iter
   # sampling strictly improves detection latency.
-  if [[ $((SEARXNG_CHECK_COUNTER % 1)) -eq 0 ]]; then
+  if true; then  # (was `$((COUNTER % 1)) -eq 0` — always true, simplified for clarity)
     # Process identity: mlx-generate-wrapper.sh execs `python3 -m mlx_lm.server`,
     # so the running command line contains mlx_lm.server (NOT mlx-generate-server).
     # Using the wrong pattern caused a perpetual restart loop — watchdog killed

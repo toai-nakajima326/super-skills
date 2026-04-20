@@ -3531,6 +3531,15 @@ async function startEmbedLoop() {
         }
       } else if (batchFailed) {
         consecutiveFailures++;
+      } else if (embeddings && embeddings.length !== rows.length) {
+        // 2026-04-20 review cleanup: if MLX returns a mismatched-length
+        // array silently (well-formed JSON, wrong count), we'd previously
+        // skip BOTH the success-reset AND the failure-increment paths —
+        // backoff stayed at 100ms and the loop hot-looped. Count it as
+        // a failure so the exponential backoff fires.
+        batchFailed = true;
+        consecutiveFailures++;
+        console.log(`[embed-loop] mismatched response length (got ${embeddings.length}, expected ${rows.length}) — treating as failure`);
       }
       // Adaptive gap: 100ms healthy, up to 30s after 4+ failures.
       await new Promise(r => setTimeout(r, backoffMs(consecutiveFailures)));
@@ -4667,7 +4676,11 @@ function syncRamToSsd() {
 }
 
 // ── Embedding backfill RAM → SSD (batch via ATTACH)
-function syncEmbeddingsToSsd() {
+// 2026-04-20 review cleanup: accept optional batchSize. Caller in
+// doBackupAndMigrate passes 100; previously that arg was silently
+// dropped (function had no params). Default remains 200 to preserve
+// legacy behavior when no caller specifies.
+function syncEmbeddingsToSsd(batchSize = 200) {
   if (!existsSync(SSD_DB_PATH)) return;
   try {
     dbExec(`
@@ -4678,7 +4691,7 @@ function syncEmbeddingsToSsd() {
       )
       WHERE ssd.entries.embedding IS NULL
       AND ssd.entries.id IN (
-        SELECT id FROM main.entries WHERE embedding IS NOT NULL LIMIT 200
+        SELECT id FROM main.entries WHERE embedding IS NOT NULL LIMIT ${batchSize|0}
       );
       DETACH ssd;
     `);

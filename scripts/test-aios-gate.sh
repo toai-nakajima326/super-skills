@@ -10,15 +10,35 @@
 # The gate runs a hard block via {"continue":false,"stopReason":"..."} JSON
 # emission. We grep stdout for that pattern to assert BLOCK vs PASS.
 #
-# Works whether or not vcontext server is reachable — the gate fails
-# open on infra errors, so we use a unique session per test and a file
-# cache flag to simulate prior skill-usage for case (d).
+# 2026-04-20 review-agent fix: BLOCK tests (b), (e), (f) depend on the
+# server being reachable. After the TS Phase 1 hook fix (commit f5bf9c1),
+# the gate correctly fails OPEN when vcontext is unreachable — which
+# means BLOCK tests would spuriously turn into PASS if the server is
+# down during the test run. We now require /health=200 at test start
+# and skip-with-warning rather than false-fail when the server is
+# unavailable.
 
 set -u
 HOOKS="/Users/mitsuru_nakajima/skills/scripts/vcontext-hooks.js"
 NODE="/Users/mitsuru_nakajima/.nvm/versions/node/v25.9.0/bin/node"
 PASS=0
 FAIL=0
+
+# Server reachability pre-check — gate's fail-open semantics make BLOCK
+# tests non-deterministic without this gate.
+SERVER_URL="${VCONTEXT_URL:-http://127.0.0.1:3150}"
+SERVER_UP=false
+if curl -sS -m 3 "${SERVER_URL}/health" >/dev/null 2>&1; then
+  SERVER_UP=true
+fi
+if ! $SERVER_UP; then
+  echo "⚠ vcontext server is not reachable at ${SERVER_URL}"
+  echo "  → BLOCK-path tests (b, e, f) may be skipped; they rely on"
+  echo "    the server returning 0 skill-usage rows. Fail-open on infra"
+  echo "    error would turn expected BLOCK into unintended PASS."
+  echo "  → Starting server or running in a session with 200 /health"
+  echo "    gives the full test coverage."
+fi
 
 # Shared suffix for unique session ids (epoch-ns)
 SESSION_PREFIX="aios-gate-test-$(date +%s)-$$"
@@ -77,11 +97,15 @@ OUT=$(run_hook "$SID_A" "Edit" "/tmp/not-aios-test-file.txt")
 assert "(a) Edit to /tmp/not-aios-test-file.txt" "PASS" "$OUT"
 cleanup_caches "$SID_A"
 
-# (b) AIOS file without prior skill-usage → BLOCK
+# (b) AIOS file without prior skill-usage → BLOCK (only if server up)
 SID_B="${SESSION_PREFIX}-b"
 cleanup_caches "$SID_B"
-OUT=$(run_hook "$SID_B" "Edit" "/Users/mitsuru_nakajima/skills/scripts/vcontext-hooks.js")
-assert "(b) Edit to ~/skills/ without routing" "BLOCK" "$OUT"
+if $SERVER_UP; then
+  OUT=$(run_hook "$SID_B" "Edit" "/Users/mitsuru_nakajima/skills/scripts/vcontext-hooks.js")
+  assert "(b) Edit to ~/skills/ without routing" "BLOCK" "$OUT"
+else
+  echo "  ⤬ (b) skipped — server unreachable, gate fails open"
+fi
 cleanup_caches "$SID_B"
 
 # (c) AIOS file with INFINITE_SKILLS_OK=1 → PASS
@@ -101,17 +125,25 @@ OUT=$(run_hook "$SID_D" "Edit" "/Users/mitsuru_nakajima/skills/scripts/vcontext-
 assert "(d) Edit to ~/skills/ with prior skill-usage" "PASS" "$OUT"
 cleanup_caches "$SID_D"
 
-# Extras: LaunchAgent and Bash (rm) path
+# Extras: LaunchAgent and Bash (rm) path — BLOCK only when server reachable
 SID_E="${SESSION_PREFIX}-e"
 cleanup_caches "$SID_E"
-OUT=$(run_hook "$SID_E" "Write" "/Users/mitsuru_nakajima/Library/LaunchAgents/com.vcontext.newagent.plist")
-assert "(e) Write to com.vcontext.* LaunchAgent without routing" "BLOCK" "$OUT"
+if $SERVER_UP; then
+  OUT=$(run_hook "$SID_E" "Write" "/Users/mitsuru_nakajima/Library/LaunchAgents/com.vcontext.newagent.plist")
+  assert "(e) Write to com.vcontext.* LaunchAgent without routing" "BLOCK" "$OUT"
+else
+  echo "  ⤬ (e) skipped — server unreachable, gate fails open"
+fi
 cleanup_caches "$SID_E"
 
 SID_F="${SESSION_PREFIX}-f"
 cleanup_caches "$SID_F"
-OUT=$(run_hook "$SID_F" "Bash" "rm /Users/mitsuru_nakajima/skills/scripts/vcontext-hooks.js")
-assert "(f) Bash rm inside ~/skills/ without routing" "BLOCK" "$OUT"
+if $SERVER_UP; then
+  OUT=$(run_hook "$SID_F" "Bash" "rm /Users/mitsuru_nakajima/skills/scripts/vcontext-hooks.js")
+  assert "(f) Bash rm inside ~/skills/ without routing" "BLOCK" "$OUT"
+else
+  echo "  ⤬ (f) skipped — server unreachable, gate fails open"
+fi
 cleanup_caches "$SID_F"
 
 SID_G="${SESSION_PREFIX}-g"
