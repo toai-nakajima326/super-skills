@@ -3522,6 +3522,20 @@ async function startEmbedLoop() {
 // docs/analysis/2026-04-20-aios-morning-3-bugs.md §"Backup WAL runaway".
 // doBackup() is retained below for (a) graceful shutdown flush and (b)
 // emergency manual invocation, but is no longer on the 5-min timer.
+// Yield to the event loop between maintenance operations so pending
+// HTTP requests (/health, /stats, /recall) can be served instead of
+// waiting for the entire maintenance cycle. Each `await yield()` call
+// returns control briefly before resuming. Event-loop-friendly design
+// per Constitution P1 (loose coupling) applied at the function level:
+// maintenance is NOT coupled to request servicing.
+//
+// 2026-04-20: added after observing /health 5-8s timeouts during
+// maintenance cycles (backfill + content-hash + orphan cleanup all
+// running back-to-back). Single biggest latency win observed on the
+// read path without any async refactor.
+const yieldToEventLoop = () =>
+  new Promise((resolve) => setImmediate(resolve));
+
 async function doBackupAndMigrate() {
   // doBackup() intentionally NOT called here anymore — see header comment.
   // Sync any entries that write-through missed (RAM → SSD catch-up)
@@ -3530,22 +3544,36 @@ async function doBackupAndMigrate() {
   } catch (e) {
     console.error('[vcontext:auto] RAM→SSD sync failed:', e.message);
   }
+  await yieldToEventLoop();
+
   // Sync new embeddings to vec index + SSD
   try {
     vecSync();
   } catch {}
+  await yieldToEventLoop();
+
   try {
     syncEmbeddingsToSsd(100);
   } catch {}
-  // Incremental index backfill
-  try { backfillIndex(200); } catch {}
+  await yieldToEventLoop();
+
+  // Incremental index backfill — batch reduced 200 → 50. The entry_index
+  // currently catches up at ~3000 rows/hour (50 × 60 cycles/hour) which
+  // is still faster than new-entry write rate (~200/hour). Smaller batch
+  // = shorter SQL block on the main thread.
+  try { backfillIndex(50); } catch {}
+  await yieldToEventLoop();
+
   // Sweep orphan entry_index rows — entries that were deleted (via dedup
   // or migration) leave stale index rows that bloat queries. Limit the
   // per-cycle delete so we never stall the tick on a huge cleanup.
+  // Batch reduced 1000 → 200.
   try {
-    const r = ramDb.prepare(`DELETE FROM entry_index WHERE entry_id IN (SELECT entry_id FROM entry_index WHERE entry_id NOT IN (SELECT id FROM entries) LIMIT 1000)`).run();
+    const r = ramDb.prepare(`DELETE FROM entry_index WHERE entry_id IN (SELECT entry_id FROM entry_index WHERE entry_id NOT IN (SELECT id FROM entries) LIMIT 200)`).run();
     if (r.changes > 0) console.log(`[vcontext:auto] Purged ${r.changes} orphan entry_index rows`);
   } catch {}
+  await yieldToEventLoop();
+
   // skill-trigger garbage collection — each predictive-search run creates
   // triggers from session-specific prompts (e.g. "APIエラー|401|502").
   // They persist as status='active' forever, so a typical week grows the
@@ -3563,6 +3591,8 @@ async function doBackupAndMigrate() {
     `).run();
     if (r.changes > 0) console.log(`[vcontext:auto] Deprecated ${r.changes} stale skill-triggers`);
   } catch {}
+  await yieldToEventLoop();
+
   // Recheck AI availability
   checkMlxGenerate();
   // 2026-04-18: await checkMlx so the self-heal decision below sees
@@ -3582,12 +3612,18 @@ async function doBackupAndMigrate() {
   // handleStore and leave content_hash NULL. Without a hash those rows
   // skip dedup and will accumulate duplicates again. Backfill in the
   // same scheduler that already migrates tiers.
+  //
+  // 2026-04-20 changes: (a) batch reduced 500 → 100 to shorten the
+  // main-thread block, (b) yield every 25 rows within the inner loop so
+  // /health can interleave. SHA256 of ~1KB content × 100 = ~5ms CPU —
+  // fine. The real cost was the 100 SQL UPDATEs; yielding between every
+  // 25 lets the event loop drain HTTP queues.
   try {
     const crypto = require('node:crypto');
-    const rows = ramDb.prepare(`SELECT id, content, session, type FROM entries WHERE content_hash IS NULL AND type NOT IN ('test','working-state','session-recall','anomaly-alert') LIMIT 500;`).all();
+    const rows = ramDb.prepare(`SELECT id, content, session, type FROM entries WHERE content_hash IS NULL AND type NOT IN ('test','working-state','session-recall','anomaly-alert') LIMIT 100;`).all();
     if (rows.length > 0) {
       const upd = ramDb.prepare(`UPDATE entries SET content_hash = ? WHERE id = ?`);
-      let filled = 0, dupes = 0;
+      let filled = 0, dupes = 0, processed = 0;
       for (const r of rows) {
         try {
           upd.run(crypto.createHash('sha256').update(String(r.content)).digest('hex'), r.id);
@@ -3599,10 +3635,14 @@ async function doBackupAndMigrate() {
             try { ramDb.prepare(`DELETE FROM entries WHERE id = ?`).run(r.id); dupes++; } catch {}
           }
         }
+        // Yield every 25 rows to let pending HTTP requests be served.
+        processed++;
+        if (processed % 25 === 0) await yieldToEventLoop();
       }
       if (filled + dupes > 0) console.log(`[vcontext:auto] Backfilled ${filled}, deduped ${dupes} rows`);
     }
   } catch (e) { console.error('[vcontext:auto] hash backfill failed:', e.message); }
+  await yieldToEventLoop();
 
   // Quick migration check
   try {
@@ -3611,17 +3651,21 @@ async function doBackupAndMigrate() {
   } catch (e) {
     console.error('[vcontext:auto] Auto-migration RAM→SSD failed:', e.message);
   }
+  await yieldToEventLoop();
+
   try {
     const moved = migrateSsdToCloud();
     if (moved > 0) console.log(`[vcontext:auto] Auto-migrated ${moved} entries SSD → Cloud`);
   } catch (e) {
     console.error('[vcontext:auto] Auto-migration SSD→Cloud failed:', e.message);
   }
+  await yieldToEventLoop();
+
   // Ensure discovery loop is running (self-healing)
   if (mlxGenerateAvailable && !discoveryLoopRunning) {
     startDiscoveryLoop().catch(() => {});
   }
-  // Anomaly detection
+  // Anomaly detection — 4 small queries, don't need mid-yield
   try { detectAnomalies(); } catch {}
 }
 
