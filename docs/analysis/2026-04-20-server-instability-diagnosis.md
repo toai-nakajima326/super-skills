@@ -24,30 +24,77 @@ Client-visible effects:
   skill-usage, 8 skill-suggestion, 6 subagent-stop, 4 session-recall,
   4 skill-suggestion, 2 compact, 2 pre-compact)
 
-## Root cause (memory budget exceeded)
+## Root cause — CORRECTED (2026-04-20 afternoon re-investigation)
 
-36 GB MacBook M3 Pro hosting concurrently:
+**My first diagnosis (earlier in this doc) framed it as "36 GB memory
+budget exceeded / jetsam killing vcontext". The user pushed back and
+was correct: that framing was wrong.** Re-investigation evidence:
 
-| Process | RSS | Role |
-|---|---|---|
-| vcontext-server | 1,000-1,300 MB (grows with caches) | AIOS substrate |
-| mlx-embed (python3.13) | 280-450 MB | Qwen3-Embedding-8B |
-| mlx-generate-proxy (idle) | 60 MB | lazy-load shim |
-| Chrome (multiple processes) | ~1,000 MB | browser + tabs |
-| Codex.app | 500-600 MB | client |
-| Virtualization (Docker) | 300-400 MB | SearXNG container |
-| mds_stores | 500-650 MB | Spotlight indexing |
-| System daemons | ~1,500 MB | macOS |
+1. `log show --predicate 'subsystem == "com.apple.jetsam"'` → no
+   vcontext kills in the last hour
+2. `runningboardd` explicitly logs every vcontext-family service as
+   **"not RunningBoard jetsam managed"** — the system's own user-
+   process jetsam treats our LaunchAgents as out-of-scope
+3. `vm_stat`: 539 MB free + 11.5 GB inactive (reclaimable) =
+   12 GB readily available. Compressor at 7.9 GB is **efficient
+   compression working**, not pressure.
+4. Swap 2.6 GB / 4 GB (65%) is busy but not saturated.
 
-Total visible working set ≈ 5.5-6 GB. Add APFS page cache for the 6 GB
-DB (normally several GB), Metal GPU reservation for MLX, and other
-kernel buffers → peak well over the 10-12 GB comfortably available
-after OS baseline.
+The "111 SIGKILL-137 exits" count in server.log is **cumulative over
+multiple days**, heavily concentrated in the morning 07:56-08:16
+window (116 watchdog force-bootouts all in that 20-minute span).
+**After the morning cold-boot-grace fix landed (08:16), watchdog
+force-bootout activity DROPPED TO ZERO.** Post-08:16 the watchdog
+only emits ALERT messages — it does not kill.
 
-Observable consequence: swap usage sits at 2.7-4.1 GB today (out of a
-5 GB swap file). macOS jetsam triggers when compressor + swap can't
-keep up; it kills the largest recently-grown managed-app process,
-which is usually vcontext.
+## Actual post-08:16 pattern
+
+- **Rare crashes** — server mostly stays alive; occasional respawns
+  are from `launchctl kickstart -k` during our debug/restart testing
+  (SIGKILL with grace period).
+- **Frequent /health slowness** — server remains alive but its Node
+  event loop is busy with sync SQLite operations during maintenance
+  cycles (backfill, dedupe, orphan cleanup, vecSync). `/health`
+  requests wait in the HTTP queue; observed 5-8 s latency during
+  the worst cycles.
+- **Embed-loop contention** — pre-backoff (before commit 7623948),
+  the embed-loop retried failed MLX calls every 100 ms. After the
+  backoff commit, streak=1→1 s, 2→5 s, 3→15 s, 4+→30 s.
+
+The user-visible "dashboard slow to reload" symptom is the event-loop
+queue pattern, not OOM.
+
+## Is this actually "instability"?
+
+Honestly, mostly no. AIOS is behaving like a moderately-busy Node
+server running synchronous SQLite on a large DB:
+- 90%+ of the time /health responds in <10 ms.
+- Every ~5 min a maintenance cycle temporarily jams the event loop.
+- During jams, reads queue; after the cycle (10-60 s), they flush.
+- Rare real crashes correlate with our own `kickstart -k` during
+  testing — not spontaneous OOM.
+
+The morning cascade was a DIFFERENT class of bug (watchdog loop) and
+is FIXED. The residual latency is the normal Node + sync SQLite
+tradeoff, not a broken substrate.
+
+## What residual work actually remains
+
+Not "emergency stability fixes" — those are done. Instead: **latency
+smoothing**. Options, lowest-risk first:
+
+1. Keep extending `yieldToEventLoop()` into heavier functions
+   (migrateRamToSsd, detectAnomalies) — cheap, low risk.
+2. Smaller maintenance batches / stagger across cycles — cheap.
+3. Investigate `launchctl` "immediate reason = inefficient" label.
+   Possibly add `ProcessType = Adaptive` or `Nice` to plist.
+4. Worker-thread for the heaviest SQL ops — real async, multi-day.
+
+No user action required. No app-closing needed. The "36 GB ceiling"
+story was wrong and is withdrawn. Apology to the reader: I let
+vivid numbers (111 SIGKILLs, 7.9 GB compressor) produce a dramatic
+narrative before I checked whether the signals actually pointed at
+jetsam — they didn't.
 
 ## Not-root-causes (ruled out today)
 
