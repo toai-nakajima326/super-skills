@@ -7570,6 +7570,156 @@ const server = createServer(async (req, res) => {
       } catch (e) {
         sendJson(res, 500, { error: e.message });
       }
+    } else if (method === 'POST' && path === '/admin/backup') {
+      // Stage 3 of loose-coupling redesign. Replaces scripts/vcontext-
+      // backup.sh's sqlite3-CLI `.backup` invocation — that external
+      // process held a read-snapshot on primary.sqlite for 1-2 minutes,
+      // and when it hung (observed 2026-04-20 for 1h 59m), blocked the
+      // live WAL from checkpointing → 3 GB WAL bloat + server stalls.
+      //
+      // Server-owned backup uses `ramDb.backup(tmpPath)` (better-sqlite3
+      // online backup API) — same connection as the server, so no
+      // cross-process lock contention. Atomic rename + integrity-gate
+      // the .bak rotation (same safety invariants as legacy doBackup).
+      //
+      // Auth: admin-tier. Body: {} reserved for future options.
+      // Returns: { status: ok|fail|skipped, backup_path, size_bytes,
+      //            integrity, duration_ms, ran_at, cached?, reason? }
+      //
+      // Rate-limit: 1/60s. backup.sh LaunchAgent fires every 15 min
+      // anyway; the rate-limit stops accidental hammering.
+      if (req.headers['x-vcontext-admin'] !== 'yes') {
+        return sendJson(res, 403, {
+          error: 'X-Vcontext-Admin: yes header required for admin operations',
+        });
+      }
+      try {
+        await readBody(req);
+        const now = Date.now();
+        const THROTTLE_MS = 60 * 1000; // 60s
+
+        // 2026-04-20 Stage 3 agile fix: in-flight guard.
+        // If a backup is already running, return 429 so callers don't
+        // stack multiple concurrent ramDb.backup() invocations (each
+        // copies 6 GB and the parallel IO saturates CPU for minutes).
+        // Observed in testing: 2 concurrent calls made server 100% CPU
+        // for 4+ minutes with /stats /recall timing out.
+        if (globalThis._backupInFlight) {
+          return sendJson(res, 429, {
+            status: 'busy',
+            reason: 'backup_already_running',
+            hint: 'wait for the current backup to complete before retrying',
+          });
+        }
+
+        if (!globalThis._backupCache) globalThis._backupCache = null;
+        const cached = globalThis._backupCache;
+        if (cached && now - cached.ran_at_ms < THROTTLE_MS) {
+          return sendJson(res, 200, {
+            ...cached.result,
+            cached: true,
+            next_in_seconds: Math.ceil((THROTTLE_MS - (now - cached.ran_at_ms)) / 1000),
+          });
+        }
+        if (!existsSync(DB_PATH) || !ramDb) {
+          return sendJson(res, 503, { status: 'skipped', reason: 'primary_db_unavailable' });
+        }
+
+        // try/finally wraps the whole backup block so the in-flight flag
+        // is ALWAYS released — any early return (500 / 429), any thrown
+        // exception (renameSync EEXIST, statSync error, unexpected code
+        // path), any future refactor. Reviewer 2026-04-20 caught 3
+        // missing reset paths in the pre-finally shape; finally is the
+        // only robust option.
+        globalThis._backupInFlight = true;
+        try {
+          const startT = Date.now();
+          const tmpPath = BACKUP_PATH + '.tmp';
+          cleanupBackupTmp(tmpPath);
+
+          // Perform the online backup. better-sqlite3's backup() yields
+          // to the event loop between page-chunks (setImmediate between
+          // each transfer(rate) call per node_modules/better-sqlite3/
+          // lib/methods/backup.js L41) — /health stays responsive.
+          try {
+            await ramDb.backup(tmpPath);
+          } catch (e) {
+            cleanupBackupTmp(tmpPath);
+            return sendJson(res, 500, { status: 'fail', reason: 'backup_failed', detail: e.message });
+          }
+
+          // Verify integrity of the tmp before promoting.
+          if (!verifyBackupFile(tmpPath)) {
+            emitBackupIntegrityAlert(tmpPath, 'admin-backup: integrity_check failed on freshly-written tmp');
+            cleanupBackupTmp(tmpPath);
+            return sendJson(res, 500, {
+              status: 'fail', reason: 'integrity_fail_on_tmp',
+              hint: '.bak preserved, .sqlite untouched',
+            });
+          }
+
+          // Truncate WAL on the verified tmp so rename moves a single self-contained file.
+          try {
+            const tmpDb = new Database(tmpPath);
+            tmpDb.pragma('wal_checkpoint(TRUNCATE)');
+            tmpDb.close();
+          } catch { /* non-fatal */ }
+
+          const fsMod = require('node:fs');
+          // Rotate current .sqlite → .bak if valid.
+          if (existsSync(BACKUP_PATH)) {
+            if (verifyBackupFile(BACKUP_PATH)) {
+              try { fsMod.renameSync(BACKUP_PATH, BACKUP_PATH + '.bak'); } catch {}
+              for (const s of ['-wal', '-shm']) {
+                try { fsMod.renameSync(BACKUP_PATH + s, BACKUP_PATH + '.bak' + s); } catch {}
+              }
+            } else {
+              emitBackupIntegrityAlert(BACKUP_PATH, 'admin-backup: integrity_check failed on current .sqlite; .bak rotation skipped');
+              try { fsMod.unlinkSync(BACKUP_PATH); } catch {}
+              for (const s of ['-wal', '-shm']) {
+                try { fsMod.unlinkSync(BACKUP_PATH + s); } catch {}
+              }
+            }
+          }
+
+          // Promote tmp → BACKUP_PATH.
+          fsMod.renameSync(tmpPath, BACKUP_PATH);
+          cleanupBackupTmp(tmpPath);
+
+          const size = statSync(BACKUP_PATH).size;
+          const integrity = verifyBackupFile(BACKUP_PATH) ? 'ok' : 'fail';
+          const result = {
+            status: 'ok',
+            backup_path: BACKUP_PATH,
+            size_bytes: size,
+            integrity,
+            duration_ms: Date.now() - startT,
+            ran_at: new Date().toISOString(),
+          };
+          globalThis._backupCache = { ran_at_ms: now, result };
+
+          // Record as admin-op entry for dashboard observability.
+          try {
+            ramDb.prepare(
+              `INSERT INTO entries (type, content, tags, session, token_estimate, created_at, content_hash)
+               VALUES (?, ?, ?, 'admin-op', ?, datetime('now'), ?)`
+            ).run(
+              'admin-op',
+              JSON.stringify({ op: 'backup', ...result }),
+              JSON.stringify(['admin-op', `op:backup`, `result:${result.status}`]),
+              Math.ceil(JSON.stringify(result).length / 4),
+              require('node:crypto').createHash('sha256')
+                .update(`backup:${now}`).digest('hex'),
+            );
+          } catch { /* non-fatal */ }
+
+          sendJson(res, 200, result);
+        } finally {
+          globalThis._backupInFlight = false;
+        }
+      } catch (e) {
+        sendJson(res, 500, { status: 'fail', error: e.message });
+      }
     } else if (method === 'POST' && path === '/admin/integrity-check') {
       // Stage 2 of loose-coupling redesign (docs/specs/2026-04-20-true-
       // loose-coupling-redesign.md). Runs PRAGMA integrity_check against
@@ -8118,6 +8268,33 @@ try {
     console.log(`[startup] Rotated entries-wal.jsonl`);
   }
 } catch (e) { console.error('[startup] WAL rotate:', e.message?.slice(0, 60)); }
+
+// 2026-04-20 Stage 3 boot-time sweep: clear any backup-tmp orphans.
+// Reviewer agent found a 5.28 GB .tmp file on disk that survived a
+// server restart — no existing code path cleans it. Without this sweep
+// the orphan sits forever, and worst-case (see morning's 28 GB WAL
+// incident) grows through subsequent failed cycles. Two tmp-family
+// prefixes to cover: ".tmp" (server/admin endpoint's) and ".ext-tmp"
+// (external LaunchAgent's — cleaned by the script itself in normal
+// cycles, but if that was mid-write and killed, we mop here too).
+try {
+  const BACKUP_TMP = BACKUP_PATH + '.tmp';
+  const EXT_TMP = BACKUP_PATH + '.ext-tmp';
+  let sweptBytes = 0;
+  for (const base of [BACKUP_TMP, EXT_TMP]) {
+    for (const suffix of ['', '-wal', '-shm', '-journal']) {
+      const p = base + suffix;
+      try {
+        const sz = statSync(p).size;
+        require('node:fs').unlinkSync(p);
+        sweptBytes += sz;
+      } catch { /* not present — fine */ }
+    }
+  }
+  if (sweptBytes > 0) {
+    console.log(`[startup] swept backup-tmp orphans: ${(sweptBytes/1024/1024).toFixed(1)} MB`);
+  }
+} catch (e) { console.error('[startup] backup-tmp sweep:', e.message?.slice(0, 60)); }
 
 // Open in-process SQLite connections (must precede schema migrations)
 try { openDatabases(); } catch (e) { console.error('[startup] openDatabases:', e.message?.slice(0, 60)); }
