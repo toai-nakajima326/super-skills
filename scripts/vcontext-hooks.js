@@ -2321,18 +2321,37 @@ async function cmdGc(dryRun = false) {
 // ── Integrity / crash recovery ──────────────────────────────────
 
 async function cmdIntegrity() {
-  const r = spawnSync('sqlite3', [VCTX_RAM_DB, 'PRAGMA integrity_check; PRAGMA quick_check;'],
-    { encoding: 'utf-8' });
-  const out = (r.stdout || '').trim();
-  const ok = out.split('\n').every(l => l === 'ok' || l.trim() === 'ok');
+  // 2026-04-20: separate sqlite3 invocations for the two PRAGMAs.
+  // The previous combined form (`PRAGMA integrity_check; PRAGMA
+  // quick_check;`) produced a spurious "malformed inverted index for
+  // FTS5 table main.entries_fts" from the second PRAGMA — but ONLY
+  // when chained after the first. Either PRAGMA alone reports "ok",
+  // and FTS5's own INSERT-based integrity check (INSERT INTO
+  // entries_fts VALUES('integrity-check')) also reports clean.
+  // Running them in separate connections avoids whatever shared-state
+  // quirk of the sqlite3 CLI triggers the false positive. The
+  // downstream cost was 40+ maintenance-cycle exit=1 streak (no GC,
+  // no audit retention) since the FTS5 data was fine all along.
+  //
+  // Also: integrity_check is a superset of quick_check, so we could
+  // drop quick_check entirely. Keeping it as a cheap cross-check
+  // helps catch issues integrity_check might miss on a busy DB.
+  const runPragma = (pragma) => {
+    const r = spawnSync('sqlite3', [VCTX_RAM_DB, pragma], { encoding: 'utf-8' });
+    return (r.stdout || '').trim();
+  };
+  const integrityOut = runPragma('PRAGMA integrity_check;');
+  const quickOut     = runPragma('PRAGMA quick_check;');
+  const combined = [integrityOut, quickOut].filter(Boolean).join('\n');
+  const ok = combined.split('\n').every(l => l === 'ok' || l.trim() === 'ok');
   if (ok) {
     console.log('DB integrity: OK');
     auditWrite({ event: 'integrity.ok' });
     return;
   }
   console.error('DB integrity: FAILED');
-  console.error(out);
-  auditWrite({ event: 'integrity.fail', detail: out.slice(0, 500) });
+  console.error(combined);
+  auditWrite({ event: 'integrity.fail', detail: combined.slice(0, 500) });
   // Offer restore path — target the currently active DB (primary on SSD,
   // or RAM path when VCONTEXT_USE_RAMDISK=1).
   const backup = join(VCTX_SSD_DIR, 'vcontext-backup.sqlite');
