@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.vcontext.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/mitsuru_nakajima/skills/scripts/vcontext-wrapper.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>WorkingDirectory</key>
+  <string>/Users/mitsuru_nakajima/skills</string>
+
+  <!-- 2026-04-20: ProcessType=Interactive.
+       launchctl print showed `immediate reason = inefficient` —
+       launchd classified the service this way after the morning's
+       116-force-restart loop (07:56-08:16 cold-boot cascade).
+       "inefficient" is launchd's self-protection tag for services in
+       a rapid-restart cycle; it dampens respawn priority and applies
+       resource throttling. ProcessType=Interactive tells launchd this
+       is a responsive HTTP server and removes the Standard-tier
+       resource limitations. Per launchd.plist(5):
+         "Interactive jobs are critical to maintaining a responsive
+          user experience, and this key should only be used if an
+          app's ability to be responsive depends on it, and cannot
+          be made Adaptive."
+       We can't be Adaptive — that classification requires explicit
+       XPC transactions via xpc_transaction_begin(3), and vcontext is
+       a plain HTTP server over TCP. -->
+  <key>ProcessType</key>
+  <string>Interactive</string>
+
+  <!-- Slight CPU priority. Default nice=0; -5 lets us win contention
+       against Spotlight / Time Machine / other background work
+       without disrupting foreground apps. -->
+  <key>Nice</key>
+  <integer>-5</integer>
+
+  <!-- Minimum seconds between launchd-managed respawns. Default 10s.
+       15s ensures a real crash loop can't spin faster than the
+       watchdog's cold-boot-grace (180s) can absorb; prevents another
+       "inefficient" tagging in the future. -->
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/vcontext-server.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/vcontext-server.log</string>
+</dict>
+</plist>
