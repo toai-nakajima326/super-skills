@@ -900,6 +900,26 @@ function emitBackupIntegrityAlert(file, reason) {
   } catch {}
 }
 
+// Delete a SQLite file and ALL its sidecar files (-wal, -shm, -journal).
+// Called at the start of each backup cycle and on every failure path so
+// interrupted backups never leave behind a -wal that the next cycle
+// appends to.
+//
+// 2026-04-20 bug discovery: a SIGKILL'd ramDb.backup(tmpPath) left a
+// .tmp-wal sidecar on disk. The NEXT backup cycle's ramDb.backup() call
+// saw the pre-existing .tmp + .tmp-wal and — instead of starting fresh
+// — reused them, appending pages to the old WAL. After ~60 cycles
+// (one morning of cascades), .tmp-wal had grown to **28.77 GB** with
+// the .tmp only 2.8 GB, which saturated APFS I/O and blocked the
+// event loop (/health 5s timeouts, /stats >5s, dashboard unloadable).
+// Removing the orphan family fixed latency immediately.
+function cleanupBackupTmp(baseTmpPath) {
+  const fsMod = require('node:fs');
+  for (const suffix of ['', '-wal', '-shm', '-journal']) {
+    try { fsMod.unlinkSync(baseTmpPath + suffix); } catch {}
+  }
+}
+
 function doBackup() {
   try {
     mkdirSync(BACKUP_DIR, { recursive: true });
@@ -911,6 +931,11 @@ function doBackup() {
       // accepted it, leaving the RAM DB without an entries table.
       // rename(2) on macOS APFS is atomic on same filesystem.
       const tmpPath = BACKUP_PATH + '.tmp';
+      // 2026-04-20 fix: defensive cleanup of the entire tmp fileset
+      // before starting. Any orphan -wal/-shm from an interrupted
+      // previous cycle would otherwise be grafted onto this cycle's
+      // write path and balloon unboundedly.
+      cleanupBackupTmp(tmpPath);
       ramDb.backup(tmpPath)
         .then(() => {
           try {
@@ -919,8 +944,21 @@ function doBackup() {
             if (!verifyBackupFile(tmpPath)) {
               console.warn('[vcontext] integrity_check failed on', tmpPath, '- aborting rotation, keeping .sqlite/.bak intact');
               emitBackupIntegrityAlert(tmpPath, 'integrity_check failed on freshly-written tmp');
-              try { fsMod.unlinkSync(tmpPath); } catch {}
+              cleanupBackupTmp(tmpPath);
               return;
+            }
+            // AC3 (2026-04-20): truncate any WAL on the verified tmp so
+            // the rename moves a single self-contained file. Without this
+            // a sidecar -wal spawned by verifyBackupFile's PRAGMA query
+            // is left behind, reproducing the very bug this block exists
+            // to fix.
+            try {
+              const tmpDb = new Database(tmpPath);
+              tmpDb.pragma('wal_checkpoint(TRUNCATE)');
+              tmpDb.close();
+            } catch (e) {
+              // Non-fatal — the cleanupBackupTmp after rename handles
+              // leftover sidecars too.
             }
             // AC2: verify the current .sqlite before promoting it to .bak.
             // If it's corrupt we keep the existing .bak untouched (it's
@@ -929,23 +967,36 @@ function doBackup() {
             if (existsSync(BACKUP_PATH)) {
               if (verifyBackupFile(BACKUP_PATH)) {
                 try { fsMod.renameSync(BACKUP_PATH, BACKUP_PATH + '.bak'); } catch {}
+                // Rotate any sidecars of the .sqlite too so a later
+                // verifyBackupFile(.bak) sees a consistent fileset.
+                for (const s of ['-wal', '-shm']) {
+                  try { fsMod.renameSync(BACKUP_PATH + s, BACKUP_PATH + '.bak' + s); } catch {}
+                }
               } else {
                 console.warn('[vcontext] current .sqlite is corrupt - skipping .bak rotation to preserve last-good copy');
                 emitBackupIntegrityAlert(BACKUP_PATH, 'integrity_check failed on current .sqlite; .bak rotation skipped');
-                // Drop the corrupt .sqlite; the fresh tmp is about to
-                // replace it. .bak stays put.
+                // Drop the corrupt .sqlite AND its sidecars; the fresh
+                // tmp is about to replace it. .bak stays put.
                 try { fsMod.unlinkSync(BACKUP_PATH); } catch {}
+                for (const s of ['-wal', '-shm']) {
+                  try { fsMod.unlinkSync(BACKUP_PATH + s); } catch {}
+                }
               }
             }
             fsMod.renameSync(tmpPath, BACKUP_PATH);
+            // rename(2) only moves the named file. Any residual -wal/-shm
+            // of the tmp still exist — purge them so the next cycle
+            // starts clean.
+            cleanupBackupTmp(tmpPath);
             console.log(`[vcontext] Backup complete: ${BACKUP_PATH}`);
           } catch (e) {
             console.error('[vcontext] Backup rename failed:', e.message);
+            cleanupBackupTmp(tmpPath);
           }
         })
         .catch((err) => {
           console.error('[vcontext] Async backup failed:', err.message);
-          try { require('node:fs').unlinkSync(tmpPath); } catch {}
+          cleanupBackupTmp(tmpPath);
           // Direct file copy fallback — still use the tmp+rename pattern.
           // Same integrity gate applies: file copy can also produce a
           // truncated image if the source DB was being written mid-copy.
@@ -954,13 +1005,15 @@ function doBackup() {
             if (!verifyBackupFile(tmpPath)) {
               console.warn('[vcontext] integrity_check failed on fallback copy', tmpPath, '- aborting rotation');
               emitBackupIntegrityAlert(tmpPath, 'integrity_check failed on fallback file-copy tmp');
-              try { require('node:fs').unlinkSync(tmpPath); } catch {}
+              cleanupBackupTmp(tmpPath);
               return;
             }
             require('node:fs').renameSync(tmpPath, BACKUP_PATH);
+            cleanupBackupTmp(tmpPath);
             console.log('[vcontext] Backup (file copy fallback) complete');
           } catch (e2) {
             console.error('[vcontext] Fallback backup also failed:', e2.message);
+            cleanupBackupTmp(tmpPath);
           }
         });
     }
@@ -3461,9 +3514,16 @@ async function startEmbedLoop() {
   embedLoopRunning = false;
 }
 
-// ── Periodic migration check (piggybacks on backup timer) ─────
+// ── Periodic maintenance (backup moved to separate process 2026-04-20) ─
+// Formerly called doBackupAndMigrate; renamed for clarity. File backup
+// is now an external script (scripts/vcontext-backup.sh) managed by
+// com.vcontext.backup LaunchAgent. The in-process call used to saturate
+// APFS I/O and block the event loop — see
+// docs/analysis/2026-04-20-aios-morning-3-bugs.md §"Backup WAL runaway".
+// doBackup() is retained below for (a) graceful shutdown flush and (b)
+// emergency manual invocation, but is no longer on the 5-min timer.
 async function doBackupAndMigrate() {
-  doBackup();
+  // doBackup() intentionally NOT called here anymore — see header comment.
   // Sync any entries that write-through missed (RAM → SSD catch-up)
   try {
     syncRamToSsd();

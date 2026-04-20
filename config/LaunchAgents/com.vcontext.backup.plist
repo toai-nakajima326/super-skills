@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.vcontext.backup</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/mitsuru_nakajima/skills/scripts/vcontext-backup.sh</string>
+  </array>
+
+  <!-- Run every 15 minutes. Was 5 min in the in-process era, but that
+       was tuned for ramDb.backup() which is page-incremental. The
+       sqlite3 CLI .backup command on a 6 GB DB takes 60-120 seconds
+       of disk/CPU; running it every 5 min left little headroom. Since
+       the primary already has WAL durability, a 15 min window loses at
+       most 15 min of writes on catastrophic failure — acceptable. -->
+  <key>StartInterval</key>
+  <integer>900</integer>
+
+  <!-- Bootstrap one backup immediately on load so we don't wait 5 min -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- launchd will refuse to re-run more than once per 60 s even if we
+       somehow stack triggers. Guards against the "launchd says you're
+       not that important, ignoring" cascade (dabrahams launchd research,
+       2025). -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <!-- LowPriorityIO tells the kernel to defer this process's disk IO
+       behind any higher-priority process. The server keeps its disk
+       bandwidth; we run in the gaps. -->
+  <key>LowPriorityIO</key>
+  <true/>
+
+  <!-- Nice +10 for CPU — our integrity_check can be 1-3 s of CPU at
+       full steam, which would momentarily slow the server's event loop
+       without this. -->
+  <key>Nice</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/vcontext-backup-external.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/tmp/vcontext-backup-external.log</string>
+
+  <!-- 2026-04-20 architectural note: moved out of vcontext-server.js's
+       in-process setInterval(doBackupAndMigrate, 5min). The in-process
+       backup was coupled to Node's single event loop — a SIGKILL'd
+       cycle left orphan -wal files that grew to 28 GB overnight,
+       saturating APFS I/O and making the server unreadable.
+       See docs/analysis/2026-04-20-aios-morning-3-bugs.md + the commit
+       message for this plist. -->
+</dict>
+</plist>
