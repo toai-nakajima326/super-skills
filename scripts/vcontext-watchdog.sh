@@ -35,9 +35,18 @@ LAST_NOTIFY_FILE="/tmp/vcontext-watchdog-last-notify.txt"
 # Memory thresholds reflect steady-state + buffer, not leak detection:
 #   Qwen3-8B-4bit ~6GB + draft 0.5GB + prompt cache 1GB + runtime 2GB = ~10GB
 #   Embed 8B-DWQ  ~5GB + cache                                       = ~5-6GB
-CHECK_INTERVAL="${VCONTEXT_WATCHDOG_INTERVAL:-20}"           # seconds between checks (tightened 60→20 per 2026-04-18 user directive during 36h vacation window)
+# Defaults relaxed 2026-04-20 after 08:16 force-restart loop incident:
+# 20s interval + VCONTEXT_RESTART_ON_HEALTH_FAIL=1 killed the server
+# repeatedly during its 79s SQLite cold-boot. User-vacation (36h) window
+# is over — back to calmer defaults + new cold-boot grace below.
+CHECK_INTERVAL="${VCONTEXT_WATCHDOG_INTERVAL:-60}"           # seconds between checks (was 20; 60 allows SQLite cold boot to finish)
 NOTIFY_COOLDOWN="${VCONTEXT_WATCHDOG_COOLDOWN:-300}"          # min gap between user notifications
-VCONTEXT_RESTART_ON_HEALTH_FAIL="${VCONTEXT_RESTART_ON_HEALTH_FAIL:-1}"  # 1=force launchctl bootout+bootstrap on /health fail; 0=legacy wrapper-only (2026-04-18: aggressive mode for user vacation)
+VCONTEXT_RESTART_ON_HEALTH_FAIL="${VCONTEXT_RESTART_ON_HEALTH_FAIL:-0}"  # 1=force launchctl bootout+bootstrap on /health fail; 0=legacy wrapper-only (default: legacy, set =1 only during vacation / unattended windows)
+# Cold-boot grace: SQLite migration + backfill index on startup take
+# up to 79s on a 6 GB primary DB (observed 2026-04-20 morning). Force-
+# restart during that window kills the server mid-backfill → infinite
+# cascade. Never force-restart a server younger than this threshold.
+VCONTEXT_COLD_BOOT_GRACE_S="${VCONTEXT_COLD_BOOT_GRACE_S:-180}"  # seconds; 3× worst-observed cold boot
 RAM_WARN_PCT="${VCONTEXT_RAM_WARN_PCT:-85}"                  # warn at this RAM disk fill %
 RAM_CRIT_PCT="${VCONTEXT_RAM_CRIT_PCT:-95}"                  # emergency cleanup at this %
 MLX_GEN_MAX_MB="${VCONTEXT_MLX_GEN_MAX_MB:-14000}"           # MLX Generate memory kill threshold (14 GB)
@@ -137,24 +146,46 @@ while true; do
       # 2026-04-18: wrapper alive but /health not responding → process likely
       # hung (main-thread starvation or mid-OOM). Force bootout + bootstrap
       # for a clean cycle. 2-strike guard to avoid flapping on transient.
-      FAIL_FILE="/tmp/vcontext-watchdog-server-fails"
-      FAILS=$(cat "$FAIL_FILE" 2>/dev/null || echo 0)
-      FAILS=$((FAILS + 1))
-      echo "$FAILS" > "$FAIL_FILE"
-      if [[ "$FAILS" -ge 2 ]]; then
-        log "Server /health fail x${FAILS} — force bootout + bootstrap"
-        launchctl bootout "gui/$(id -u)/com.vcontext.server" 2>/dev/null
-        sleep 2
-        pkill -9 -f vcontext-wrapper 2>/dev/null
-        pkill -9 -f vcontext-server.js 2>/dev/null
-        sleep 3
-        rm -f /tmp/aios-mlx-lock
-        launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.vcontext.server.plist" 2>/dev/null
-        rm -f "$FAIL_FILE"
-        sleep 15
-        if check_health; then
-          send_recovery "Server force-restarted successfully"
-          WAS_DOWN=false
+      #
+      # 2026-04-20 fix — cold-boot grace: if the server process was started
+      # within VCONTEXT_COLD_BOOT_GRACE_S (default 180s), skip force-restart.
+      # Our SQLite cold boot takes up to 79s (schema migration + backfill
+      # index + WAL replay on a 6GB primary DB). Force-killing during that
+      # window creates an infinite loop that never lets the server finish.
+      # Root cause of this morning's 07:42→08:16 cascade.
+      # Per dabrahams launchd research: launchd's own ThrottleInterval
+      # will start ignoring our re-bootstrap calls ("You're not that
+      # important. Ignoring.") if we cycle too fast — another reason to
+      # wait patiently for cold boot instead of re-hammering.
+      SERVER_PID=$(pgrep -f vcontext-server.js 2>/dev/null | head -1)
+      SERVER_AGE_S=0
+      if [[ -n "$SERVER_PID" ]]; then
+        SERVER_AGE_S=$(ps -o etimes= -p "$SERVER_PID" 2>/dev/null | tr -d ' ' || echo 0)
+      fi
+      if [[ "$SERVER_AGE_S" -gt 0 ]] && [[ "$SERVER_AGE_S" -lt "$VCONTEXT_COLD_BOOT_GRACE_S" ]]; then
+        log "Server too young (${SERVER_AGE_S}s < ${VCONTEXT_COLD_BOOT_GRACE_S}s cold-boot grace) — skip force-restart, let cold boot finish"
+        # Don't increment fail counter during grace window — the server
+        # just isn't ready yet, not hung.
+      else
+        FAIL_FILE="/tmp/vcontext-watchdog-server-fails"
+        FAILS=$(cat "$FAIL_FILE" 2>/dev/null || echo 0)
+        FAILS=$((FAILS + 1))
+        echo "$FAILS" > "$FAIL_FILE"
+        if [[ "$FAILS" -ge 2 ]]; then
+          log "Server /health fail x${FAILS} (age=${SERVER_AGE_S}s) — force bootout + bootstrap"
+          launchctl bootout "gui/$(id -u)/com.vcontext.server" 2>/dev/null
+          sleep 2
+          pkill -9 -f vcontext-wrapper 2>/dev/null
+          pkill -9 -f vcontext-server.js 2>/dev/null
+          sleep 3
+          rm -f /tmp/aios-mlx-lock
+          launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.vcontext.server.plist" 2>/dev/null
+          rm -f "$FAIL_FILE"
+          sleep 15
+          if check_health; then
+            send_recovery "Server force-restarted successfully"
+            WAS_DOWN=false
+          fi
         fi
       fi
     fi
