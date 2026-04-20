@@ -1,188 +1,91 @@
 #!/bin/bash
-# vcontext-backup.sh — out-of-process backup of the primary DB.
+# vcontext-backup.sh — thin HTTP client that triggers a server-side backup.
 #
-# Why this exists (2026-04-20):
-#   The in-server setInterval(doBackupAndMigrate, 5min) did file-level
-#   backup on the Node event loop. A SIGKILL mid-backup left orphan
-#   .tmp/.tmp-wal files; the next cycle's ramDb.backup() reused them,
-#   appending unchecked — one morning of cascade cycles grew the
-#   .tmp-wal to 28.77 GB. That size saturated APFS I/O, which blocked
-#   the event loop, which made /health/stats/recent time out for
-#   clients (dashboard, Codex, hooks). The in-process coupling was
-#   itself the bug.
+# Stage 3b of the 2026-04-20 loose-coupling redesign
+# (docs/specs/2026-04-20-true-loose-coupling-redesign.md).
 #
-#   User's architectural call: run backup as a separate process. This
-#   script is that separate process. No Node, no event loop. SQLite's
-#   online backup is designed for concurrent access to a live WAL DB,
-#   so the server keeps serving reads/writes while we snapshot.
+# Before 3b: this script shelled out to `sqlite3 "$PRIMARY" ".backup"`,
+# which held a read-snapshot on primary.sqlite for 60-120s and blocked
+# the server's WAL from TRUNCATE-checkpointing. When the sqlite3 hung
+# (observed 2026-04-20 for 1h 59m), the live WAL grew to 3 GB.
 #
-# Contract:
-#   Input:  $HOME/skills/data/vcontext-primary.sqlite  (live, owned by server)
-#   Output: $HOME/skills/data/vcontext-backup.sqlite   (atomic rename target)
-#           $HOME/skills/data/vcontext-backup.sqlite.bak  (last-good safety)
+# After 3b: we POST to /admin/backup. The server owns primary.sqlite
+# exclusively; no external process opens the file. P1 (loose coupling)
+# fully applied for the backup surface.
 #
-# Scheduled by: ~/Library/LaunchAgents/com.vcontext.backup.plist (300s interval,
-# LowPriorityIO=true, Nice=10 — yields to the server process).
+# Scheduled by com.vcontext.backup LaunchAgent every 15 min.
+#
+# Contract (via docs/schemas/vcontext-api-v1.yaml):
+#   POST /admin/backup
+#   headers: X-Vcontext-Admin: yes
+#   returns: { status, backup_path, size_bytes, integrity, duration_ms,
+#              ran_at, cached?, next_in_seconds? }
 
 set -eu -o pipefail
 
-PRIMARY="$HOME/skills/data/vcontext-primary.sqlite"
-BACKUP="$HOME/skills/data/vcontext-backup.sqlite"
-# .ext-tmp distinguishes from the in-server .tmp that used to live here
-# (never reuse the old name — keeps forensic logs readable and avoids
-# any chance of collision with a stale file from the pre-2026-04-20 era).
-TMP="${BACKUP}.ext-tmp"
 LOG="/tmp/vcontext-backup-external.log"
+VCTX_URL="${VCONTEXT_URL:-http://127.0.0.1:3150}"
+# Max wait for the server to complete the backup. On a 6 GB DB, the
+# backup is ~60-90 s. 5 min cap lets us tolerate slow disks without
+# hanging forever — and a slow server likely means bigger problems.
+BACKUP_TIMEOUT_S="${VCTX_BACKUP_TIMEOUT_S:-300}"
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 
 exec >> "$LOG" 2>&1
-log "=== external backup cycle ==="
+log "=== external backup cycle (thin-client) ==="
 
-# ── Pre-flight: clean any orphan fileset from prior interrupted run ──
-# This is the CRITICAL defense. A bare `rm` before each cycle guarantees
-# we never inherit a runaway -wal. 4 suffixes cover every SQLite sidecar
-# kind (main, WAL mode, shared-memory, legacy rollback journal).
-for suffix in '' '-wal' '-shm' '-journal'; do
-  rm -f "${TMP}${suffix}"
-done
-
-if [[ ! -f "$PRIMARY" ]]; then
-  log "primary DB not found at $PRIMARY — aborting (server may be mid-boot)"
+# Pre-flight: server reachable?
+if ! curl -sS -m 3 "${VCTX_URL}/health" > /dev/null 2>&1; then
+  log "server unreachable at ${VCTX_URL} — skipping cycle (queue retry next tick)"
   exit 0
 fi
 
-# ── WAL checkpoint + online backup ──
-#
-# 2026-04-20 design journey worth documenting:
-# We tried an APFS-clone approach (`cp -c` of primary + sidecars). In
-# theory it's near-instant. In practice, cloning a live WAL-mode DB
-# with concurrent writes produces an "integrity_check: database disk
-# image is malformed" result — torn page writes + sidecar race
-# conditions make the snapshot non-recoverable without holding a
-# writer lock during the clone, which bash can't cleanly do.
-# Reverted to `.backup`; kept the PASSIVE checkpoint as a cheap
-# optimization (smaller WAL → slightly faster backup).
-#
-# Follow-up options explored and deferred:
-#   - VACUUM INTO: fully consistent but still reads+writes all data.
-#     No throughput win over .backup for a 6 GB DB.
-#   - BEGIN IMMEDIATE + cp -c (via helper Node script): works but adds
-#     a cross-process lock protocol. Complexity > benefit for now.
-# The real performance win on the read-side came from #1
-# (yieldToEventLoop in doBackupAndMigrate), not from backup speed.
-# Backup sitting at 60-120s is fine when it doesn't block reads.
+# Fire the backup.
+RESP=$(curl -sS -m "$BACKUP_TIMEOUT_S" \
+  -X POST "${VCTX_URL}/admin/backup" \
+  -H "X-Vcontext-Admin: yes" \
+  -H "Content-Type: application/json" \
+  -d '{}' 2>&1)
+RC=$?
 
-# Cheap pre-step: PASSIVE checkpoint flushes as many WAL pages as can
-# be flushed without blocking any writers. Shrinks the WAL the backup
-# will need to walk. Safe to fail silently — if there's contention,
-# backup still works via the full-WAL path.
-sqlite3 "$PRIMARY" 'PRAGMA wal_checkpoint(PASSIVE);' >/dev/null 2>&1 || true
-
-# Online backup via sqlite3 CLI. Page-level consistent copy; the live
-# server can read/write concurrently. Takes 60-120 s on the 6 GB DB
-# but no longer blocks vcontext's event loop (we're a separate process
-# at Nice=10 + LowPriorityIO).
-#
-# 2026-04-20 hard-timeout: the .backup command CAN hang indefinitely
-# (observed today: a sqlite3 process stuck in .backup for 1h 59m,
-# holding a read-snapshot that prevented the live DB's WAL from ever
-# checkpointing — WAL grew to 3 GB before we caught it). `timeout 300`
-# gives the backup 5 minutes max; if it exceeds that, something is
-# wrong and we kill it rather than let it pile up more reader-locked
-# frames. BSD-style `gtimeout` via coreutils, or fallback to a bg-kill
-# pattern if not installed.
-BACKUP_TIMEOUT_S=300
-if command -v gtimeout >/dev/null 2>&1; then
-  TIMEOUT_CMD="gtimeout $BACKUP_TIMEOUT_S"
-elif command -v timeout >/dev/null 2>&1; then
-  TIMEOUT_CMD="timeout $BACKUP_TIMEOUT_S"
-else
-  # Fallback: background + watchdog kill
-  TIMEOUT_CMD=""
-fi
-
-if [[ -n "$TIMEOUT_CMD" ]]; then
-  if ! $TIMEOUT_CMD sqlite3 "$PRIMARY" ".backup '$TMP'" 2>&1; then
-    RC=$?
-    if [[ $RC -eq 124 ]]; then
-      log "backup exceeded ${BACKUP_TIMEOUT_S}s timeout — killing and aborting cycle (would have created a zombie)"
-    else
-      log ".backup command failed (rc=$RC) — cleaning tmp, aborting cycle"
-    fi
-    for suffix in '' '-wal' '-shm' '-journal'; do rm -f "${TMP}${suffix}"; done
-    exit 1
-  fi
-else
-  # Fallback: spawn + watchdog-kill after timeout.
-  # macOS has no `timeout` / `gtimeout` by default, so THIS is the live
-  # path in production. Review-agent 2026-04-20 caught a HIGH-severity
-  # bug: `wait $SQLITE_PID` under `set -e` exits the script on any
-  # non-zero exit (including when our watchdog kill sends SIGKILL to
-  # sqlite3), skipping the cleanup block below. Result: orphan
-  # .ext-tmp* files — i.e., the very regression (WAL bloat via
-  # orphans) this timeout code was supposed to prevent.
-  # Fix: `|| true` so wait's non-zero doesn't trip set -e, then
-  # capture the real exit via $?.
-  sqlite3 "$PRIMARY" ".backup '$TMP'" 2>&1 &
-  SQLITE_PID=$!
-  (
-    sleep $BACKUP_TIMEOUT_S
-    if kill -0 $SQLITE_PID 2>/dev/null; then
-      log "backup exceeded ${BACKUP_TIMEOUT_S}s timeout — killing PID $SQLITE_PID"
-      kill -9 $SQLITE_PID 2>/dev/null
-    fi
-  ) &
-  WATCHDOG_PID=$!
-  wait $SQLITE_PID || true   # ← HIGH-bug fix: don't let set -e eat the error path
-  RC=$?
-  kill $WATCHDOG_PID 2>/dev/null || true
-  if [[ $RC -ne 0 ]]; then
-    log ".backup command failed or killed (rc=$RC) — cleaning tmp, aborting cycle"
-    for suffix in '' '-wal' '-shm' '-journal'; do rm -f "${TMP}${suffix}"; done
-    exit 1
-  fi
-fi
-
-# ── Integrity gate on the fresh tmp ──
-INTEGRITY=$(sqlite3 "$TMP" 'PRAGMA integrity_check;' 2>&1 | head -1)
-if [[ "$INTEGRITY" != "ok" ]]; then
-  log "integrity_check FAILED on fresh tmp: '$INTEGRITY' — dropping, keeping existing .sqlite untouched"
-  for suffix in '' '-wal' '-shm' '-journal'; do rm -f "${TMP}${suffix}"; done
+if [[ $RC -ne 0 ]]; then
+  log "curl failed (rc=$RC) — likely server timeout or network"
+  log "response snippet: ${RESP:0:200}"
   exit 1
 fi
 
-# ── Rotate: current .sqlite → .bak (only if currently-valid) ──
-# Never overwrite .bak with a corrupt .sqlite — .bak is the last-good
-# safety copy that recovered us yesterday. Same invariant as the in-
-# server doBackup's AC2.
-if [[ -f "$BACKUP" ]]; then
-  BACKUP_INTEGRITY=$(sqlite3 "$BACKUP" 'PRAGMA integrity_check;' 2>&1 | head -1)
-  if [[ "$BACKUP_INTEGRITY" == "ok" ]]; then
-    mv -f "$BACKUP" "${BACKUP}.bak"
-    for s in '-wal' '-shm'; do
-      [[ -f "${BACKUP}${s}" ]] && mv -f "${BACKUP}${s}" "${BACKUP}.bak${s}" || true
-    done
-  else
-    log "existing .sqlite corrupt ('$BACKUP_INTEGRITY') — dropping it but keeping .bak intact"
-    rm -f "$BACKUP" "${BACKUP}-wal" "${BACKUP}-shm"
-  fi
-fi
+# Parse response for status.
+STATUS=$(echo "$RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('status','?'))" 2>/dev/null || echo "parse_fail")
+case "$STATUS" in
+  ok)
+    SIZE=$(echo "$RESP" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('size_bytes',0))" 2>/dev/null)
+    DUR=$(echo "$RESP" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('duration_ms',0))" 2>/dev/null)
+    INT=$(echo "$RESP" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('integrity','?'))" 2>/dev/null)
+    CACHED=$(echo "$RESP" | python3 -c "import sys,json;d=json.load(sys.stdin);print('yes' if d.get('cached') else 'no')" 2>/dev/null)
+    log "backup OK: size=${SIZE} bytes duration=${DUR}ms integrity=${INT} cached=${CACHED}"
+    ;;
+  busy)
+    log "backup busy (in-flight guard) — another backup already running, will retry next tick"
+    ;;
+  skipped)
+    REASON=$(echo "$RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('reason','?'))" 2>/dev/null)
+    log "backup skipped: ${REASON}"
+    ;;
+  fail)
+    log "backup FAILED: ${RESP:0:300}"
+    exit 1
+    ;;
+  *)
+    log "unexpected status=${STATUS} response=${RESP:0:300}"
+    exit 1
+    ;;
+esac
 
-# ── Promote tmp to primary backup ──
-mv -f "$TMP" "$BACKUP"
-# rename(2) only moves the named file. Purge any tmp sidecars that
-# sqlite3 may have created during the .backup or integrity_check calls.
-for suffix in '-wal' '-shm' '-journal'; do
-  rm -f "${TMP}${suffix}"
-done
-
-SIZE=$(du -h "$BACKUP" | awk '{print $1}')
-log "backup complete: $BACKUP ($SIZE)"
-
-# ── Housekeeping: log rotation ──
-# Prevent this script's own log from growing unboundedly.
-if [[ -f "$LOG" ]] && [[ $(stat -f%z "$LOG" 2>/dev/null || echo 0) -gt 10485760 ]]; then  # >10 MB
+# Log rotation (>10 MB → keep last 500 lines)
+if [[ -f "$LOG" ]] && [[ $(stat -f%z "$LOG" 2>/dev/null || echo 0) -gt 10485760 ]]; then
   tail -500 "$LOG" > "${LOG}.tmp" && mv "${LOG}.tmp" "$LOG"
   log "(log truncated to last 500 lines)"
 fi
+
+exit 0
