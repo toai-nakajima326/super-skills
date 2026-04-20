@@ -35,9 +35,31 @@ sqlite3 "$HOME/skills/data/vcontext-audit.db" \
   "DELETE FROM audit WHERE at < datetime('now','-90 days');" 2>/dev/null && \
   log "Audit retention applied (>90d pruned)"
 
-if ! "$NODE" "$HOOK" integrity >> "$LOG" 2>&1; then
-  log "Integrity FAILED — aborting this cycle, letting watchdog handle recovery"
-  exit 1
+# 2026-04-20 Stage 2: integrity check is now a server-owned HTTP endpoint.
+# Previously we shelled out to `node vcontext-hooks.js integrity` which
+# spawned a sqlite3 CLI holding a read-lock on primary.sqlite for up to
+# 10 minutes — that's the read-lock that bloated WAL to 3 GB today.
+# The server-side endpoint checks the BACKUP SNAPSHOT (separate file,
+# no contention), is rate-limited 1/hour, and records results as
+# admin-op entries for dashboard visibility.
+# Failure in this call is NON-FATAL — an integrity issue on the backup
+# snapshot is a signal, not a reason to abort the whole cycle. The
+# entire rest of maintenance (GC, audit retention, metrics, etc.) still
+# runs.
+INTEGRITY_RESP=$(curl -sS -m 30 -X POST \
+  -H "X-Vcontext-Admin: yes" \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  http://127.0.0.1:3150/admin/integrity-check 2>&1)
+if echo "$INTEGRITY_RESP" | grep -q '"status":"ok"'; then
+  log "Integrity: OK (via /admin/integrity-check)"
+elif echo "$INTEGRITY_RESP" | grep -q '"status":"skipped"'; then
+  REASON=$(echo "$INTEGRITY_RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('reason','?'))" 2>/dev/null)
+  log "Integrity: skipped (${REASON:-unknown}) — will retry next cycle"
+elif echo "$INTEGRITY_RESP" | grep -q '"cached":true'; then
+  log "Integrity: OK (cached, within 1h throttle)"
+else
+  log "Integrity: check returned anomaly — $INTEGRITY_RESP"
 fi
 
 # Backup verification — once per cycle, confirm latest snapshot is restorable.

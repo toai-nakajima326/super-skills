@@ -2191,6 +2191,68 @@ paths:
         '200':
           description: Rebuilt
 
+  /admin/integrity-check:
+    post:
+      tags: [admin]
+      operationId: integrityCheck
+      summary: Run SQLite integrity_check + quick_check against the BACKUP snapshot
+      description: |
+        Stage 2 of the 2026-04-20 loose-coupling redesign. Runs both PRAGMAs
+        against `vcontext-backup.sqlite` (NOT live primary) via server-spawned
+        sqlite3 CLI with 10-minute hard timeout. Rate-limited to 1/hour.
+
+        Why backup (not primary):
+          - primary.sqlite is live; a reader-snapshot held by an external
+            sqlite3 process blocks the live WAL from TRUNCATE-checkpointing,
+            observed 2026-04-20 as a 3 GB WAL bloat
+          - backup.sqlite is a `.backup()` snapshot, isolated, no contention
+          - if backup integrity is clean, primary's on-disk state at backup
+            time was clean; primary self-heals via WAL+fsync per commit
+
+        Safety:
+          - Requires X-Vcontext-Admin: yes header
+          - Skips (503) if backup is missing, too small, or mid-write
+            (.ext-tmp present). Next cycle retries.
+          - Does NOT block the Node event loop — sqlite3 runs in a separate
+            process; /health etc stay responsive.
+      security:
+        - BearerAuth: []
+          AdminHeader: []
+      parameters:
+        - in: header
+          name: X-Vcontext-Admin
+          required: true
+          schema: { type: string, enum: [yes] }
+      responses:
+        '200':
+          description: Integrity check result or cached response.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok, fail, skipped]
+                  target: { type: string, enum: [backup] }
+                  backup_path: { type: string }
+                  backup_size: { type: integer }
+                  integrity_check: { type: string }
+                  quick_check: { type: string }
+                  integrity_stderr: { type: string, nullable: true }
+                  quick_stderr: { type: string, nullable: true }
+                  duration_ms: { type: integer }
+                  ran_at: { type: string, format: date-time }
+                  cached: { type: boolean }
+                  next_in_minutes: { type: integer }
+                  reason:
+                    type: string
+                    description: "Present only when status=skipped (e.g. backup_missing, backup_too_small, backup_cycle_in_progress)."
+        '403':
+          description: Missing X-Vcontext-Admin header.
+        '503':
+          description: Backup file not available (missing / too small / mid-write). Retry later.
+
   /admin/fts-full-rebuild:
     post:
       tags: [admin]

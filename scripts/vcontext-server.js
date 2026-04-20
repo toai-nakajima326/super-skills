@@ -6553,6 +6553,7 @@ const ENDPOINTS_LIST = [
   'POST   /admin/trigger-l3-summary — force-generate L3 weekly summary {week?: "YYYY-Www"}',
   'POST   /admin/task-request       — submit an AIOS task queue job',
   'GET    /admin/task-queue         — snapshot of pending/running/recent task queue',
+  'POST   /admin/integrity-check    — run integrity_check + quick_check {target?: "primary"|"backup"} (default: backup, rate-limited 1/h)',
 ];
 
 const server = createServer(async (req, res) => {
@@ -7566,6 +7567,143 @@ const server = createServer(async (req, res) => {
       try {
         ramDb.exec(`INSERT INTO entries_fts(entries_fts) VALUES('rebuild')`);
         sendJson(res, 200, { status: 'rebuilt' });
+      } catch (e) {
+        sendJson(res, 500, { error: e.message });
+      }
+    } else if (method === 'POST' && path === '/admin/integrity-check') {
+      // Stage 2 of loose-coupling redesign (docs/specs/2026-04-20-true-
+      // loose-coupling-redesign.md). Runs PRAGMA integrity_check against
+      // the BACKUP SNAPSHOT (not live primary) so maintenance.sh and
+      // hooks.js no longer spawn sqlite3 CLIs that hold read-locks on
+      // primary.sqlite for minutes at a time (root cause of today's
+      // 3 GB WAL bloat).
+      //
+      // Target design decision (2026-04-20 agile iteration):
+      //   v1 supported target=primary via ramDb.prepare('integrity_check')
+      //   — which blocked the Node event loop for 37 seconds on our 6 GB
+      //   DB. That's the exact symptom we're trying to eliminate. v2
+      //   drops target=primary entirely: integrity of primary is
+      //   guaranteed by SQLite WAL+fsync on every commit, so explicit
+      //   re-verification on live primary is not a useful maintenance
+      //   task. Backup snapshot is the right check surface — isolated
+      //   file, no lock contention, takes minutes but doesn't matter.
+      //
+      // Body: {} (reserved for future options; currently ignored)
+      // Returns { status, backup_path, integrity_check, quick_check,
+      //           duration_ms, ran_at, cached?: bool }.
+      //
+      // Rate-limit: 1/hour. Maintenance.sh cycles every 30-60 min;
+      // first call of each hour does the check, subsequent return cache.
+      //
+      // Auth: admin-tier operation. Requires X-Vcontext-Admin: yes
+      // (same gate as /admin/fts-rebuild and other destructive admin
+      // ops). Security-review 2026-04-20 found v1 missed this guard.
+      if (req.headers['x-vcontext-admin'] !== 'yes') {
+        return sendJson(res, 403, {
+          error: 'X-Vcontext-Admin: yes header required for admin operations',
+        });
+      }
+      try {
+        await readBody(req); // consume body even if unused
+        const now = Date.now();
+        const THROTTLE_MS = 60 * 60 * 1000; // 1h
+        const backupPath = join(BACKUP_DIR, 'vcontext-backup.sqlite');
+
+        // In-memory cache (persists for server lifetime).
+        if (!globalThis._integrityCache) globalThis._integrityCache = {};
+        const cached = globalThis._integrityCache['backup'];
+        if (cached && now - cached.ran_at_ms < THROTTLE_MS) {
+          return sendJson(res, 200, {
+            ...cached.result,
+            cached: true,
+            next_in_minutes: Math.round((THROTTLE_MS - (now - cached.ran_at_ms)) / 60000),
+          });
+        }
+
+        // Sanity-check the backup file before spending time on it.
+        if (!existsSync(backupPath)) {
+          return sendJson(res, 503, {
+            status: 'skipped', reason: 'backup_missing', backup_path: backupPath,
+          });
+        }
+        let stat;
+        try { stat = statSync(backupPath); } catch (e) {
+          return sendJson(res, 503, {
+            status: 'skipped', reason: 'stat_failed', detail: e.message,
+          });
+        }
+        if (stat.size < 1024 * 1024) {
+          return sendJson(res, 503, {
+            status: 'skipped', reason: 'backup_too_small', size: stat.size,
+            hint: 'likely a fresh / in-progress backup; will retry next cycle',
+          });
+        }
+        // If an .ext-tmp exists alongside, a backup cycle is in progress.
+        // Don't check mid-write — the main .sqlite file is stable but its
+        // -wal/-shm could be racing. Return "skipped" to let the next
+        // cycle retry against a completed backup.
+        if (existsSync(backupPath + '.ext-tmp')) {
+          return sendJson(res, 503, {
+            status: 'skipped', reason: 'backup_cycle_in_progress',
+            hint: '.ext-tmp present; retry in a few minutes',
+          });
+        }
+
+        const startT = Date.now();
+        const { spawnSync } = require('node:child_process');
+        const runOne = (pragma) => {
+          const r = spawnSync('sqlite3', [backupPath, pragma], {
+            encoding: 'utf-8',
+            timeout: 10 * 60 * 1000, // 10 min hard cap
+            killSignal: 'SIGKILL',
+          });
+          return {
+            stdout: (r.stdout || '').trim(),
+            stderr: (r.stderr || '').trim(),
+            signal: r.signal,
+            status: r.status,
+          };
+        };
+        const ic = runOne('PRAGMA integrity_check;');
+        const qc = runOne('PRAGMA quick_check;');
+        const ok = ic.stdout === 'ok' && qc.stdout === 'ok'
+                && !ic.stderr && !qc.stderr
+                && ic.status === 0 && qc.status === 0;
+        const result = {
+          status: ok ? 'ok' : 'fail',
+          target: 'backup',
+          backup_path: backupPath,
+          backup_size: stat.size,
+          integrity_check: ic.stdout,
+          integrity_stderr: ic.stderr || undefined,
+          integrity_exit: ic.status,
+          quick_check: qc.stdout,
+          quick_stderr: qc.stderr || undefined,
+          quick_exit: qc.status,
+          duration_ms: Date.now() - startT,
+          ran_at: new Date().toISOString(),
+        };
+
+        globalThis._integrityCache['backup'] = { ran_at_ms: now, result };
+
+        // Record as entry for dashboard / observability.
+        try {
+          ramDb.prepare(
+            `INSERT INTO entries (type, content, tags, session, token_estimate, created_at, content_hash)
+             VALUES (?, ?, ?, 'admin-op', ?, datetime('now'), ?)`
+          ).run(
+            'admin-op',
+            JSON.stringify({ op: 'integrity-check', ...result }),
+            JSON.stringify(['admin-op', `op:integrity-check`, `result:${result.status}`]),
+            Math.ceil(JSON.stringify(result).length / 4),
+            require('node:crypto').createHash('sha256')
+              .update(`integrity:backup:${now}`).digest('hex'),
+          );
+        } catch (e) {
+          // Non-fatal — logging failure shouldn't block the op result.
+        }
+
+        sendJson(res, 200, result);
       } catch (e) {
         sendJson(res, 500, { error: e.message });
       }
