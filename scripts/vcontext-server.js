@@ -3566,6 +3566,29 @@ const yieldToEventLoop = () =>
 
 async function doBackupAndMigrate() {
   // doBackup() intentionally NOT called here anymore — see header comment.
+  //
+  // 2026-04-20 WAL management: wal_autocheckpoint=500 runs PASSIVE
+  // checkpoints automatically, which removes superseded frames but
+  // does NOT shrink the WAL file. Under load the WAL grew to 3 GB
+  // today because a zombie external reader blocked TRUNCATE for
+  // 2 hours. Now we explicitly TRUNCATE at the start of every
+  // maintenance cycle. If an external reader is holding a snapshot,
+  // TRUNCATE falls back to PASSIVE behavior (safe no-op), so this
+  // is always safe to call.
+  try {
+    const r = ramDb.pragma('wal_checkpoint(TRUNCATE)');
+    // Log only when we actually did work to avoid spam.
+    // r is array like [{busy: 0, log: N, checkpointed: N}] in older
+    // better-sqlite3; newer returns the 3-int form similarly.
+    const row = Array.isArray(r) ? r[0] : r;
+    if (row && typeof row === 'object' && row.log > 0) {
+      console.log(`[vcontext:auto] WAL checkpoint busy=${row.busy} log=${row.log} ckpt=${row.checkpointed}`);
+    }
+  } catch (e) {
+    // Non-fatal — next cycle retries.
+  }
+  await yieldToEventLoop();
+
   // Sync any entries that write-through missed (RAM → SSD catch-up)
   try {
     syncRamToSsd();

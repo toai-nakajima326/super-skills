@@ -83,10 +83,56 @@ sqlite3 "$PRIMARY" 'PRAGMA wal_checkpoint(PASSIVE);' >/dev/null 2>&1 || true
 # server can read/write concurrently. Takes 60-120 s on the 6 GB DB
 # but no longer blocks vcontext's event loop (we're a separate process
 # at Nice=10 + LowPriorityIO).
-if ! sqlite3 "$PRIMARY" ".backup '$TMP'" 2>&1; then
-  log ".backup command failed — cleaning tmp, aborting cycle"
-  for suffix in '' '-wal' '-shm' '-journal'; do rm -f "${TMP}${suffix}"; done
-  exit 1
+#
+# 2026-04-20 hard-timeout: the .backup command CAN hang indefinitely
+# (observed today: a sqlite3 process stuck in .backup for 1h 59m,
+# holding a read-snapshot that prevented the live DB's WAL from ever
+# checkpointing — WAL grew to 3 GB before we caught it). `timeout 300`
+# gives the backup 5 minutes max; if it exceeds that, something is
+# wrong and we kill it rather than let it pile up more reader-locked
+# frames. BSD-style `gtimeout` via coreutils, or fallback to a bg-kill
+# pattern if not installed.
+BACKUP_TIMEOUT_S=300
+if command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_CMD="gtimeout $BACKUP_TIMEOUT_S"
+elif command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_CMD="timeout $BACKUP_TIMEOUT_S"
+else
+  # Fallback: background + watchdog kill
+  TIMEOUT_CMD=""
+fi
+
+if [[ -n "$TIMEOUT_CMD" ]]; then
+  if ! $TIMEOUT_CMD sqlite3 "$PRIMARY" ".backup '$TMP'" 2>&1; then
+    RC=$?
+    if [[ $RC -eq 124 ]]; then
+      log "backup exceeded ${BACKUP_TIMEOUT_S}s timeout — killing and aborting cycle (would have created a zombie)"
+    else
+      log ".backup command failed (rc=$RC) — cleaning tmp, aborting cycle"
+    fi
+    for suffix in '' '-wal' '-shm' '-journal'; do rm -f "${TMP}${suffix}"; done
+    exit 1
+  fi
+else
+  # Fallback: spawn + watchdog-kill after timeout
+  sqlite3 "$PRIMARY" ".backup '$TMP'" 2>&1 &
+  SQLITE_PID=$!
+  (
+    sleep $BACKUP_TIMEOUT_S
+    if kill -0 $SQLITE_PID 2>/dev/null; then
+      log "backup exceeded ${BACKUP_TIMEOUT_S}s timeout — killing PID $SQLITE_PID"
+      kill -9 $SQLITE_PID 2>/dev/null
+    fi
+  ) &
+  WATCHDOG_PID=$!
+  wait $SQLITE_PID
+  RC=$?
+  kill $WATCHDOG_PID 2>/dev/null || true
+  if [[ $RC -ne 0 ]]; then
+    log ".backup command failed or killed (rc=$RC) — cleaning tmp, aborting cycle"
+    for suffix in '' '-wal' '-shm' '-journal'; do rm -f "${TMP}${suffix}"; done
+    exit 1
+  fi
 fi
 
 # ── Integrity gate on the fresh tmp ──
