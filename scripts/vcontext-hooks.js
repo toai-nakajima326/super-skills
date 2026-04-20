@@ -2313,7 +2313,16 @@ async function cmdGc(dryRun = false) {
   for (const l of lines) console.log(l);
   console.log(`Total: ${migrated} entries migrated RAM→SSD, ${(totalEmbedFreed/1048576).toFixed(0)}MB embeddings freed (no deletions — tier system preserves data)`);
   if (!dryRun && (migrated > 0 || totalEmbedFreed > 0)) {
-    sqliteExec(VCTX_RAM_DB, `VACUUM;`);
+    // 2026-04-20 audit UC1: VACUUM removed. Previously ran hourly via
+    // `sqliteExec(VCTX_RAM_DB, 'VACUUM;')` = external sqlite3 CLI
+    // holding an EXCLUSIVE write-lock on primary.sqlite for 30-120s on
+    // a 6.5 GB DB. That's strictly worse than integrity_check (which at
+    // least uses a snapshot, not an exclusive). VACUUM on every cmdGc
+    // = hourly server freeze under load. Reclamation is already handled
+    // by SQLite's auto_vacuum + periodic admin-dedup-migration VACUUM
+    // (server.js, rate-limited). If external reclamation ever becomes
+    // necessary, add a server-side /admin/vacuum endpoint instead.
+    // auditWrite still records the GC run for dashboard/forensics.
     auditWrite({ event: 'gc.run', detail: `migrated=${migrated} embed_freed_bytes=${totalEmbedFreed}` });
   }
 }

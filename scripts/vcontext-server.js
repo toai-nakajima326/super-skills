@@ -6554,6 +6554,8 @@ const ENDPOINTS_LIST = [
   'POST   /admin/task-request       — submit an AIOS task queue job',
   'GET    /admin/task-queue         — snapshot of pending/running/recent task queue',
   'POST   /admin/integrity-check    — run integrity_check + quick_check {target?: "primary"|"backup"} (default: backup, rate-limited 1/h)',
+  'POST   /admin/backup             — trigger a .backup() snapshot of primary → BACKUP_PATH (rate-limited 1/60s, in-flight guard)',
+  'POST   /admin/wal-checkpoint     — run PRAGMA wal_checkpoint(mode) on primary {mode?: "PASSIVE"|"FULL"|"RESTART"|"TRUNCATE"} (default: TRUNCATE)',
 ];
 
 const server = createServer(async (req, res) => {
@@ -7717,6 +7719,83 @@ const server = createServer(async (req, res) => {
         } finally {
           globalThis._backupInFlight = false;
         }
+      } catch (e) {
+        sendJson(res, 500, { status: 'fail', error: e.message });
+      }
+    } else if (method === 'POST' && path === '/admin/wal-checkpoint') {
+      // Stage 4 of the 2026-04-20 loose-coupling redesign.
+      // Server-internal WAL checkpoint — previously scripts spawned
+      // external `sqlite3 "$PRIMARY" 'PRAGMA wal_checkpoint(TRUNCATE)'`
+      // subprocesses (see scripts/vcontext-backup.sh:78 pre-3b). That
+      // held a file lock on primary.sqlite which could block the
+      // server's readers — the exact class of coupling we're removing.
+      //
+      // Here we use ramDb's own connection (no new Database(), no
+      // subprocess) so the call is in-process SQLite, yielding the
+      // event loop between page copies per better-sqlite3 semantics.
+      //
+      // Body: { mode?: "PASSIVE" | "FULL" | "RESTART" | "TRUNCATE" }
+      //   default: TRUNCATE (shrinks the -wal file; the only mode that
+      //   reclaims disk space)
+      // Returns: { status, mode, busy, log, checkpointed, duration_ms, ran_at }
+      //
+      // Auth: admin-tier (X-Vcontext-Admin: yes), same as sibling
+      // endpoints (/admin/integrity-check, /admin/backup).
+      // No rate-limit: checkpoint is cheap (ms-scale on a clean WAL,
+      // low-seconds on a multi-GB runaway WAL). Callers can invoke as
+      // often as they like.
+      if (req.headers['x-vcontext-admin'] !== 'yes') {
+        return sendJson(res, 403, {
+          error: 'X-Vcontext-Admin: yes header required for admin operations',
+        });
+      }
+      try {
+        const body = await readBody(req);
+        const VALID_MODES = ['PASSIVE', 'FULL', 'RESTART', 'TRUNCATE'];
+        const mode = (body && typeof body.mode === 'string') ? body.mode : 'TRUNCATE';
+        if (!VALID_MODES.includes(mode)) {
+          return sendJson(res, 400, {
+            error: `Invalid mode. Must be one of: ${VALID_MODES.join(', ')}`,
+            received: mode,
+          });
+        }
+        if (!ramDb) {
+          return sendJson(res, 503, { status: 'skipped', reason: 'ramdb_unavailable' });
+        }
+
+        const startT = Date.now();
+        // ramDb.pragma returns [{busy, log, checkpointed}] for wal_checkpoint.
+        // busy=1 means another reader blocked the checkpoint (PASSIVE-like
+        // fallback); log=N is frames in WAL before; checkpointed=N is frames
+        // copied to main.
+        const rows = ramDb.pragma(`wal_checkpoint(${mode})`);
+        const row = Array.isArray(rows) && rows[0] ? rows[0] : { busy: 0, log: 0, checkpointed: 0 };
+        const result = {
+          status: 'ok',
+          mode,
+          busy: row.busy | 0,
+          log: row.log | 0,
+          checkpointed: row.checkpointed | 0,
+          duration_ms: Date.now() - startT,
+          ran_at: new Date().toISOString(),
+        };
+
+        // Record as admin-op entry for dashboard / forensic replay.
+        try {
+          ramDb.prepare(
+            `INSERT INTO entries (type, content, tags, session, token_estimate, created_at, content_hash)
+             VALUES (?, ?, ?, 'admin-op', ?, datetime('now'), ?)`
+          ).run(
+            'admin-op',
+            JSON.stringify({ op: 'wal-checkpoint', ...result }),
+            JSON.stringify(['admin-op', 'op:wal-checkpoint', `mode:${mode}`]),
+            Math.ceil(JSON.stringify(result).length / 4),
+            require('node:crypto').createHash('sha256')
+              .update(`wal-checkpoint:${mode}:${startT}`).digest('hex'),
+          );
+        } catch { /* non-fatal */ }
+
+        sendJson(res, 200, result);
       } catch (e) {
         sendJson(res, 500, { status: 'fail', error: e.message });
       }

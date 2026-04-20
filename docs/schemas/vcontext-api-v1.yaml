@@ -2253,6 +2253,128 @@ paths:
         '503':
           description: Backup file not available (missing / too small / mid-write). Retry later.
 
+  /admin/backup:
+    post:
+      tags: [admin]
+      operationId: adminBackup
+      summary: Trigger a server-internal backup of primary → BACKUP_PATH
+      description: |
+        Stage 3 of the loose-coupling redesign. Replaces scripts/vcontext-
+        backup.sh's external `sqlite3 .backup` (60-120 s read-snapshot on
+        primary) with a single server-internal `ramDb.backup()` call.
+
+        Safety:
+          - Requires X-Vcontext-Admin: yes header
+          - Rate-limit: 60s cache — repeated calls within 60s return
+            the cached result
+          - In-flight guard: concurrent calls return 429 status=busy
+          - Atomic: tmp + integrity verify + rename + .bak rotation
+          - Event loop preserved — better-sqlite3 backup yields between
+            page chunks
+      security:
+        - BearerAuth: []
+          AdminHeader: []
+      parameters:
+        - in: header
+          name: X-Vcontext-Admin
+          required: true
+          schema: { type: string, enum: [yes] }
+      responses:
+        '200':
+          description: Backup completed (status=ok) OR cached response.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+                  backup_path: { type: string }
+                  size_bytes: { type: integer }
+                  integrity: { type: string, enum: [ok, fail] }
+                  duration_ms: { type: integer }
+                  ran_at: { type: string, format: date-time }
+                  cached: { type: boolean }
+                  next_in_seconds: { type: integer }
+        '403':
+          description: Missing X-Vcontext-Admin header.
+        '429':
+          description: Another backup already in flight (in-flight guard).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [busy] }
+                  reason: { type: string, enum: [backup_already_running] }
+                  hint: { type: string }
+        '500':
+          description: Backup failed (fs error, integrity fail, etc.).
+        '503':
+          description: Primary DB unavailable (ramDb not open).
+
+  /admin/wal-checkpoint:
+    post:
+      tags: [admin]
+      operationId: adminWalCheckpoint
+      summary: Run PRAGMA wal_checkpoint(mode) on primary via server's own connection
+      description: |
+        Stage 4 of the loose-coupling redesign. Replaces external
+        `sqlite3 primary.sqlite "PRAGMA wal_checkpoint(…)"` spawns with
+        an in-process call against the server's ramDb singleton.
+
+        Modes (same as SQLite):
+          - PASSIVE: best-effort, never blocks writers. Default mode of
+            SQLite auto-checkpoint. Does NOT shrink -wal file.
+          - FULL: waits for current readers, then checkpoints everything.
+          - RESTART: FULL + forces new readers to start fresh, allowing
+            subsequent TRUNCATE to fully reclaim.
+          - TRUNCATE (default): RESTART + truncates the -wal file on disk.
+            Only mode that shrinks disk usage.
+
+        Safety:
+          - Requires X-Vcontext-Admin: yes header
+          - No rate-limit: checkpoint is cheap (ms-scale on clean WAL)
+          - In-process on ramDb — no external file lock contention
+      security:
+        - BearerAuth: []
+          AdminHeader: []
+      parameters:
+        - in: header
+          name: X-Vcontext-Admin
+          required: true
+          schema: { type: string, enum: [yes] }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mode:
+                  type: string
+                  enum: [PASSIVE, FULL, RESTART, TRUNCATE]
+                  default: TRUNCATE
+      responses:
+        '200':
+          description: Checkpoint result.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+                  mode: { type: string, enum: [PASSIVE, FULL, RESTART, TRUNCATE] }
+                  busy: { type: integer, description: 1 if blocked by readers }
+                  log: { type: integer, description: frames in WAL before checkpoint }
+                  checkpointed: { type: integer, description: frames copied to main }
+                  duration_ms: { type: integer }
+                  ran_at: { type: string, format: date-time }
+        '400':
+          description: Invalid mode.
+        '403':
+          description: Missing X-Vcontext-Admin header.
+        '503':
+          description: ramDb not available.
+
   /admin/fts-full-rebuild:
     post:
       tags: [admin]
