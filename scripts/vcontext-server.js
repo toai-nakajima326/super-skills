@@ -3419,6 +3419,20 @@ async function startEmbedLoop() {
   if (embedLoopRunning) return;
   embedLoopRunning = true;
 
+  // Exponential backoff on consecutive batch failures (2026-04-20).
+  // Problem: embed server ECONNRESET / socket hang up with MLX under
+  // memory pressure → 100ms-gap loop retries same 16 rows at 10 req/s
+  // → burns CPU + makes /health contention worse. Fix: back off when
+  // failures stack, reset on success.
+  let consecutiveFailures = 0;
+  const backoffMs = (n) => {
+    if (n <= 0) return 100;      // healthy: 100ms between batches
+    if (n === 1) return 1000;    // 1st failure: 1s
+    if (n === 2) return 5000;    // 2nd: 5s
+    if (n === 3) return 15000;   // 3rd: 15s
+    return 30000;                // 4+: 30s (give MLX time to recover)
+  };
+
   while (embedLoopRunning) {
     _loopHeartbeat.embed = Date.now();
     _loopHeartbeat.embed_iter++;
@@ -3463,6 +3477,7 @@ async function startEmbedLoop() {
         continue;
       }
       let embeddings = null;
+      let batchFailed = false;
       if (mlxAvailable) {
         try {
           // Bypass withMlxLock — store-time mlxEmbed calls that fail
@@ -3490,7 +3505,13 @@ async function startEmbedLoop() {
           //       the SAME DESC rows at 10 req/s; embed pace → 0 emb/s).
           embeddings = await _mlxEmbedBatchRaw(rows.map(r => sanitizeEmbedText(safeSliceCodePoints(String(r.content), 1000))));
         } catch (e) {
-          console.log(`[embed-loop] batch failed (${rows.length} rows): ${e.message}`);
+          batchFailed = true;
+          // Log only on first failure and at backoff escalations —
+          // otherwise a 10-minute ECONNRESET storm floods the log
+          // (observed 2026-04-20: dozens of identical lines/min).
+          if (consecutiveFailures === 0 || consecutiveFailures === 2 || consecutiveFailures === 4) {
+            console.log(`[embed-loop] batch failed (${rows.length} rows, streak=${consecutiveFailures + 1}): ${e.message}`);
+          }
         }
       }
       if (embeddings && embeddings.length === rows.length) {
@@ -3503,9 +3524,16 @@ async function startEmbedLoop() {
           try { vecUpsert(rows[i].id, emb); } catch {}
           try { dbExec(`UPDATE entry_index SET has_embedding = 1 WHERE entry_id = ${rows[i].id};`); } catch {}
         }
+        // Success — reset backoff.
+        if (consecutiveFailures > 0) {
+          console.log(`[embed-loop] recovered after ${consecutiveFailures} consecutive failures`);
+          consecutiveFailures = 0;
+        }
+      } else if (batchFailed) {
+        consecutiveFailures++;
       }
-      // 2s gap between batches — server-side clear_cache handles GPU memory
-      await new Promise(r => setTimeout(r, 100)); // 100ms gap
+      // Adaptive gap: 100ms healthy, up to 30s after 4+ failures.
+      await new Promise(r => setTimeout(r, backoffMs(consecutiveFailures)));
     } catch (e) {
       console.log(`[embed-loop] error: ${e?.message?.slice(0, 60) || 'unknown'}`);
       await new Promise(r => setTimeout(r, 5000)); // 5s retry, not 60s
