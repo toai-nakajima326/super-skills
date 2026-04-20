@@ -2321,23 +2321,49 @@ async function cmdGc(dryRun = false) {
 // ── Integrity / crash recovery ──────────────────────────────────
 
 async function cmdIntegrity() {
-  // 2026-04-20: separate sqlite3 invocations for the two PRAGMAs.
-  // The previous combined form (`PRAGMA integrity_check; PRAGMA
-  // quick_check;`) produced a spurious "malformed inverted index for
-  // FTS5 table main.entries_fts" from the second PRAGMA — but ONLY
-  // when chained after the first. Either PRAGMA alone reports "ok",
-  // and FTS5's own INSERT-based integrity check (INSERT INTO
-  // entries_fts VALUES('integrity-check')) also reports clean.
-  // Running them in separate connections avoids whatever shared-state
-  // quirk of the sqlite3 CLI triggers the false positive. The
-  // downstream cost was 40+ maintenance-cycle exit=1 streak (no GC,
-  // no audit retention) since the FTS5 data was fine all along.
+  // 2026-04-20 (late afternoon): check the BACKUP COPY, not the live primary.
   //
-  // Also: integrity_check is a superset of quick_check, so we could
-  // drop quick_check entirely. Keeping it as a cheap cross-check
-  // helps catch issues integrity_check might miss on a busy DB.
+  // User insight: "check が走るのは普通のことですが、ロックするのはおかしい"
+  // (checks running is normal — LOCKING is what's wrong).
+  //
+  // SQLite WAL mode: a reader holds a snapshot for the life of its
+  // transaction. `PRAGMA integrity_check` on the 6 GB primary DB takes
+  // 5-10 minutes of reading. During that time the snapshot prevents
+  // the server's WAL from TRUNCATE-checkpointing, so the WAL file
+  // grows unchecked (observed today: 3 GB WAL bloat).
+  //
+  // The lock is inherent to "check a WAL-mode DB that has active
+  // writers", not something we can skip-around by throttling the
+  // check frequency. Running the check LESS often still produces
+  // the same lock-storm each time it runs.
+  //
+  // Correct architecture: verify integrity on the BACKUP snapshot
+  // (vcontext-backup.sqlite). Properties:
+  //   • server doesn't touch backup — zero contention, lock safely
+  //   • backup is a .backup() copy of primary (typically <15 min old)
+  //     — if backup passes integrity, primary's on-disk pages at the
+  //     time of backup were clean
+  //   • primary self-heals via WAL replay on every open; explicit
+  //     integrity on primary is not needed in routine maintenance
+  //
+  // Edge case: no backup yet (fresh install, backup-cycle never ran).
+  // Fall back to primary — one-time check is tolerable on an empty DB.
+  const backupPath = join(VCTX_SSD_DIR, 'vcontext-backup.sqlite');
+  let target = backupPath;
+  let targetLabel = 'backup';
+  if (!existsSync(backupPath)) {
+    console.log('DB integrity: backup file missing — falling back to primary (expected only on first boot)');
+    target = VCTX_RAM_DB;
+    targetLabel = 'primary(fallback)';
+  }
+
+  // Separate sqlite3 invocations for the two PRAGMAs. Combined
+  // `integrity_check; quick_check;` produced a spurious "malformed
+  // inverted index" on the second PRAGMA — a sqlite3 CLI shared-state
+  // quirk. Separate connections fix it. Kept both PRAGMAs: integrity
+  // is superset of quick, but quick is a cheap cross-check.
   const runPragma = (pragma) => {
-    const r = spawnSync('sqlite3', [VCTX_RAM_DB, pragma], { encoding: 'utf-8' });
+    const r = spawnSync('sqlite3', [target, pragma], { encoding: 'utf-8' });
     return (r.stdout || '').trim();
   };
   const integrityOut = runPragma('PRAGMA integrity_check;');
@@ -2345,21 +2371,30 @@ async function cmdIntegrity() {
   const combined = [integrityOut, quickOut].filter(Boolean).join('\n');
   const ok = combined.split('\n').every(l => l === 'ok' || l.trim() === 'ok');
   if (ok) {
-    console.log('DB integrity: OK');
-    auditWrite({ event: 'integrity.ok' });
+    console.log(`DB integrity: OK (checked: ${targetLabel})`);
+    auditWrite({ event: 'integrity.ok', detail: `target=${targetLabel}` });
     return;
   }
-  console.error('DB integrity: FAILED');
+  console.error(`DB integrity: FAILED (${targetLabel})`);
   console.error(combined);
-  auditWrite({ event: 'integrity.fail', detail: combined.slice(0, 500) });
-  // Offer restore path — target the currently active DB (primary on SSD,
-  // or RAM path when VCONTEXT_USE_RAMDISK=1).
-  const backup = join(VCTX_SSD_DIR, 'vcontext-backup.sqlite');
-  if (existsSync(backup)) {
-    console.error(`Restore candidate: ${backup}`);
-    console.error(`Run: cp "${backup}" "${VCTX_RAM_DB}"`);
+  auditWrite({ event: 'integrity.fail', detail: `target=${targetLabel} ` + combined.slice(0, 500) });
+  // 2026-04-20 (late afternoon): do NOT process.exit(1) anymore.
+  // Old behavior: exit 1 caused maintenance.sh to abort the whole
+  // cycle, so audit retention / GC / queue drain / anomaly detection
+  // all skipped for as long as backup had any integrity issue.
+  // Observed today: 40+ cycle streak of abort when the failure was
+  // a false positive (FTS5 chained-PRAGMA bug). Even a GENUINE
+  // failure on the backup snapshot shouldn't block other housekeeping
+  // — it's a signal, not a hard stop. We log + audit + return 0 so
+  // the caller proceeds with the rest of the cycle.
+  //
+  // A truly catastrophic case (e.g., backup so corrupt the server
+  // would panic reading it) is already caught by verifyBackupFile()
+  // inside doBackup() before a .bak rotation happens.
+  if (existsSync(backupPath) && target !== backupPath) {
+    console.error(`(If this persists, restore option: cp "${backupPath}" "${VCTX_RAM_DB}")`);
   }
-  process.exit(1);
+  // Return normally — the maintenance cycle continues.
 }
 
 // ── Snapshots (point-in-time DB copy) ───────────────────────────
