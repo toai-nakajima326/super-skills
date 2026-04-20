@@ -52,6 +52,24 @@ RAM_CRIT_PCT="${VCONTEXT_RAM_CRIT_PCT:-95}"                  # emergency cleanup
 MLX_GEN_MAX_MB="${VCONTEXT_MLX_GEN_MAX_MB:-14000}"           # MLX Generate memory kill threshold (14 GB)
 MLX_EMBED_MAX_MB="${VCONTEXT_MLX_EMBED_MAX_MB:-10000}"       # MLX Embed memory kill threshold (10 GB)
 MLX_GEN_CALL_LIMIT="${VCONTEXT_MLX_GEN_CALL_LIMIT:-200}"     # restart MLX Generate after N calls (prevents gradual hang)
+# Memory-pressure gate for MLX restart (2026-04-20):
+# Loading Qwen3-8B-4bit needs ~6 GB. If system is already memory-tight,
+# starting a new MLX proc triggers jetsam → kills vcontext-server →
+# cascade. Observed 09:21 today. Skip MLX auto-restart when free pages
+# are below this threshold (defaults to 50000 pages ≈ 780 MB at 16 KB/page).
+MLX_RESTART_MIN_FREE_PAGES="${VCONTEXT_MLX_RESTART_MIN_FREE_PAGES:-50000}"
+
+# Check if a service is disabled in launchd — we honour manual
+# `launchctl disable` decisions and never auto-reload disabled services.
+is_service_disabled() {
+  local svc="$1"
+  launchctl print-disabled "gui/$(id -u)" 2>/dev/null | grep -qE "\"$svc\" => (true|disabled)"
+}
+
+# Free page count via vm_stat (1 page = 16384 bytes on M-series).
+get_free_pages() {
+  vm_stat 2>/dev/null | awk '/Pages free/ {gsub(/\./,""); print $3; exit}'
+}
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
@@ -280,16 +298,24 @@ while true; do
       fi
       # Only restart when: (probe failed twice in a row) OR (probe OK but memory over cap)
       if [[ "$EMBED_FAILS" -ge 2 ]] || { [[ -n "$EMBED_HEALTH" ]] && [[ -n "$EMBED_MB" ]] && [[ "$EMBED_MB" -gt $MLX_EMBED_MAX_MB ]]; }; then
-        log "MLX Embed restart: fails=${EMBED_FAILS} health=${EMBED_HEALTH:+ok}${EMBED_HEALTH:-timeout} mem=${EMBED_MB:-?}MB"
-        launchctl unload ~/Library/LaunchAgents/com.vcontext.mlx-embed.plist 2>/dev/null
-        sleep 1; kill -9 "$EMBED_PID" 2>/dev/null; lsof -ti :3161 | xargs kill -9 2>/dev/null
-        sleep 1; launchctl load ~/Library/LaunchAgents/com.vcontext.mlx-embed.plist 2>/dev/null
-        echo 0 > "$EMBED_FAIL_FILE"
-        log "MLX Embed restarted"
+        if is_service_disabled "com.vcontext.mlx-embed"; then
+          log "MLX Embed skip: service is launchctl-disabled (user intent respected)"
+        else
+          log "MLX Embed restart: fails=${EMBED_FAILS} health=${EMBED_HEALTH:+ok}${EMBED_HEALTH:-timeout} mem=${EMBED_MB:-?}MB"
+          launchctl unload ~/Library/LaunchAgents/com.vcontext.mlx-embed.plist 2>/dev/null
+          sleep 1; kill -9 "$EMBED_PID" 2>/dev/null; lsof -ti :3161 | xargs kill -9 2>/dev/null
+          sleep 1; launchctl load ~/Library/LaunchAgents/com.vcontext.mlx-embed.plist 2>/dev/null
+          echo 0 > "$EMBED_FAIL_FILE"
+          log "MLX Embed restarted"
+        fi
       fi
     else
-      log "MLX Embed not running, starting..."
-      launchctl load ~/Library/LaunchAgents/com.vcontext.mlx-embed.plist 2>/dev/null
+      if is_service_disabled "com.vcontext.mlx-embed"; then
+        log "MLX Embed not running but launchctl-disabled — skip auto-start"
+      else
+        log "MLX Embed not running, starting..."
+        launchctl load ~/Library/LaunchAgents/com.vcontext.mlx-embed.plist 2>/dev/null
+      fi
     fi
   fi
 
@@ -352,14 +378,28 @@ while true; do
     fi
 
     if $NEED_RESTART; then
-      log "MLX Generate restart: $REASON"
-      launchctl unload ~/Library/LaunchAgents/com.vcontext.mlx-generate.plist 2>/dev/null
-      sleep 1
-      [[ -n "$GEN_PID" ]] && kill -9 "$GEN_PID" 2>/dev/null
-      lsof -ti :3162 | xargs kill -9 2>/dev/null
-      sleep 1
-      launchctl load ~/Library/LaunchAgents/com.vcontext.mlx-generate.plist 2>/dev/null
-      log "MLX Generate restarted"
+      # Respect manual disable (2026-04-20: user may disable mlx-generate
+      # during memory pressure; don't fight that).
+      if is_service_disabled "com.vcontext.mlx-generate"; then
+        log "MLX Generate skip: service is launchctl-disabled ($REASON — user intent respected)"
+      else
+        # Memory-pressure gate — don't start a new 6 GB allocation if
+        # the system is already tight. Better to run without LLM gen
+        # than to trigger a cascade. 50000 pages ≈ 780 MB free headroom.
+        FREE_PAGES=$(get_free_pages)
+        if [[ -n "$FREE_PAGES" ]] && [[ "$FREE_PAGES" -lt "$MLX_RESTART_MIN_FREE_PAGES" ]]; then
+          log "MLX Generate skip: memory tight (free=${FREE_PAGES} pages < ${MLX_RESTART_MIN_FREE_PAGES} threshold) — $REASON"
+        else
+          log "MLX Generate restart: $REASON (free=${FREE_PAGES:-?} pages)"
+          launchctl unload ~/Library/LaunchAgents/com.vcontext.mlx-generate.plist 2>/dev/null
+          sleep 1
+          [[ -n "$GEN_PID" ]] && kill -9 "$GEN_PID" 2>/dev/null
+          lsof -ti :3162 | xargs kill -9 2>/dev/null
+          sleep 1
+          launchctl load ~/Library/LaunchAgents/com.vcontext.mlx-generate.plist 2>/dev/null
+          log "MLX Generate restarted"
+        fi
+      fi
     fi
   fi
 
