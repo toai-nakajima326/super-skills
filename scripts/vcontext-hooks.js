@@ -1069,6 +1069,20 @@ async function cmdSelfTest() {
   if (passed < tests.length) process.exit(1);
 }
 
+// HTTP GET against vcontext. On infra failure (connect refused, timeout,
+// or non-JSON body), resolves an object with `_infra_error` set to a
+// short kind tag AND empty results. Historical callers that read only
+// `r.results` keep working; gate callers that need to distinguish
+// "server down" from "server returned empty" can check `r._infra_error`.
+//
+// Why the `_infra_error` sentinel exists (2026-04-20, bug discovery):
+// The AIOS hard-gate at handlePreToolGate() had a fail-open catch that
+// never fired because `get()` swallowed every error into `{results:[]}`.
+// During yesterday's OOM cascades the gate saw an empty response,
+// concluded "no skill-usage" and BLOCKED every AIOS write, even though
+// the session had 109 historical skill-usage entries. This sentinel
+// lets the gate throw the error up so the catch at handlePreToolGate
+// L1334-1338 can correctly fail open.
 function get(path) {
   return new Promise((resolve) => {
     const req = request(
@@ -1078,13 +1092,14 @@ function get(path) {
         const chunks = [];
         res.on('data', (c) => chunks.push(c));
         res.on('end', () => {
-          try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
-          catch { resolve({ results: [] }); }
+          const body = Buffer.concat(chunks).toString();
+          try { resolve(JSON.parse(body)); }
+          catch { resolve({ results: [], _infra_error: 'parse' }); }
         });
       }
     );
-    req.on('error', () => resolve({ results: [] }));
-    req.on('timeout', () => { req.destroy(); resolve({ results: [] }); });
+    req.on('error', () => resolve({ results: [], _infra_error: 'connect' }));
+    req.on('timeout', () => { req.destroy(); resolve({ results: [], _infra_error: 'timeout' }); });
     req.end();
   });
 }
@@ -1261,6 +1276,12 @@ async function sessionHasSkillUsage(sessionId) {
   if (aiosCacheRead(sessionId)) return true;
   // Query vcontext. /session endpoint supports ?type= filter.
   const r = await get(`/session/${encodeURIComponent(sessionId)}?type=skill-usage&limit=1`);
+  // Infra failure — propagate so handlePreToolGate's catch can fail open.
+  // Without this, a server-down moment silently looks like "no routing"
+  // and BLOCKS every AIOS write. See get() comment for root-cause notes.
+  if (r && r._infra_error) {
+    throw new Error(`vcontext unreachable (${r._infra_error})`);
+  }
   if (r && Array.isArray(r.results) && r.results.length > 0) {
     aiosCacheWrite(sessionId);
     return true;

@@ -114,8 +114,20 @@ function appendToWalQueue(line) {
 const CLOUD_CONFIG_PATH = join(BACKUP_DIR, 'vcontext-cloud.json');
 const SCRIPT_DIR = new URL('.', import.meta.url).pathname;
 const BACKUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-const WARN_SIZE_BYTES = 3 * 1024 * 1024 * 1024;     // 3 GB
-const MAX_SIZE_BYTES = 3.5 * 1024 * 1024 * 1024;     // 3.5 GB
+// Size caps for the primary DB. The 3/3.5 GB numbers were sized for the
+// 18 GB RAM disk era, where DB_PATH lived on /Volumes/VContext and had
+// to leave headroom for other RAM uses. After the 2026-04-18 RAM→SSD
+// migration (commit d621456), DB_PATH points at ~/skills/data on APFS
+// where hundreds of GB are free, so the old cap became a production
+// bug — any DB > 3.5 GB caused POST /store to reject every write with
+// HTTP 507 "Writes refused" (surfaced by Codex 2026-04-20 morning).
+// Cap is now USE_RAMDISK-gated: conservative in RAM mode, generous on SSD.
+const WARN_SIZE_BYTES = USE_RAMDISK
+  ? 3 * 1024 * 1024 * 1024     // 3 GB — RAM-disk conservative
+  : 40 * 1024 * 1024 * 1024;   // 40 GB — SSD soft warn
+const MAX_SIZE_BYTES = USE_RAMDISK
+  ? 3.5 * 1024 * 1024 * 1024   // 3.5 GB — RAM-disk safety budget
+  : 50 * 1024 * 1024 * 1024;   // 50 GB — SSD hard cap (≈10× current)
 // All hook event types + legacy types. Accept any non-empty string.
 const LEGACY_TYPES = ['conversation', 'decision', 'observation', 'code', 'error'];
 const isValidType = (t) => typeof t === 'string' && t.length > 0 && t.length < 100;
@@ -124,9 +136,18 @@ const NAMESPACE_TAG_PREFIX = 'project:';
 // RAM is faster — keep everything in RAM until it's actually full.
 // Only spill to SSD when RAM disk exceeds 85%. Below that, no migration.
 // Promote from SSD back to RAM is always free (already implemented).
+//
+// SSD-mode: the concept of "RAM→SSD migration" doesn't apply — there's
+// only one physical tier. Return 999 (never migrate) to avoid the latent
+// bug where a 5.97 GB SSD DB computed pct = 170% against the old 3.5 GB
+// RAM denominator and triggered migration code with nothing to migrate.
 function getRamMigrateDays() {
+  if (!USE_RAMDISK) return 999;
   try {
     const s = require('node:fs').statSync(DB_PATH);
+    // 18 GB RAM disk budget — 85% of 18 GB ≈ 15.3 GB. Using 3.5 as
+    // denominator (legacy) effectively meant "migrate once DB > ~3 GB",
+    // which matches historical behavior.
     const pct = s.size / (3.5 * 1024 * 1024 * 1024) * 100;
     if (pct < 85) return 999; // keep in RAM — plenty of room
     return 0; // overflow: migrate oldest entries to free space
@@ -828,14 +849,20 @@ const cloudStore = {
 };
 
 // ── DB size check ──────────────────────────────────────────────
+// Cap messages include the live cap value so operators can tell which
+// mode (RAM-disk vs SSD) the server is running in without code-diving.
+const _GB = 1024 * 1024 * 1024;
+const _fmtGB = (b) => (b / _GB).toFixed(1) + 'GB';
 function checkDbSize() {
   try {
     const stats = statSync(DB_PATH);
     if (stats.size >= MAX_SIZE_BYTES) {
-      return { ok: false, size: stats.size, msg: 'Database at maximum size (3.5GB). Writes refused.' };
+      return { ok: false, size: stats.size,
+        msg: `Database at maximum size (${_fmtGB(MAX_SIZE_BYTES)}). Writes refused.` };
     }
     if (stats.size >= WARN_SIZE_BYTES) {
-      return { ok: true, size: stats.size, msg: 'Warning: Database exceeding 3GB.' };
+      return { ok: true, size: stats.size,
+        msg: `Warning: Database exceeding ${_fmtGB(WARN_SIZE_BYTES)}.` };
     }
     return { ok: true, size: stats.size, msg: null };
   } catch {
