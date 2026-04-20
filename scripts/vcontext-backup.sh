@@ -52,11 +52,37 @@ if [[ ! -f "$PRIMARY" ]]; then
   exit 0
 fi
 
-# ── Online backup via sqlite3 CLI ──
-# .backup uses SQLite's pager-level online backup API. The live server
-# can continue reading/writing; we get a consistent snapshot of pages
-# as of the start of the backup. Completes in ~3-8 s for a 6 GB DB on
-# APFS; LowPriorityIO + Nice=10 keeps our IO under the server's.
+# ── WAL checkpoint + online backup ──
+#
+# 2026-04-20 design journey worth documenting:
+# We tried an APFS-clone approach (`cp -c` of primary + sidecars). In
+# theory it's near-instant. In practice, cloning a live WAL-mode DB
+# with concurrent writes produces an "integrity_check: database disk
+# image is malformed" result — torn page writes + sidecar race
+# conditions make the snapshot non-recoverable without holding a
+# writer lock during the clone, which bash can't cleanly do.
+# Reverted to `.backup`; kept the PASSIVE checkpoint as a cheap
+# optimization (smaller WAL → slightly faster backup).
+#
+# Follow-up options explored and deferred:
+#   - VACUUM INTO: fully consistent but still reads+writes all data.
+#     No throughput win over .backup for a 6 GB DB.
+#   - BEGIN IMMEDIATE + cp -c (via helper Node script): works but adds
+#     a cross-process lock protocol. Complexity > benefit for now.
+# The real performance win on the read-side came from #1
+# (yieldToEventLoop in doBackupAndMigrate), not from backup speed.
+# Backup sitting at 60-120s is fine when it doesn't block reads.
+
+# Cheap pre-step: PASSIVE checkpoint flushes as many WAL pages as can
+# be flushed without blocking any writers. Shrinks the WAL the backup
+# will need to walk. Safe to fail silently — if there's contention,
+# backup still works via the full-WAL path.
+sqlite3 "$PRIMARY" 'PRAGMA wal_checkpoint(PASSIVE);' >/dev/null 2>&1 || true
+
+# Online backup via sqlite3 CLI. Page-level consistent copy; the live
+# server can read/write concurrently. Takes 60-120 s on the 6 GB DB
+# but no longer blocks vcontext's event loop (we're a separate process
+# at Nice=10 + LowPriorityIO).
 if ! sqlite3 "$PRIMARY" ".backup '$TMP'" 2>&1; then
   log ".backup command failed — cleaning tmp, aborting cycle"
   for suffix in '' '-wal' '-shm' '-journal'; do rm -f "${TMP}${suffix}"; done
