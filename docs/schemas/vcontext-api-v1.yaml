@@ -1,0 +1,2722 @@
+openapi: 3.1.0
+info:
+  title: vcontext HTTP API
+  version: 1.0.0
+  summary: The inter-process contract for AIOS' memory, search, auth, consultation, and admin surface.
+  description: |
+    vcontext is the HTTP layer of AIOS — the AI-native operating system's
+    cognitive substrate. This spec is the source of truth for every
+    client (Claude Code hooks, Codex, article-scanner, dashboard,
+    self-evolve loops, future external agents).
+
+    **Constitutional alignment** — this spec exists because:
+    - P2 (Contract-first over language-first): the JSON shapes here
+      are the substrate. Languages are interchangeable.
+    - P4 (Machine-readable logs / metrics / contracts): every endpoint
+      must be describable to an LLM reading this file.
+
+    **Authentication model** — the server binds to 127.0.0.1 by default,
+    so a local caller is treated as `owner` with wildcard group access
+    (no Authorization header required). When `VCONTEXT_BIND=0.0.0.0`
+    is set for LAN exposure, all non-loopback calls require
+    `Authorization: Bearer vctx_<hex>` except for `/dashboard` and
+    `/auth/whoami`.
+
+    **Destructive admin actions** additionally require the CSRF-mitigation
+    header `X-Vcontext-Admin: yes`. See the `adminCsrf` securityScheme.
+
+    **Errors** — all failures return a JSON body matching
+    `#/components/schemas/ErrorResponse` (just `{ error: "<message>" }`).
+    Body > 10 MiB is rejected as 400 before any handler runs.
+
+    **Source of truth** — `scripts/vcontext-server.js`. Regenerate this
+    file via the process described in `docs/schemas/README.md`.
+  contact:
+    name: AIOS / vcontext
+    url: https://github.com/toai-nakajima/skills
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: http://127.0.0.1:3150
+    description: Loopback default (local AI callers auto-auth as owner)
+  - url: http://{host}:{port}
+    description: LAN binding when VCONTEXT_BIND=0.0.0.0
+    variables:
+      host:
+        default: 192.168.0.10
+      port:
+        default: "3150"
+
+tags:
+  - name: entries
+    description: Core memory substrate — store / recall / recent / session / trace.
+  - name: search
+    description: Semantic and predictive search over the entry corpus.
+  - name: auth
+    description: API keys, groups, role hierarchy (owner > admin > member > viewer).
+  - name: consult
+    description: Multi-model consultation protocol for decision conflict resolution.
+  - name: health
+    description: Liveness + pipeline heartbeats + loop status.
+  - name: metrics
+    description: API / cost / analytics / skill-effectiveness metrics.
+  - name: tier
+    description: RAM / SSD / Cloud tier management.
+  - name: export
+    description: Portable NDJSON dumps for backup and migration.
+  - name: admin
+    description: Destructive / elevated operations (CSRF-gated).
+  - name: dashboard
+    description: Browser UI + dashboard-support JSON endpoints.
+  - name: federation
+    description: Cross-tier AI routing (local MLX + optional external).
+  - name: otel
+    description: OpenTelemetry / Langfuse tracing diagnostics.
+
+security:
+  # Loopback callers pass with no key. LAN callers MUST send bearerAuth.
+  - {}
+  - bearerAuth: []
+
+paths:
+  # ── ENTRIES ─────────────────────────────────────────────────────
+  /store:
+    post:
+      tags: [entries]
+      operationId: storeEntry
+      summary: Store a context entry
+      description: |
+        Persists an entry to the RAM tier and async-mirrors to SSD + WAL.
+        If `MLX_GENERATE` is available and content > 200 chars, an
+        auto-summary populates `reasoning` in the background. Embedding
+        is generated async if MLX embed is available.
+
+        Dedup: identical `(session, type, content_hash)` triples are
+        rejected via UNIQUE index. Skipped types (no dedup):
+        `test`, `working-state`, `session-recall`, `anomaly-alert`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StoreRequest'
+            examples:
+              decision:
+                summary: A decision entry
+                value:
+                  type: decision
+                  content: "Use MLX for embeddings, not external API"
+                  tags: ["architecture", "mlx"]
+                  session: "claude-2026-04-20-abc123"
+                  confidence: high
+                  status: active
+              tool-call:
+                summary: A tool-call log from a Claude hook
+                value:
+                  type: tool-call
+                  content: "Read /Users/x/file.js offset=100 limit=50"
+                  session: "claude-2026-04-20-abc123"
+                  tags: ["tool:Read"]
+                  parent_id: 12345
+      responses:
+        '201':
+          description: Entry stored
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stored]
+                properties:
+                  stored:
+                    $ref: '#/components/schemas/Entry'
+        '200':
+          description: Deduplicated (entry with same content_hash already exists)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { const: true }
+                  deduped: { const: true }
+                  existing_id: { type: integer }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Viewer role, or group not accessible
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '507':
+          description: DB size over limit
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /recall:
+    get:
+      tags: [entries]
+      operationId: recallEntries
+      summary: Full-text search across tiers
+      description: |
+        FTS5-ranked search across RAM → SSD → Cloud tiers with cross-tier
+        dedup. Optional semantic boost via MLX embed when FTS returns
+        fewer than `limit` results. Auto-promotes SSD/cloud hits to RAM.
+
+        Context budget: pass `budget=<tokens>` to receive only the top-N
+        by composite score (freshness × 0.3 + tier × 0.2 + access-recency
+        × 0.2 + length-penalty × 0.3) within that token ceiling.
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema: { type: string }
+          description: Query string (FTS5 syntax supported)
+        - in: query
+          name: limit
+          schema: { type: integer, default: 10, maximum: 100 }
+        - in: query
+          name: type
+          schema: { type: string }
+          description: Restrict to a single entry type
+        - in: query
+          name: namespace
+          schema: { type: string }
+          description: Filter by `project:<namespace>` tag
+        - in: query
+          name: user
+          schema: { type: string }
+          description: Filter by `user:<id>` tag (pass `my=true` for caller's own)
+        - in: query
+          name: my
+          schema: { type: string, enum: ["true", "false"] }
+        - in: query
+          name: semantic
+          schema: { type: string, enum: ["true", "false"], default: "true" }
+          description: Set `false` to skip the semantic boost fallback
+        - in: query
+          name: budget
+          schema: { type: integer }
+          description: Token budget — when > 0, results are score-ranked and truncated
+        - in: query
+          name: task_kind
+          schema: { type: string }
+          description: Caller-supplied tag for /metrics/report breakdowns (e.g. `session-recall`)
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, count, query]
+                properties:
+                  results:
+                    type: array
+                    items: { $ref: '#/components/schemas/Entry' }
+                  count: { type: integer }
+                  query: { type: string }
+                  budget: { type: integer }
+                  used_tokens: { type: integer }
+                  dropped: { type: integer }
+              examples:
+                hit:
+                  value:
+                    results:
+                      - id: 12345
+                        type: decision
+                        content: "Use MLX for embeddings"
+                        tags: ["architecture", "mlx"]
+                        created_at: "2026-04-18 11:22:33"
+                        _tier: ram
+                    count: 1
+                    query: "mlx embeddings"
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /recent:
+    get:
+      tags: [entries]
+      operationId: recentEntries
+      summary: Most-recent entries (cascading tiers)
+      parameters:
+        - in: query
+          name: n
+          schema: { type: integer, default: 20, maximum: 200 }
+        - in: query
+          name: type
+          schema: { type: string }
+        - in: query
+          name: namespace
+          schema: { type: string }
+        - in: query
+          name: short
+          schema: { type: string, enum: ["0", "1"] }
+          description: Truncate content to 500 chars, strip embedding
+        - in: query
+          name: task_kind
+          schema: { type: string }
+      responses:
+        '200':
+          description: Recent entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, count]
+                properties:
+                  results:
+                    type: array
+                    items: { $ref: '#/components/schemas/Entry' }
+                  count: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /session/{id}:
+    get:
+      tags: [entries]
+      operationId: getSession
+      summary: Paginated entries for a session
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+          description: Session identifier
+        - in: query
+          name: limit
+          schema: { type: integer, default: 100 }
+        - in: query
+          name: offset
+          schema: { type: integer, default: 0 }
+        - in: query
+          name: type
+          schema: { type: string }
+      responses:
+        '200':
+          description: Session page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session, results, count, total, limit, offset, has_more]
+                properties:
+                  session: { type: string }
+                  results:
+                    type: array
+                    items: { $ref: '#/components/schemas/Entry' }
+                  count: { type: integer }
+                  total: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+                  has_more: { type: boolean }
+              examples:
+                typical:
+                  value:
+                    session: "claude-2026-04-20-abc123"
+                    results: []
+                    count: 0
+                    total: 0
+                    limit: 100
+                    offset: 0
+                    has_more: false
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /summarize:
+    post:
+      tags: [entries]
+      operationId: compactEntries
+      summary: Compact entries older than 24 h into per-type summaries
+      description: |
+        For each type with ≥3 entries older than 24 h, builds a `[Summary
+        of N T entries]` entry and deletes the originals. Synchronous.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Compaction result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  compacted: { type: integer }
+                  details:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        type: { type: string }
+                        compacted: { type: integer }
+
+  /prune:
+    delete:
+      tags: [entries]
+      operationId: pruneEntries
+      summary: Delete entries older than a duration
+      parameters:
+        - in: query
+          name: older_than
+          schema: { type: string, default: "7d", pattern: '^\d+[dhm]$' }
+          description: "Duration like `7d`, `24h`, `30m`"
+      responses:
+        '200':
+          description: Prune result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pruned: { type: integer }
+                  ssd_pruned: { type: integer }
+                  older_than: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /trace/{id}:
+    get:
+      tags: [entries]
+      operationId: traceEntry
+      summary: Walk causal ancestry + immediate children (Pillar 3)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: Ancestry chain
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, found, depth, ancestry, children]
+                properties:
+                  id: { type: integer }
+                  found: { type: boolean }
+                  depth: { type: integer }
+                  truncated: { type: boolean }
+                  ancestry:
+                    type: array
+                    items: { $ref: '#/components/schemas/TraceNode' }
+                  children:
+                    type: array
+                    items: { $ref: '#/components/schemas/TraceNode' }
+        '404':
+          description: Entry not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer }
+                  found: { const: false }
+
+  /feed:
+    get:
+      tags: [entries]
+      operationId: feedSince
+      summary: Activity feed since timestamp, optionally excluding a user
+      parameters:
+        - in: query
+          name: since
+          required: true
+          schema: { type: string }
+          description: ISO timestamp (or SQLite-parseable `YYYY-MM-DD HH:MM:SS`)
+        - in: query
+          name: exclude_user
+          schema: { type: string }
+      responses:
+        '200':
+          description: Feed entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries, count, since, latest]
+                properties:
+                  entries:
+                    type: array
+                    items: { $ref: '#/components/schemas/Entry' }
+                  count: { type: integer }
+                  since: { type: string }
+                  latest: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /summaries:
+    get:
+      tags: [entries]
+      operationId: hierarchicalSummaries
+      summary: Hierarchical chunk summaries (L1 10-min / L2 daily / L3 weekly)
+      parameters:
+        - in: query
+          name: level
+          schema: { type: integer, default: 1, enum: [1, 2, 3] }
+        - in: query
+          name: hours
+          schema: { type: integer, default: 24, maximum: 720 }
+          description: For level=1 (max 30d)
+        - in: query
+          name: days
+          schema: { type: integer, default: 30, maximum: 365 }
+          description: For level=2
+        - in: query
+          name: weeks
+          schema: { type: integer, default: 12, maximum: 104 }
+          description: For level=3
+      responses:
+        '200':
+          description: Summaries window
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  level: { type: integer }
+                  count: { type: integer }
+                  expected_chunks: { type: integer }
+                  coverage: { type: number }
+                  summaries:
+                    type: array
+                    items: { type: object }
+
+  /sessions/summary:
+    get:
+      tags: [entries]
+      operationId: sessionSummaries
+      summary: Per-session aggregates for the dashboard
+      parameters:
+        - in: query
+          name: hours
+          schema: { type: integer, default: 24, maximum: 168 }
+      responses:
+        '200':
+          description: Session aggregates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        session: { type: string }
+                        events: { type: integer }
+                        first_seen: { type: string }
+                        last_active: { type: string }
+                        types:
+                          type: object
+                          additionalProperties: { type: integer }
+                        project: { type: string }
+                  count: { type: integer }
+                  period_hours: { type: integer }
+
+  # ── SEARCH ──────────────────────────────────────────────────────
+  /search/semantic:
+    get:
+      tags: [search]
+      operationId: semanticSearch
+      summary: Vector similarity search via MLX embeddings
+      description: |
+        Uses sqlite-vec index when available; falls back to JS cosine over
+        all `embedding IS NOT NULL` rows. If MLX is unreachable or its
+        dimension differs from stored embeddings, falls back to FTS.
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 10, maximum: 50 }
+        - in: query
+          name: threshold
+          schema: { type: number, default: 0.5 }
+        - in: query
+          name: type
+          schema: { type: string }
+          description: Restrict to a type (triggers type-scoped JS cosine path)
+      responses:
+        '200':
+          description: Ranked matches
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, count, engine]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      allOf:
+                        - $ref: '#/components/schemas/Entry'
+                        - type: object
+                          properties:
+                            similarity: { type: number }
+                            _engine:
+                              type: string
+                              enum: [sqlite-vec, js-cosine, type-scoped, fts-fallback]
+                  count: { type: integer }
+                  engine:
+                    type: string
+                    enum: [sqlite-vec, js-cosine, type-scoped, fts-fallback]
+                  model_used:
+                    type: [string, "null"]
+                  embed_source:
+                    type: [string, "null"]
+                  threshold: { type: number }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /predictive-search:
+    post:
+      tags: [search]
+      operationId: predictiveSearch
+      summary: Fire-and-forget predictive background search
+      description: |
+        Extracts keywords from a prompt via MLX generate, sanitizes for
+        privacy (PATH/URL/EMAIL/TOKEN/IP redaction), then searches
+        vcontext FTS + SearXNG + MLX knowledge + Wikipedia in parallel.
+        Results are stored as a `predictive-search` entry for later
+        `/recall`. Returns 202 immediately.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [prompt]
+              properties:
+                prompt: { type: string, minLength: 10 }
+                session: { type: string }
+      responses:
+        '200':
+          description: Skipped (prompt too short or MLX unavailable)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { const: skipped }
+                  reason: { type: string }
+        '202':
+          description: Search running in background
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { const: searching }
+                  prompt_length: { type: integer }
+
+  /predict/next:
+    get:
+      tags: [search]
+      operationId: predictNext
+      summary: Pure-SQL ranked next-likely tools / skills / gaps (Pillar 4)
+      parameters:
+        - in: query
+          name: session
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 5, maximum: 20 }
+      responses:
+        '200':
+          description: Predictions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [generated_at, signals, predictions]
+                properties:
+                  generated_at: { type: string, format: date-time }
+                  signals:
+                    type: object
+                    properties:
+                      last_tool: { type: [string, "null"] }
+                      active_gap_count: { type: integer }
+                      top_skills:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            name: { type: string }
+                            count: { type: integer }
+                  predictions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        kind:
+                          type: string
+                          enum: [tool, skill, gap, suggestion]
+                        label: { type: string }
+                        score: { type: number }
+                        reason: { type: string }
+                        parent_id: { type: integer }
+
+  /completion-check:
+    post:
+      tags: [search]
+      operationId: completionCheck
+      summary: Detect completion claims and run MLX-backed QA checklist
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [assistant_message]
+              properties:
+                assistant_message: { type: string }
+                session: { type: string }
+      responses:
+        '200':
+          description: No completion claim detected (or MLX unavailable)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  checked: { type: boolean }
+                  analyzing: { type: boolean }
+                  reason: { type: string }
+        '202':
+          description: Analysis running in background
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  checked: { const: true }
+                  analyzing: { const: true }
+
+  # ── HEALTH / STATUS ─────────────────────────────────────────────
+  /health:
+    get:
+      tags: [health]
+      operationId: health
+      summary: Liveness probe
+      description: |
+        Returns 200 `healthy` or 503 `degraded`. In SSD-only mode the
+        absence of `/Volumes/VContext` is expected, not a fault.
+      responses:
+        '200':
+          description: Healthy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthReport' }
+              examples:
+                ssd-mode:
+                  value:
+                    status: healthy
+                    ram_disk: false
+                    use_ramdisk: false
+                    database: true
+                    ssd_database: true
+                    cloud_configured: false
+                    mlx_generate_available: true
+                    mlx_generate_model: qwen3-14b
+                    mlx_available: true
+                    ws_clients: 2
+                    uptime_seconds: 42315
+                    features:
+                      semantic_search: true
+                      mlx_embed: true
+                      usage_analytics: true
+        '503':
+          description: Degraded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthReport' }
+
+  /pipeline/health:
+    get:
+      tags: [health]
+      operationId: pipelineHealth
+      summary: Per-feature heartbeat + loop status
+      responses:
+        '200':
+          description: Pipeline health snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [summary, features, loops]
+                properties:
+                  summary:
+                    type: object
+                    properties:
+                      green: { type: integer }
+                      yellow: { type: integer }
+                      red: { type: integer }
+                      idle: { type: integer }
+                  features:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string }
+                        label: { type: string }
+                        last: { type: [string, "null"] }
+                        age_min: { type: [integer, "null"] }
+                        total: { type: integer }
+                        today: { type: integer }
+                        status:
+                          type: string
+                          enum: [green, yellow, red, idle]
+                        condition: { type: boolean }
+                  loops:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        running: { type: boolean }
+                        last_tick_ms_ago: { type: [integer, "null"] }
+                        iterations: { type: integer }
+                        status:
+                          type: string
+                          enum: [green, yellow, red, stopped]
+
+  /ai/status:
+    get:
+      tags: [health]
+      operationId: aiStatus
+      summary: Local AI (MLX) availability + embedding backlog
+      responses:
+        '200':
+          description: Local AI status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mlx_generate_available: { type: boolean }
+                  mlx_generate_url: { type: string }
+                  mlx_generate_model: { type: string }
+                  mlx_available: { type: boolean }
+                  mlx_url: { type: string }
+                  mlx_model: { type: string }
+                  mlx_dim: { type: integer }
+                  embedding_count: { type: integer }
+                  embedding_eligible_total: { type: integer }
+                  embedding_backlog: { type: integer }
+                  gen_stats:
+                    type: object
+                    properties:
+                      summaries: { type: integer }
+                      suggestions: { type: integer }
+                      skills_created: { type: integer }
+                      discoveries: { type: integer }
+                  preferred:
+                    type: object
+                    additionalProperties: { type: [string, "null"] }
+                  features:
+                    type: object
+                    properties:
+                      auto_summarize: { type: boolean }
+                      auto_embed: { type: boolean }
+                      auto_conflict_resolve: { type: boolean }
+                      semantic_search: { type: boolean }
+
+  /ai/summarize:
+    post:
+      tags: [search]
+      operationId: aiSummarize
+      summary: MLX-generate summaries for entries (or unsummarized >24h old)
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ids:
+                  type: array
+                  items: { type: integer }
+      responses:
+        '200':
+          description: Summarized count
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  summarized: { type: integer }
+                  model: { type: string }
+        '503':
+          description: MLX generate unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  # ── METRICS ─────────────────────────────────────────────────────
+  /stats:
+    get:
+      tags: [metrics]
+      operationId: stats
+      summary: Database + entry statistics
+      responses:
+        '200':
+          description: Stats
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries, by_type, total_tokens, sessions]
+                properties:
+                  entries: { type: integer }
+                  by_type:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        type: { type: string }
+                        count: { type: integer }
+                  oldest: { type: [string, "null"] }
+                  newest: { type: [string, "null"] }
+                  total_tokens: { type: integer }
+                  sessions: { type: integer }
+                  db_size_bytes: { type: integer }
+                  db_size_human: { type: string }
+                  warning: { type: [string, "null"] }
+              examples:
+                typical:
+                  value:
+                    entries: 152000
+                    by_type:
+                      - { type: tool-call, count: 98000 }
+                      - { type: decision, count: 1200 }
+                    oldest: "2024-11-01 09:00:00"
+                    newest: "2026-04-20 06:12:33"
+                    total_tokens: 42100000
+                    sessions: 421
+                    db_size_bytes: 1073741824
+                    db_size_human: "1.0 GB"
+                    warning: null
+
+  /metrics/report:
+    get:
+      tags: [metrics]
+      operationId: metricsReport
+      summary: API latency + cost + derived savings
+      parameters:
+        - in: query
+          name: hours
+          schema: { type: integer, default: 24 }
+      responses:
+        '200':
+          description: Metrics report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period_hours: { type: integer }
+                  operations:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        count: { type: integer }
+                        avg_latency_ms: { type: number }
+                        avg_result_count: { type: number }
+                        total_tokens_in: { type: integer }
+                        total_tokens_out: { type: integer }
+                  skills:
+                    type: object
+                    properties:
+                      registered: { type: integer }
+                      auto_created: { type: integer }
+                      auto_created_in_period: { type: integer }
+                      usage_in_period: { type: integer }
+                  derived:
+                    type: object
+                    properties:
+                      resume_cost_tokens: { type: integer }
+                      search_hit_rate: { type: number }
+                      period_savings_rate: { type: number }
+                      prior_stored_tokens: { type: integer }
+                      period_new_tokens: { type: integer }
+                      cumulative_savings_rate: { type: number }
+                      cumulative_stored_tokens: { type: integer }
+                      active_sessions: { type: integer }
+                  per_session: { type: array, items: { type: object } }
+                  per_user: { type: array, items: { type: object } }
+                  per_project: { type: array, items: { type: object } }
+                  index:
+                    type: object
+                    properties:
+                      indexed: { type: integer }
+                      total: { type: integer }
+                      coverage: { type: number }
+                  recent_operations: { type: array, items: { type: object } }
+
+  /metrics/cost:
+    get:
+      tags: [metrics]
+      operationId: metricsCost
+      summary: MLX token usage + file-lock coordination stats
+      responses:
+        '200':
+          description: Cost / lock stats
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mlx_file_lock:
+                    type: object
+                    properties:
+                      skips: { type: integer }
+                      hold_ms_total: { type: integer }
+                      current_status: { type: object }
+                  # Additional fields from _mlxUsage accumulator — shape depends on MLX module.
+                additionalProperties: true
+
+  /analytics/track:
+    post:
+      tags: [metrics]
+      operationId: analyticsTrack
+      summary: Track an analytics event
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event_type]
+              properties:
+                event_type: { type: string }
+                skill_name: { type: string }
+                session: { type: string }
+                metadata: { type: object }
+      responses:
+        '201':
+          description: Tracked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tracked: { const: true }
+                  event_type: { type: string }
+                  skill_name: { type: [string, "null"] }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /analytics/report:
+    get:
+      tags: [metrics]
+      operationId: analyticsReport
+      summary: Skill / user / daily activity report
+      parameters:
+        - in: query
+          name: days
+          schema: { type: integer, default: 30 }
+      responses:
+        '200':
+          description: Analytics report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period: { type: string }
+                  total_events: { type: integer }
+                  skill_usage:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        skill: { type: string }
+                        count: { type: integer }
+                        last_used: { type: string }
+                  never_used:
+                    type: array
+                    items: { type: string }
+                  daily_activity:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        date: { type: string }
+                        events: { type: integer }
+                  top_users:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        user: { type: string }
+                        events: { type: integer }
+
+  /analytics/weekly-summary:
+    get:
+      tags: [metrics]
+      operationId: weeklySummary
+      summary: Cached weekly aggregate (30s TTL per days key)
+      parameters:
+        - in: query
+          name: days
+          schema: { type: integer, default: 7 }
+      responses:
+        '200':
+          description: Weekly summary
+          content:
+            application/json:
+              schema: { type: object }
+
+  /analytics/skill-effectiveness:
+    get:
+      tags: [metrics]
+      operationId: skillEffectivenessAnalytics
+      summary: Skill usage ranking from skill-usage entries
+      responses:
+        '200':
+          description: Skill usage counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  skills:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        skill_name: { type: string }
+                        usage_count: { type: integer }
+                        last_used: { type: string }
+                  count: { type: integer }
+
+  /skills/effectiveness:
+    get:
+      tags: [metrics]
+      operationId: skillEffectivenessRegistry
+      summary: Registered-skill inventory + never-used list
+      responses:
+        '200':
+          description: Skill registry stats
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_registered: { type: integer }
+                  total_auto_created: { type: integer }
+                  usage_ranking:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        count: { type: integer }
+                  never_used:
+                    type: array
+                    items: { type: string }
+                  never_used_count: { type: integer }
+
+  # ── EXPORT ──────────────────────────────────────────────────────
+  /export:
+    get:
+      tags: [export]
+      operationId: exportEntries
+      summary: NDJSON dump of entries (owner only)
+      description: |
+        Streaming newline-delimited JSON. Line 1 is a meta header
+        (`schema`, `excluded_types`, `generated_at`, `since_id`, ...).
+        Lines 2..N are entries. Last line is `{ __trailer: true, ...}`.
+        Secrets are masked via `maskSecrets()`. `include_sensitive=1`
+        allows `api-key` / `credential` types (still masked).
+      parameters:
+        - in: query
+          name: since
+          schema: { type: integer, default: 0 }
+          description: Only entries with id > this value
+        - in: query
+          name: limit
+          schema: { type: integer, default: 500, maximum: 2000 }
+          description: Per-batch page size
+        - in: query
+          name: max_entries
+          schema: { type: integer, default: 50000, maximum: 500000 }
+        - in: query
+          name: include_sensitive
+          schema: { type: string, enum: ["0", "1"], default: "0" }
+      responses:
+        '200':
+          description: NDJSON stream
+          headers:
+            X-AIOS-Export-Version:
+              schema: { type: string, default: "1" }
+            Content-Disposition:
+              schema: { type: string }
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+                example: |
+                  {"aios_export_version":1,"generated_at":"2026-04-20T00:00:00Z","schema":[...],"excluded_types":[...]}
+                  {"id":1,"type":"decision","content":"...","tags":"[...]","session":"...","created_at":"..."}
+                  {"__trailer":true,"written":12345,"last_id":99999,"batches":25}
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Not owner role
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  # ── AUTH ────────────────────────────────────────────────────────
+  /auth/whoami:
+    get:
+      tags: [auth]
+      operationId: whoami
+      summary: Identity + role + groups of the caller
+      security:
+        - {}
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Identity
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [userId, local, role, groups, host]
+                properties:
+                  userId: { type: string }
+                  local: { type: boolean }
+                  role: { $ref: '#/components/schemas/Role' }
+                  groups:
+                    type: array
+                    items: { type: string }
+                  host: { type: string }
+
+  /auth/create-key:
+    post:
+      tags: [auth]
+      operationId: createKey
+      summary: Mint a new `vctx_<hex>` API key (admin+ required)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId, name]
+              properties:
+                userId: { type: string }
+                name: { type: string }
+                role: { $ref: '#/components/schemas/Role' }
+                groups:
+                  type: array
+                  items: { type: string }
+      responses:
+        '201':
+          description: Key minted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  apiKey: { type: string, pattern: '^vctx_[a-f0-9]{64}$' }
+                  userId: { type: string }
+                  name: { type: string }
+                  role: { $ref: '#/components/schemas/Role' }
+                  groups:
+                    type: array
+                    items: { type: string }
+                  _setup: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /auth/update-key:
+    post:
+      tags: [auth]
+      operationId: updateKey
+      summary: Rotate role or groups on an existing key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [apiKey]
+              properties:
+                apiKey: { type: string }
+                role: { $ref: '#/components/schemas/Role' }
+                groups:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object }
+        '404':
+          description: API key not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /auth/keys:
+    get:
+      tags: [auth]
+      operationId: listKeys
+      summary: List API keys (admin sees own groups, owner sees all)
+      responses:
+        '200':
+          description: Key list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        apiKey: { type: string, description: "Truncated form (first 10 chars + '...')" }
+                        userId: { type: string }
+                        name: { type: string }
+                        role: { $ref: '#/components/schemas/Role' }
+                        groups:
+                          type: array
+                          items: { type: string }
+                        createdAt: { type: string }
+                        createdBy: { type: string }
+                  count: { type: integer }
+
+  /auth/create-group:
+    post:
+      tags: [auth]
+      operationId: createGroup
+      summary: Create a group (owner only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [groupId, name]
+              properties:
+                groupId: { type: string, pattern: '^[a-zA-Z0-9/_-]+$' }
+                name: { type: string }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  groupId: { type: string }
+                  name: { type: string }
+                  created: { const: true }
+        '409':
+          description: Group already exists
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /auth/groups:
+    get:
+      tags: [auth]
+      operationId: listGroups
+      summary: List groups (owner sees all, non-owner sees own)
+      responses:
+        '200':
+          description: Group map
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  groups:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        createdAt: { type: string }
+                        createdBy: { type: string }
+
+  # ── CONSULT ─────────────────────────────────────────────────────
+  /resolve:
+    post:
+      tags: [consult]
+      operationId: resolveDecisions
+      summary: Build resolution prompt + heuristic suggestions for conflicting decisions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: { type: string }
+                context: { type: string }
+                candidates:
+                  type: array
+                  items: { type: integer }
+      responses:
+        '200':
+          description: Resolution result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  conflict: { type: boolean }
+                  candidates:
+                    type: array
+                    items: { $ref: '#/components/schemas/Entry' }
+                  resolution_prompt: { type: [string, "null"] }
+                  suggestion:
+                    type: [object, "null"]
+                    properties:
+                      by_recency: { type: object }
+                      by_confidence: { type: object }
+                      by_status: { type: object }
+                      by_supersedes: { type: object }
+                  note: { type: string }
+
+  /consult:
+    post:
+      tags: [consult]
+      operationId: createConsult
+      summary: Create a multi-model consultation package
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query, models]
+              properties:
+                query: { type: string }
+                context: { type: string }
+                models:
+                  type: array
+                  items: { type: string, example: "claude" }
+                candidates:
+                  type: array
+                  items: { type: integer }
+      responses:
+        '201':
+          description: Consultation created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  consultation_id: { type: string, example: "consult_1745123456789" }
+                  packages:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        url: { type: string }
+                        prompt: { type: string }
+                        instructions: { type: string }
+                  candidates:
+                    type: array
+                    items: { $ref: '#/components/schemas/Entry' }
+                  status: { const: pending_responses }
+
+  /consult/pending:
+    get:
+      tags: [consult]
+      operationId: listPendingConsults
+      summary: Pending consultations for a given model
+      parameters:
+        - in: query
+          name: model
+          schema: { type: string, default: "claude" }
+      responses:
+        '200':
+          description: Pending
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pending:
+                    type: array
+                    items: { type: object }
+                  count: { type: integer }
+
+  /consult/auto-respond:
+    post:
+      tags: [consult]
+      operationId: autoRespondConsults
+      summary: Batch respond to many consultations in one call
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, responses]
+              properties:
+                model: { type: string }
+                responses:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      consultation_id: { type: string }
+                      chosen: { type: integer }
+                      reasoning: { type: string }
+                      confidence: { $ref: '#/components/schemas/Confidence' }
+      responses:
+        '200':
+          description: Batch result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  processed: { type: integer }
+                  results: { type: array, items: { type: object } }
+
+  /consult/list:
+    get:
+      tags: [consult]
+      operationId: listConsults
+      summary: List consultations (optionally filtered by status)
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [pending, partial, complete, closed]
+      responses:
+        '200':
+          description: Consultations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  consultations:
+                    type: array
+                    items: { type: object }
+                  count: { type: integer }
+
+  /consult/{id}:
+    get:
+      tags: [consult]
+      operationId: getConsultStatus
+      summary: Status + responses + consensus for a consultation
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Consultation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  consultation_id: { type: string }
+                  query: { type: string }
+                  context: { type: [string, "null"] }
+                  candidates:
+                    type: array
+                    items: { $ref: '#/components/schemas/Entry' }
+                  responses:
+                    type: array
+                    items: { type: object }
+                  consensus:
+                    type: [object, "null"]
+                    properties:
+                      chosen: { type: integer }
+                      agreement: { type: string }
+                  status: { type: string }
+                  claimed_by: { type: [string, "null"] }
+                  closed_at: { type: [string, "null"] }
+                  created_at: { type: string }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /consult/{id}/response:
+    post:
+      tags: [consult]
+      operationId: submitConsultResponse
+      summary: Submit a single model's response
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, chosen]
+              properties:
+                model: { type: string }
+                chosen: { type: integer }
+                reasoning: { type: string }
+                confidence: { $ref: '#/components/schemas/Confidence' }
+      responses:
+        '200':
+          description: Accepted
+          content:
+            application/json:
+              schema: { type: object }
+
+  /consult/{id}/claim:
+    post:
+      tags: [consult]
+      operationId: claimConsult
+      summary: Lock a consultation for a given model
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                model: { type: string }
+      responses:
+        '200':
+          description: Claimed
+        '409':
+          description: Already claimed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /consult/{id}/close:
+    post:
+      tags: [consult]
+      operationId: closeConsult
+      summary: Close a consultation
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Closed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  consultation_id: { type: string }
+                  status: { const: closed }
+                  closed_at: { type: string }
+
+  # ── TIER ────────────────────────────────────────────────────────
+  /tier/stats:
+    get:
+      tags: [tier]
+      operationId: tierStats
+      summary: Per-tier entry counts + sizes + unified-mode signal
+      responses:
+        '200':
+          description: Tier snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ram: { $ref: '#/components/schemas/TierSnapshot' }
+                  ssd: { $ref: '#/components/schemas/TierSnapshot' }
+                  cloud:
+                    type: object
+                    properties:
+                      configured: { type: boolean }
+                      provider: { type: [string, "null"] }
+                      bucket: { type: [string, "null"] }
+                      entries: { type: integer }
+                  unified: { type: boolean }
+                  ram_disk_mounted: { type: boolean }
+                  use_ramdisk: { type: boolean }
+
+  /tier/migrate:
+    post:
+      tags: [tier]
+      operationId: tierMigrate
+      summary: Trigger RAM→SSD and SSD→Cloud migration
+      responses:
+        '200':
+          description: Migration result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ram_to_ssd: { type: object }
+                  ssd_to_cloud: { type: object }
+
+  /tier/config:
+    post:
+      tags: [tier]
+      operationId: tierConfig
+      summary: Configure cloud provider (currently stub; config saved for future)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, bucket]
+              properties:
+                provider:
+                  type: string
+                  enum: [s3, gcs, r2]
+                bucket: { type: string }
+                region: { type: string }
+                prefix: { type: string, default: "vcontext/" }
+      responses:
+        '200':
+          description: Saved
+          content:
+            application/json:
+              schema: { type: object }
+
+  # ── FEDERATION ──────────────────────────────────────────────────
+  /federation/route:
+    post:
+      tags: [federation]
+      operationId: federationRoute
+      summary: Route a prompt to an AI tier (currently all local MLX)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                prompt: { type: string }
+                tier:
+                  type: string
+                  enum: [haiku, sonnet, opus]
+                  default: sonnet
+                maxTokens: { type: integer, default: 40960 }
+                external:
+                  type: object
+                  description: "inferred; please verify (stub field for future external routing)"
+      responses:
+        '200':
+          description: Generation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tier: { type: string }
+                  used: { type: string, example: mlx-local }
+                  content: { type: string }
+
+  # ── OTEL ────────────────────────────────────────────────────────
+  /otel/status:
+    get:
+      tags: [otel]
+      operationId: otelStatus
+      summary: OpenTelemetry tracing status (Langfuse host, service name)
+      responses:
+        '200':
+          description: OTEL status
+          content:
+            application/json:
+              schema:
+                type: object
+                description: "Shape defined by ./lib/otel.js — inferred; please verify"
+                additionalProperties: true
+
+  # ── DASHBOARD ───────────────────────────────────────────────────
+  /dashboard:
+    get:
+      tags: [dashboard]
+      operationId: dashboard
+      summary: Browser dashboard UI (HTML)
+      security:
+        - {}
+      responses:
+        '200':
+          description: HTML dashboard
+          content:
+            text/html:
+              schema: { type: string }
+          headers:
+            Cache-Control:
+              schema: { type: string, default: "no-cache, must-revalidate" }
+
+  # ── ADMIN ───────────────────────────────────────────────────────
+  /admin/ramdisk-stats:
+    get:
+      tags: [admin]
+      operationId: ramdiskStats
+      summary: RAM disk capacity / fill / thresholds
+      responses:
+        '200':
+          description: RAM disk state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mount: { type: string }
+                  enabled: { type: boolean }
+                  status:
+                    type: string
+                    enum: [ok, warn, critical, disabled]
+                  reason: { type: string }
+                  total_gb: { type: number }
+                  used_gb: { type: number }
+                  avail_gb: { type: number }
+                  used_pct: { type: integer }
+                  thresholds:
+                    type: object
+                    properties:
+                      warn_pct: { type: integer }
+                      critical_pct: { type: integer }
+
+  /admin/wal-status:
+    get:
+      tags: [admin]
+      operationId: walStatus
+      summary: entries-wal.jsonl size + line count
+      responses:
+        '200':
+          description: WAL snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  exists: { type: boolean }
+                  path: { type: string }
+                  size_bytes: { type: integer }
+                  size_mb: { type: number }
+                  lines: { type: integer }
+                  modified: { type: string }
+                  rotate_threshold_mb: { type: number }
+
+  /admin/pending-patches:
+    get:
+      tags: [admin]
+      operationId: pendingPatches
+      summary: List pending self-improve patches awaiting user approval
+      responses:
+        '200':
+          description: Patch list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  patches:
+                    type: array
+                    items: { type: object }
+                  count: { type: integer }
+
+  /admin/approve-patch:
+    post:
+      tags: [admin]
+      operationId: approvePatch
+      summary: Apply a pending patch (git branch + syntax test + merge + reload)
+      security:
+        - adminCsrf: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: integer }
+      responses:
+        '200':
+          description: Applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  applied: { const: true }
+                  patchId: { type: integer }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/AdminCsrfRequired' }
+        '404':
+          description: Patch not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '500':
+          description: Syntax test failed (rolled back) or git error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/reject-patch:
+    post:
+      tags: [admin]
+      operationId: rejectPatch
+      summary: Reject a pending patch
+      security:
+        - adminCsrf: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: integer }
+      responses:
+        '200':
+          description: Rejected
+        '403': { $ref: '#/components/responses/AdminCsrfRequired' }
+
+  /admin/adopt-idea:
+    post:
+      tags: [admin]
+      operationId: adoptIdea
+      summary: Mark a pending-idea as adopted and mirror to adopted-idea entry
+      security:
+        - adminCsrf: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: integer }
+      responses:
+        '200':
+          description: Adopted
+        '403': { $ref: '#/components/responses/AdminCsrfRequired' }
+        '404':
+          description: Idea not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/reject-idea:
+    post:
+      tags: [admin]
+      operationId: rejectIdea
+      summary: Reject a pending-idea entry (dashboard Dismiss)
+      security:
+        - adminCsrf: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: integer }
+      responses:
+        '200':
+          description: Rejected
+        '403': { $ref: '#/components/responses/AdminCsrfRequired' }
+
+  /admin/replay-wal:
+    post:
+      tags: [admin]
+      operationId: replayWal
+      summary: Replay entries-wal.jsonl into entries (INSERT OR IGNORE, non-destructive)
+      security:
+        - adminCsrf: []
+      responses:
+        '200':
+          description: Replay stats
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  inserted: { type: integer }
+                  skipped: { type: integer }
+                  failed: { type: integer }
+                  wal_path: { type: string }
+        '403': { $ref: '#/components/responses/AdminCsrfRequired' }
+        '404':
+          description: No WAL file
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/health-report:
+    get:
+      tags: [admin]
+      operationId: healthReport
+      summary: Human-readable daily/weekly brief (used by morning-brief script)
+      parameters:
+        - in: query
+          name: days
+          schema: { type: integer, default: 1, minimum: 1, maximum: 30 }
+      responses:
+        '200':
+          description: Brief
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period_days: { type: integer }
+                  brief: { type: string }
+                  stats:
+                    type: object
+                    properties:
+                      events: { type: integer }
+                      sessions: { type: integer }
+                      errors: { type: integer }
+                      skills: { type: integer }
+                      decisions: { type: integer }
+                      patches: { type: integer }
+                  top_tools: { type: array }
+                  slowest_ops: { type: array }
+
+  /admin/rollback-last:
+    post:
+      tags: [admin]
+      operationId: rollbackLast
+      summary: Rollback last `self-improve` commit (git reset + reload)
+      security:
+        - adminCsrf: []
+      responses:
+        '200':
+          description: Rolled back
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { rolled_back: { const: true } }
+        '403': { $ref: '#/components/responses/AdminCsrfRequired' }
+        '500':
+          description: No self-improve commit found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/restart-aios:
+    post:
+      tags: [admin]
+      operationId: restartAios
+      summary: Soft-restart the server (SIGHUP to wrapper)
+      security:
+        - adminCsrf: []
+      responses:
+        '200':
+          description: Restart initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  restarting: { const: true }
+                  wrapper_pid: { type: integer }
+        '403': { $ref: '#/components/responses/AdminCsrfRequired' }
+        '503':
+          description: wrapper lock not found — cannot SIGHUP
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/stop-aios:
+    post:
+      tags: [admin]
+      operationId: stopAios
+      summary: Hard-stop via launchctl disable + kill (requires confirm token)
+      security:
+        - adminCsrf: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm:
+                  type: string
+                  enum: ["yes"]
+      responses:
+        '200':
+          description: Stop initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stopped: { const: true }
+                  restart_cmd: { type: string }
+                  note: { type: string }
+        '400':
+          description: confirm:"yes" missing
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403': { $ref: '#/components/responses/AdminCsrfRequired' }
+
+  /admin/verify-backup:
+    post:
+      tags: [admin]
+      operationId: verifyBackup
+      summary: Integrity check of latest N snapshots
+      responses:
+        '200':
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  checked: { type: integer }
+                  passed: { type: integer }
+                  failed: { type: integer }
+                  integrity: { type: string, enum: [ok, fail] }
+                  latest: { type: string }
+                  alerts: { type: array, items: { type: string } }
+                  snapshots: { type: array, items: { type: object } }
+                  verified_at: { type: string }
+        '404':
+          description: No snapshots found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/trigger-l2-summary:
+    post:
+      tags: [admin]
+      operationId: triggerL2Summary
+      summary: Force-generate an L2 daily chunk summary (fire-and-forget)
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                date:
+                  type: string
+                  pattern: '^\d{4}-\d{2}-\d{2}$'
+      responses:
+        '202':
+          description: Triggered
+          content:
+            application/json:
+              schema: { type: object }
+        '503':
+          description: MLX generate unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/trigger-l3-summary:
+    post:
+      tags: [admin]
+      operationId: triggerL3Summary
+      summary: Force-generate an L3 weekly chunk summary (fire-and-forget)
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                week:
+                  type: string
+                  pattern: '^\d{4}-W\d{2}$'
+                  example: "2026-W16"
+      responses:
+        '202':
+          description: Triggered
+          content:
+            application/json:
+              schema: { type: object }
+        '503':
+          description: MLX generate unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/run-all:
+    post:
+      tags: [admin]
+      operationId: runAll
+      summary: Fire AI-driven loops sequentially (discovery, prediction, auto-create-skill)
+      responses:
+        '202':
+          description: Triggered
+          content:
+            application/json:
+              schema: { type: object }
+
+  /admin/fts-rebuild:
+    post:
+      tags: [admin]
+      operationId: ftsRebuild
+      summary: FTS5 incremental rebuild
+      responses:
+        '200':
+          description: Rebuilt
+
+  /admin/fts-full-rebuild:
+    post:
+      tags: [admin]
+      operationId: ftsFullRebuild
+      summary: Nuclear FTS rebuild (drop + recreate + reindex, hard-delete migrated rows)
+      responses:
+        '200':
+          description: Full rebuild result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dropped: { type: boolean }
+                  recreated: { type: boolean }
+                  reindexed: { type: integer }
+                  cleaned: { type: integer }
+                  error: { type: [string, "null"] }
+
+  /admin/fts-hard-cleanup:
+    post:
+      tags: [admin]
+      operationId: ftsHardCleanup
+      summary: Hard-delete soft-migrated rows (after FTS rebuild)
+      responses:
+        '200':
+          description: Cleanup result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: integer }
+                  failed: { type: integer }
+
+  /admin/dedup-ssd:
+    post:
+      tags: [admin]
+      operationId: dedupSsd
+      summary: Focused SSD content-hash dedup (MIN(id) per (type, hash))
+      responses:
+        '200':
+          description: Dedup result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: integer }
+                  schema_fixed: { type: integer }
+                  vacuumed: { type: boolean }
+                  indexed: { type: boolean }
+                  error: { type: [string, "null"] }
+
+  /admin/dedup-migration:
+    post:
+      tags: [admin]
+      operationId: dedupMigration
+      summary: One-shot dedup migration (add column, backfill, delete dupes, unique index)
+      responses:
+        '200':
+          description: Migration result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  added_column: { type: boolean }
+                  backfilled: { type: integer }
+                  deleted: { type: integer }
+                  index_created: { type: boolean }
+                  ssd_schema_fixed: { type: integer }
+                  ssd_backfilled: { type: integer }
+                  ssd_deleted: { type: integer }
+                  ssd_error: { type: string }
+                  error: { type: [string, "null"] }
+
+  /admin/wipe-user:
+    post:
+      tags: [admin]
+      operationId: wipeUser
+      summary: Compliance wipe — delete all entries tagged `user:<id>`
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId]
+              properties:
+                userId: { type: string }
+      responses:
+        '200':
+          description: Wipe counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ram_deleted: { type: integer }
+                  ssd_deleted: { type: integer }
+                  userId: { type: string }
+
+  /admin/vote:
+    post:
+      tags: [admin]
+      operationId: adminVote
+      summary: Consensus sampling — N MLX generations, majority wins
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [prompt]
+              properties:
+                prompt: { type: string }
+                samples: { type: integer, default: 3, minimum: 2, maximum: 5 }
+      responses:
+        '200':
+          description: Sampled consensus
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  samples: { type: integer }
+                  consensus: { type: [string, "null"] }
+                  confidence: { type: number }
+                  all_responses:
+                    type: array
+                    items: { type: string }
+
+  /admin/multi-role-check:
+    post:
+      tags: [admin]
+      operationId: multiRoleCheck
+      summary: Parallel QA / architect / UX / security / holistic / meta checks
+      responses:
+        '200':
+          description: Findings across 6 role perspectives
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  roles:
+                    type: object
+                    additionalProperties: true
+                  findings:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        role: { type: string }
+                        msg: { type: string }
+                  checked_at: { type: string }
+
+  /admin/mlx-test:
+    post:
+      tags: [admin]
+      operationId: mlxTest
+      summary: Deterministic MLX generation with a seed (repro / debug)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [prompt]
+              properties:
+                prompt: { type: string }
+                seed: { type: integer }
+      responses:
+        '200':
+          description: Generation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  content: { type: string }
+                  seed: { type: integer }
+
+  /admin/task-request:
+    post:
+      tags: [admin]
+      operationId: taskRequest
+      summary: Enqueue an AIOS task-queue job (survives Claude Code crashes)
+      description: |
+        Allowed task types: `locomo-eval`, `skill-discovery-adhoc`,
+        `article-scan-adhoc`, `self-evolve-dryrun`, `shell-command`.
+        `shell-command` additionally requires `X-Vcontext-Admin: yes`
+        header AND `payload.approved_by_user === true`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [task_type]
+              properties:
+                task_type:
+                  type: string
+                  enum:
+                    - locomo-eval
+                    - skill-discovery-adhoc
+                    - article-scan-adhoc
+                    - self-evolve-dryrun
+                    - shell-command
+                payload: { type: object }
+                priority:
+                  type: integer
+                  enum: [1, 2, 3]
+                  default: 2
+                requested_by:
+                  type: string
+                  maxLength: 120
+      responses:
+        '200':
+          description: Queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request_id: { type: string, format: uuid }
+                  status: { const: pending }
+                  queue_position: { type: integer }
+                  created_at: { type: string, format: date-time }
+        '400':
+          description: Unknown task_type
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: shell-command task without admin header or approval
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/task-queue:
+    get:
+      tags: [admin]
+      operationId: taskQueueSnapshot
+      summary: Pending + running + recent-results snapshot
+      responses:
+        '200':
+          description: Queue snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pending:
+                    type: array
+                    items: { type: object }
+                  running:
+                    type: array
+                    items: { type: object }
+                  recent_results:
+                    type: array
+                    items: { type: object }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: "vctx_<64-hex>"
+      description: |
+        API key in `Authorization: Bearer vctx_<hex>` form. Loopback
+        calls (127.0.0.1 / ::1) skip this when `VCONTEXT_BIND` is the
+        default 127.0.0.1; LAN calls always require it.
+    adminCsrf:
+      type: apiKey
+      in: header
+      name: X-Vcontext-Admin
+      description: |
+        CSRF mitigation for destructive admin endpoints. Must equal the
+        literal string `yes`. Defense-in-depth: combines with
+        `bearerAuth` + application-level role check when applicable.
+
+  responses:
+    BadRequest:
+      description: Missing / invalid request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unauthorized:
+      description: Missing / invalid API key
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: Role / group does not permit this action
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    AdminCsrfRequired:
+      description: "Missing `X-Vcontext-Admin: yes` header"
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Human-readable error message
+      examples:
+        - error: "Missing required fields: type, content"
+
+    Role:
+      type: string
+      enum: [viewer, member, admin, owner]
+      description: |
+        Hierarchical. Level ordering: viewer < member < admin < owner.
+        - viewer: read-only (cannot POST /store)
+        - member: read/write in own groups
+        - admin: + create/update keys within own groups
+        - owner: + create groups, export, assign admin/owner roles
+
+    Confidence:
+      type: string
+      enum: [high, medium, low]
+
+    StoreRequest:
+      type: object
+      required: [type, content]
+      properties:
+        type:
+          type: string
+          description: Entry type (e.g. decision, tool-call, skill-usage)
+        content:
+          type: string
+          description: Arbitrary payload (JSON-stringified or plain text)
+        tags:
+          type: array
+          items: { type: string }
+          description: Auto-augmented with `user:<id>` and optional `project:<ns>`/`group:<g>`
+        session:
+          type: string
+        namespace:
+          type: string
+          description: Injected as `project:<namespace>` tag
+        group:
+          type: string
+          description: "Target group (non-owner must be a member)"
+        reasoning:
+          type: string
+          nullable: true
+        conditions:
+          type: string
+          nullable: true
+        supersedes:
+          type: integer
+          nullable: true
+          description: Entry id that this replaces
+        confidence:
+          $ref: '#/components/schemas/Confidence'
+        status:
+          type: string
+          enum: [active, deprecated, temporary, experimental]
+          default: active
+        parent_id:
+          type: integer
+          nullable: true
+          description: Causal parent — used by /trace/:id
+
+    Entry:
+      type: object
+      properties:
+        id: { type: integer }
+        type: { type: string }
+        content: { type: string }
+        tags:
+          oneOf:
+            - type: string
+              description: "Serialized JSON array (pre-parseTags())"
+            - type: array
+              items: { type: string }
+              description: "Parsed array (post-parseTags())"
+        session: { type: [string, "null"] }
+        token_estimate: { type: integer }
+        created_at: { type: string }
+        last_accessed: { type: string }
+        access_count: { type: integer }
+        tier:
+          type: string
+          enum: [ram, ssd, cloud]
+        reasoning: { type: [string, "null"] }
+        conditions: { type: [string, "null"] }
+        supersedes: { type: [integer, "null"] }
+        confidence: { $ref: '#/components/schemas/Confidence' }
+        status: { type: string }
+        content_hash: { type: [string, "null"] }
+        parent_id: { type: [integer, "null"] }
+        embedding:
+          type: [string, "null"]
+          description: "JSON-stringified float array (omitted when short=1)"
+        _tier:
+          type: string
+          enum: [ram, ssd, cloud]
+          description: "Tier the entry was served from (set at read time)"
+        _semantic:
+          type: boolean
+          description: "true when result came from semantic boost"
+        _warning:
+          type: string
+          description: "DB size / quota warning appended to /store response"
+        _conflicts:
+          type: object
+          description: "Conflict hint appended to /store for type=decision"
+
+    TraceNode:
+      type: object
+      properties:
+        id: { type: integer }
+        type: { type: string }
+        session: { type: [string, "null"] }
+        parent_id: { type: [integer, "null"] }
+        created_at: { type: string }
+        preview: { type: string }
+
+    HealthReport:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded]
+        ram_disk: { type: boolean }
+        use_ramdisk: { type: boolean }
+        database: { type: boolean }
+        ssd_database: { type: boolean }
+        cloud_configured: { type: boolean }
+        mlx_generate_available: { type: boolean }
+        mlx_generate_model: { type: [string, "null"] }
+        mlx_available: { type: boolean }
+        ws_clients: { type: integer }
+        uptime_seconds: { type: integer }
+        features:
+          type: object
+          properties:
+            semantic_search: { type: boolean }
+            mlx_embed: { type: boolean }
+            usage_analytics: { type: boolean }
+
+    TierSnapshot:
+      type: object
+      properties:
+        entries: { type: integer }
+        size: { type: string }
+        oldest: { type: [string, "null"] }
+        newest: { type: [string, "null"] }
+
+# ────────────────────────────────────────────────────────────────
+# WebSocket appendix (not part of the HTTP paths above).
+# AsyncAPI would be the proper format; keeping this as an extension
+# so the OpenAPI spec stays machine-readable.
+# ────────────────────────────────────────────────────────────────
+x-aios-websocket:
+  endpoint: /ws
+  upgrade: "HTTP/1.1 Upgrade: websocket"
+  auth: |
+    Optional `?key=<vctx_...>` query parameter. Without it, loopback
+    callers auth as owner (same logic as HTTP loopback).
+  client_to_server:
+    - action: subscribe
+      params:
+        namespace: { type: string, description: "subscribe to ns:<name>" }
+        type: { type: string, description: "subscribe to type:<name>" }
+      example: { action: subscribe, namespace: chatai }
+    - action: unsubscribe
+      params:
+        namespace: { type: string }
+        type: { type: string }
+    - action: ping
+      example: { action: ping }
+  server_to_client:
+    - event: connected
+      fields: [clientId, userId]
+    - event: subscribed
+      fields: [subscriptions]
+    - event: unsubscribed
+      fields: [subscriptions]
+    - event: pong
+      fields: [ts]
+    - event: new_entry
+      description: Broadcast on /store; payload is the stored Entry (content truncated to 200 chars)
+    - event: conflict_detected
+      description: When a decision POST produced _conflicts metadata
+    - event: consultation_request
+      fields: [consultation_id, query, candidate_count, prompt]
+    - event: consultation_updated
+      fields: [consultation_id, status, consensus, local_response]
+  notes: |
+    Broadcast obeys group access rules — clients only see entries their
+    group membership allows. Subscriptions filter by namespace or type;
+    `all` (default) receives everything the group rules permit.
+
+x-aios-rate-limits:
+  body_max_bytes: 10485760
+  body_max_bytes_note: "10 MiB hard limit enforced in readBody(); exceeding → 400 'body > N bytes'"
+  dashboard_cache: "none (Cache-Control: no-cache, must-revalidate)"
+  weekly_summary_cache_ttl_s: 30
+  mlx_file_lock: "/tmp/aios-mlx-lock coordinates MLX access across processes"
+
+x-aios-deprecations:
+  none_found:
+    description: |
+      A grep of the current scripts/vcontext-server.js did not surface
+      `TODO deprecate` or `LEGACY:` markers on any active endpoint.
+      Endpoints that are functionally stubs (e.g. /tier/config saves but
+      never syncs, /federation/route still routes 100% to local MLX) are
+      documented with `_note` fields in their responses but are not
+      deprecated per se.
+
+x-aios-experimental:
+  federation_route:
+    path: /federation/route
+    reason: "external_url + external_api_key path is a stub; always routes to local MLX today"
+  tier_config:
+    path: /tier/config
+    reason: "Cloud provider config is persisted but cloudStore.search/recent are stubs"
