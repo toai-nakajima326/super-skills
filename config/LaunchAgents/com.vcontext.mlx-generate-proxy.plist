@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.vcontext.mlx-generate-proxy</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/mitsuru_nakajima/.nvm/versions/node/v25.9.0/bin/node</string>
+    <string>/Users/mitsuru_nakajima/skills/scripts/mlx-generate-proxy.js</string>
+  </array>
+
+  <!-- Keep alive through launchd — if the proxy itself crashes, a client
+       sees a brief connection error, retries, works. No cascade (AIOS
+       Constitution P3: fail-open for infra). -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Give it a moment before respawning on crash — prevents a fork bomb
+       if the script has a bug. dabrahams launchd research: throttle keeps
+       launchd from giving up on us. -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <!-- Environment — port, idle, memory gate (mirror watchdog's constant). -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VCTX_MLX_PROXY_PORT</key>
+    <string>3163</string>
+    <key>VCTX_MLX_BACKEND_PORT</key>
+    <string>3162</string>
+    <key>VCTX_MLX_IDLE_MS</key>
+    <string>600000</string>
+    <key>VCTX_MLX_WARMUP_MS_MAX</key>
+    <string>90000</string>
+    <key>VCTX_MLX_MIN_FREE_PAGES</key>
+    <string>50000</string>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/vcontext-mlx-proxy.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/vcontext-mlx-proxy.log</string>
+
+  <!-- The proxy invokes launchctl for MLX lifecycle — no special
+       privileges needed (user scope). LowPriorityIO not necessary; proxy
+       itself does essentially no IO (< 80 MB RSS, HTTP forwarding only). -->
+
+  <!-- Architectural note: see docs/specs/2026-04-20-mlx-lazy-load-proxy.md.
+       This plist runs the proxy; the proxy manages MLX generate's plist
+       on-demand. The underlying com.vcontext.mlx-generate plist should
+       remain `launchctl disable`d so watchdog and launchd don't fight
+       the idle-unload — the proxy is the single lifecycle authority. -->
+</dict>
+</plist>
